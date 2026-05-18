@@ -9,6 +9,7 @@
 
 typedef struct {
     uint32_t counter;
+    uint32_t step;       /* precomputed phase increment */
     uint16_t frequency;
     uint8_t  volume;
     uint8_t  key;

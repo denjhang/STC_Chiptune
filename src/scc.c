@@ -51,6 +51,12 @@ void scc_write(scc_state_t *s, uint8_t port, uint8_t data) {
                     s->ch[ch].frequency = (s->ch[ch].frequency & 0x00FF) | ((uint16_t)(data & 0x0F) << 8);
                 else
                     s->ch[ch].frequency = (s->ch[ch].frequency & 0x0F00) | data;
+                /* precompute step at write time, not at render time */
+                if (s->ch[ch].frequency > 8) {
+                    s->ch[ch].step = s->clock_factor / ((uint32_t)(s->ch[ch].frequency + 1) * s->rate);
+                } else {
+                    s->ch[ch].step = 0;
+                }
                 s->ch[ch].counter &= 0xFFFF0000u;
                 if (s->test & 0x20)
                     s->ch[ch].counter = 0xFFFFFFFF;
@@ -83,13 +89,10 @@ int8_t scc_render(scc_state_t *s) {
     uint8_t i;
     for (i = 0; i < SCC_CHANS; i++) {
         scc_channel_t *c = &s->ch[i];
-        if (c->frequency > 8) {
-            uint32_t step;
+        if (c->step) {
             uint32_t offs;
             int16_t smpl;
-            /* clock_factor / ((freq+1) * rate), all 32-bit */
-            step = s->clock_factor / ((uint32_t)(c->frequency + 1) * s->rate);
-            c->counter += step;
+            c->counter += c->step;
             if (c->key) {
                 offs = (c->counter >> SCC_FREQ_BITS) & 0x1F;
                 smpl = (int16_t)c->waveram[offs] * c->volume;

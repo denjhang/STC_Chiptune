@@ -1,20 +1,17 @@
 TARGET_EXEC := stc8prog
 BUILD_DIR := ./build
-SRC_DIRS := ./src
+SRC_DIRS := ./src ./src/serial/win32
 
 TARGET_OS :=
 ifeq ($(OS),Windows_NT)
 	TARGET_OS += win32
-	SRC_DIRS += ./src/serial/win32
 else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Linux)
 		TARGET_OS += Linux
-		SRC_DIRS += ./src/serial/linux
 	endif
 	ifeq ($(UNAME_S),Darwin)
 		TARGET_OS += Darwin
-		SRC_DIRS += ./src/serial/linux
 	endif
 endif
 

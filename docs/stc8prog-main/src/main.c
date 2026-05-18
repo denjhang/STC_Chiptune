@@ -19,11 +19,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <fcntl.h>
-#include <err.h>
 #include <getopt.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+/* err.h replacement for MSYS2/Windows */
+#define errx(eval, fmt, ...) do { fprintf(stderr, fmt "\n", ##__VA_ARGS__); exit(eval); } while(0)
+#define warnx(fmt, ...) do { fprintf(stderr, fmt "\n", ##__VA_ARGS__); } while(0)
 
 #define DEFAULTS_PORT                "/dev/ttyUSB0"
 #define DEFAULTS_SPEED               115200L
@@ -124,15 +126,16 @@ static int32_t invite_mcu(const uint32_t reset_time,
     {
         if (reset_cmd) {
             printf("Running reset command and waiting for MCU: ");
-            pid_t pid = fork();
-            if (pid < 0) {
-                perror("Could not create new process");
-                exit(1);
-            } else if (pid == 0) {
-                // Child process
-                if (execv(reset_cmd, reset_args) < 0) {
-                    perror("Could not execute reset command");
+            /* fork/exec not available on Windows, use system() */
+            {
+                char cmd[512] = {0};
+                int i = 0;
+                strcat(cmd, reset_cmd);
+                while (reset_args[i] && i < LEN_RESET_ARGS) {
+                    strcat(cmd, " ");
+                    strcat(cmd, reset_args[i++]);
                 }
+                system(cmd);
             }
         } else {
             printf("Waiting for MCU, please cycle power: ");
