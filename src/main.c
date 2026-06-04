@@ -63,13 +63,21 @@ void main(void) {
     while (1) {
         uint8_t i;
         uint8_t delay;
+        uint16_t r;
 
         P34 = 0;
 
         delay = note_delay[note_idx];
-        for (uint8_t r = 0; r < 16; r++) {
+        for (r = 0; r < 500; r++) {
+            uint8_t vol;
+            /* volume: 16..1 over 500 repeats, decay every ~8 repeats */
+            vol = 17 - (uint8_t)(r / 30);
+            if (vol > 16) vol = 16;
+            if (vol < 1) vol = 1;
+
             for (i = 0; i < SINE_LEN; i++) {
-                PWMA_CCR1L = sine_table[i];
+                uint16_t tmp = (uint16_t)sine_table[i] * vol;
+                PWMA_CCR1L = (uint8_t)(tmp >> 4);
                 { volatile uint16_t d; for (d = 0; d < delay; d++); }
             }
         }
