@@ -2,7 +2,9 @@
 
 ## 项目目标
 
-基于 STC8H8K64U（DIP-40, 1T 8051）开发复古芯片合成器，接收串口寄存器数据 → SCC 音频仿真 → PWM 音频输出。
+基于 STC8H8K64U（DIP-40, 1T 8051）开发复古芯片合成器，通过 TTL 串口接收寄存器数据 → SCC 音频仿真 → PWM 音频输出。
+
+> **通信方案：TTL 串口（UART）**。STC8H 没有出厂 USB CDC bootloader，自己写 USB bootloader 太复杂，放弃 USB CDC，回归最经典的 TTL 串口方案。通过 USB-TTL 模块（CH340/CP2102/FT232）连接 PC。
 
 ---
 
@@ -26,10 +28,9 @@
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | Timer 切音符 | Timer3 ISR 动态切换 PWM 频率（当前用 main loop 切） | 待修复 |
-| UART 驱动 | 串口接收 SCC 寄存器数据 | 待开发 |
+| UART 驱动 | TTL 串口接收 SCC 寄存器数据（USB-TTL 模块） | 待开发 |
 | SCC 集成 | SCC 仿真器 + UART + PWM 音频输出完整集成 | 待开发 |
 | WAV 播放 | 参考 demo 80 用 PWMB/PWMA 播放 WAV 采样 | 可选 |
-| USB CDC | 虚拟串口（复杂，可后置） | 延后 |
 
 ---
 
