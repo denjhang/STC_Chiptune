@@ -1,32 +1,36 @@
 #include "fw_hal.h"
 
 #define MELODY_LEN 42
+#define SINE_LEN   32
 
 /*
- * Twinkle Twinkle Little Star - PWMA on P2.0
- * Fpwm = 11059200 / 24 / (period+1)
- * G4=392->1176, A4=440->1047, B4=494->933
- * E4=330->1396, D4=294->1567, C4=262->1759
- * No timer ISR - switch notes in main loop with LED blink
+ * Sine waveform - high carrier PWM duty modulation
+ * Carrier = 11059200 / 1 / 64 = 172.8kHz (ultrasonic, no noise)
+ * 32-point sine table, duty 0~63
+ * Audio freq = carrier_steps_per_sec / 32
+ * Each main loop step: write duty + ~50us delay
+ * 32 steps * 50us = 1.6ms per sine cycle = 625Hz base
  */
-static uint16_t __code melody[MELODY_LEN] = {
-    1176,1176,1047,1047,933,933,1047,
-    1176,1176,1396,1396,1567,1567,1759,
-    1176,1176,1047,1047,1396,1396,1567,
-    1176,1176,1047,1396,1567,1567,1759,1759,
-    1176,1176,1047,1047,933,933,1047,
-    1176,1176,1396,1396,1567,1567,1759,
+
+/* Sine table: duty values 0~63, midpoint=32 */
+static uint8_t __code sine_table[SINE_LEN] = {
+    32,36,40,44,47,50,53,55,
+    56,55,53,50,47,44,40,36,
+    32,28,24,20,17,14,11, 9,
+     8, 9,11,14,17,20,24,28
+};
+
+/* Step delay per note (lower = higher pitch) */
+static uint8_t __code note_delay[MELODY_LEN] = {
+    60,60,53,53,47,47,53,
+    60,60,42,42,37,37,33,
+    60,60,53,53,42,42,37,
+    60,60,53,42,37,37,33,33,
+    60,60,53,53,47,47,53,
+    60,60,42,42,37,37,33,
 };
 
 static uint8_t __xdata note_idx;
-static uint16_t __xdata period;
-
-static void set_note(uint16_t per) {
-    PWMA_ARRH = (uint8_t)(per >> 8);
-    PWMA_ARRL = (uint8_t)(per);
-    PWMA_CCR1H = (uint8_t)((per / 2) >> 8);
-    PWMA_CCR1L = (uint8_t)(per / 2);
-}
 
 void main(void) {
     GPIO_P3_SetMode(GPIO_Pin_4, GPIO_Mode_Output_PP);
@@ -35,20 +39,21 @@ void main(void) {
 
     P_SW2 |= 0x80;
 
-    /* PWMA init */
-    PWMA_ENO = 0x00;
+    /* PWMA: period=64, prescaler=0 -> carrier=172.8kHz (ultrasonic) */
+    PWMA_ENO  = 0x00;
     PWMA_CCER1 = 0x00;
     PWMA_CCER2 = 0x00;
     PWMA_CCMR1 = 0x68;
     PWMA_CCER1 = 0x05;
 
+    PWMA_ARRH = 0;
+    PWMA_ARRL = 63;     /* period=64 */
+    PWMA_CCR1H = 0;
+    PWMA_CCR1L = 32;    /* 50% start */
     PWMA_PSCRH = 0;
-    PWMA_PSCRL = 23;
-    PWMA_PS = (PWMA_PS & ~0x03) | 0x01;
+    PWMA_PSCRL = 0;     /* no prescaler, max carrier */
 
-    period = melody[0];
-    set_note(period);
-
+    PWMA_PS = (PWMA_PS & ~0x03) | 0x01;  /* P2.0 */
     PWMA_ENO = 0x01;
     PWMA_BKR = 0x80;
     PWMA_CR1 = 0x01;
@@ -56,15 +61,23 @@ void main(void) {
     EA = 1;
 
     while (1) {
-        P34 = 0;
-        { volatile uint32_t i; for (i = 0; i < 30000UL; i++); }
-        P34 = 1;
-        { volatile uint32_t i; for (i = 0; i < 30000UL; i++); }
+        uint8_t i;
+        uint8_t delay;
 
-        /* Switch note every LED blink (~1s) */
+        P34 = 0;
+
+        delay = note_delay[note_idx];
+        for (uint8_t r = 0; r < 16; r++) {
+            for (i = 0; i < SINE_LEN; i++) {
+                PWMA_CCR1L = sine_table[i];
+                { volatile uint16_t d; for (d = 0; d < delay; d++); }
+            }
+        }
+
+        P34 = 1;
+        { volatile uint32_t w; for (w = 0; w < 15000UL; w++); }
+
         note_idx++;
         if (note_idx >= MELODY_LEN) note_idx = 0;
-        period = melody[note_idx];
-        set_note(period);
     }
 }
