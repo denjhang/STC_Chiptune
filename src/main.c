@@ -4,20 +4,18 @@
 #define SINE_LEN   32
 
 /*
- * Sine waveform - high carrier PWM duty modulation
- * Carrier = 11059200 / 1 / 64 = 172.8kHz (ultrasonic, no noise)
- * 32-point sine table, duty 0~63
- * Audio freq = carrier_steps_per_sec / 32
- * Each main loop step: write duty + ~50us delay
- * 32 steps * 50us = 1.6ms per sine cycle = 625Hz base
+ * Sine waveform - 8-bit PWM DAC with volume envelope
+ * Carrier = 11059200 / 1 / 256 = 43.2kHz (ultrasonic)
+ * 8-bit duty resolution avoids quantization noise at low volume
+ * 32-point sine table, duty 0~255
  */
 
-/* Sine table: duty values 0~63, midpoint=32 */
+/* Sine table: 8-bit duty values 0~255, midpoint=128 */
 static uint8_t __code sine_table[SINE_LEN] = {
-    32,36,40,44,47,50,53,55,
-    56,55,53,50,47,44,40,36,
-    32,28,24,20,17,14,11, 9,
-     8, 9,11,14,17,20,24,28
+    128,144,160,176,188,200,212,220,
+    224,220,212,200,188,176,160,144,
+    128,112, 96, 80, 68, 56, 44, 36,
+     32, 36, 44, 56, 68, 80, 96,112
 };
 
 /* Step delay per note (lower = higher pitch) */
@@ -39,7 +37,7 @@ void main(void) {
 
     P_SW2 |= 0x80;
 
-    /* PWMA: period=64, prescaler=0 -> carrier=172.8kHz (ultrasonic) */
+    /* PWMA: period=256, prescaler=0 -> carrier=43.2kHz (ultrasonic, 8-bit) */
     PWMA_ENO  = 0x00;
     PWMA_CCER1 = 0x00;
     PWMA_CCER2 = 0x00;
@@ -47,11 +45,11 @@ void main(void) {
     PWMA_CCER1 = 0x05;
 
     PWMA_ARRH = 0;
-    PWMA_ARRL = 63;     /* period=64 */
+    PWMA_ARRL = 255;    /* period=256, 8-bit resolution */
     PWMA_CCR1H = 0;
-    PWMA_CCR1L = 32;    /* 50% start */
+    PWMA_CCR1L = 128;   /* 50% start */
     PWMA_PSCRH = 0;
-    PWMA_PSCRL = 0;     /* no prescaler, max carrier */
+    PWMA_PSCRL = 0;
 
     PWMA_PS = (PWMA_PS & ~0x03) | 0x01;  /* P2.0 */
     PWMA_ENO = 0x01;
@@ -70,12 +68,13 @@ void main(void) {
         delay = note_delay[note_idx];
         for (r = 0; r < 500; r++) {
             uint8_t vol;
-            /* volume: 16..1 over 500 repeats, decay every ~8 repeats */
+            /* volume: 16..1 over 500 repeats */
             vol = 17 - (uint8_t)(r / 30);
             if (vol > 16) vol = 16;
             if (vol < 1) vol = 1;
 
             for (i = 0; i < SINE_LEN; i++) {
+                /* 8-bit * 4-bit -> scale to 0~255, HW MUL */
                 uint16_t tmp = (uint16_t)sine_table[i] * vol;
                 PWMA_CCR1L = (uint8_t)(tmp >> 4);
                 { volatile uint16_t d; for (d = 0; d < delay; d++); }
