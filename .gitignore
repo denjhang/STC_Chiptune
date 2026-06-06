@@ -4,3 +4,13 @@
 .vscode/launch.json
 .vscode/ipch
 *.hex
+# Keil C251 build artifacts
+*.OBJ
+*.OBJ
+*.LST
+*.I
+*.M51
+*.MAP
+*.CRF
+*.hex
+example/
