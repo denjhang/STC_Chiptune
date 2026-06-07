@@ -57,3 +57,8 @@ Set-Location 'D:\working\vscode-projects\STC_Chiptune\STC8H8K64'; Remove-Item 's
 | 变量声明位置报错 | Keil C51 用 C89 标准 | 变量必须在函数体顶部声明 |
 | P_SW2=0x80 导致 Timer 不触发 | XFR 映射影响 | PWM 相关操作临时开关 P_SW2，不要保持 |
 | `using 1` 寄存器组兼容问题 | 官方 demo 不用 | 不使用 `using` 关键字 |
+| **`data` 是保留关键字** | C51 memory type (`data`/`idata`/`xdata`/`pdata`/`code`) | 变量名不能用 `data`，用 `dat` 替代 |
+| **`s8` 类型转换 `(s8)x` 不可用** | C51 不支持 typedef 别名做 cast | 用 `signed char` 显式写，或避免有符号转换 |
+| **struct 内不能有 xdata 数组** | `scc_channel_t { xdata s8 waveram[32]; }` 报错 | struct 改用平坦 xdata 全局变量 |
+| **函数名 C51 加 `_` 前缀** | `scc_write()` 编译为 `_scc_write`，调用处也加前缀 | 函数名不要和库函数冲突 |
+| **case 内不能声明变量** | C89 限制 | 变量声明在函数/块顶部 |
