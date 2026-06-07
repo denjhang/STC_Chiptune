@@ -129,7 +129,7 @@ u8 scc_render(void) {
         if (step > 0) {
             scc_cnt[i] += step;
             if (scc_key[i]) {
-                offs = (u8)(scc_cnt[i] >> 12) & 0x1F;
+                offs = (u8)(scc_cnt[i] >> 16) & 0x1F;
                 vol = scc_vol[i];
                 b = scc_wav[i][offs];
                 if (b >= 128)
