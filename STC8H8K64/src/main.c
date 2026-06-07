@@ -6,17 +6,14 @@
  * Timer0 ISR: 16kHz 采样率, scc_render() → PWM1_CCR1L
  * Timer1:     UART1 波特率 230400
  *
- * 协议: Python 端分批灌入 VGM 原始字节流 (跳过 header)
- * 固件自行解析 VGM 命令:
- *   0xD2 [port][reg][data] → SCC 写入
- *   0xA0 [reg][data]       → AY8910 (预留)
- *   0x61 [lo][hi]          → wait N samples
- *   0x62                  → wait 735 samples (60Hz frame)
- *   0x63                  → wait 882 samples (50Hz frame)
- *   0x70-0x7F             → wait (n&0xF)+1 samples
- *   0x66                  → end of data
+ * 协议: Python 控制节拍, 固件只做 SCC 写入
+ *   [0xD2][port][reg][data] → SCC (4 字节, 波形/频率/音量/keyon)
+ *   [0xA0][reg][data]       → AY8910 (预留)
+ *   其他字节: 忽略
  *
- * 参考 RPFM vgm_player.h + protocol.h
+ * 频率写入后实时计算 step:
+ *   step = (SCC_CLOCK/2) << (FREQ_BITS+1) / ((freq+1) * SAMPLE_RATE)
+ *   u32 除法, Keil C51 自动调用库函数, 只在频率写入时计算
  */
 
 #include "stc8h.h"
@@ -29,7 +26,38 @@
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
 #define SCC_FREQ_BITS    16
-#define SCC_CLOCK       3579545L  /* MSX SCC clock */
+#define SCC_CLOCK       3579545L
+
+/* step 公式常量: (clock/2) << (FREQ_BITS+1) = 1789772 * 131072 = 溢出 u32
+ * 拆成两步: step = (1789772UL / (freq+1)) * 131072UL / SAMPLE_RATE
+ * 或: step = 1789772UL * 131072UL / ((u32)(freq+1) * SAMPLE_RATE)
+ * Keil C51 u32*u32 会溢出, 所以用 (1789772UL / (freq+1)) 先除
+ * 但 1789772 / (freq+1) 精度不够 (小数部分丢失)
+ *
+ * Okazaki 方案: base_incr = clk * (1<<GETA_BITS) / rate
+ *              incr = base_incr / (freq+1)
+ * 用 GETA_BITS=22: base_incr = 3579545 * 4194304 / 16000 = 93850680(溢出 u32!)
+ *
+ * 解决: 降低 GETA_BITS 使 base_incr 不溢出
+ * base_incr = clk * (1<<N) / rate <= 0xFFFFFFFF
+ * 3579545 * (1<<N) / 16000 <= 4294967295
+ * 3579545 / 16000 = 223.7
+ * (1<<N) <= 4294967295 / 223.7 = 19192833
+ * N <= 24 (2^24 = 16777216 < 19192833)
+ *
+ * 用 N=20: base_incr = 3579545 * 1048576 / 16000 = 233947 (u16 够!)
+ * 但 freq=100: incr = 233947 / 101 = 2316 -> step=2316, FREQ_BITS=20 -> offs = cnt>>20 & 0x1F
+ * 等效波形步进: 2316/1048576 = 0.002209
+ * 对比 RPFM: 145166/65536 = 2.215 (差 1000 倍因为 FREQ_BITS 差 4)
+ *
+ * 不管 FREQ_BITS 多少, 等效波形步进 = step / (1<<FREQ_BITS)
+ * 只要不溢出就行. 用 u32 step + FREQ_BITS=16 最简单.
+ * step 最大值: 1789772*131072/16000 = 14657932 (fit u32!)
+ */
+
+/* 预计算常量: 1789772UL, 在 scc_wr 频率写入时用 */
+#define SCC_HALF_CLK    1789772UL
+#define SCC_SHIFT       (SCC_FREQ_BITS + 1)  /* 17 */
 
 typedef unsigned char   u8;
 typedef unsigned int    u16;
@@ -40,14 +68,14 @@ typedef signed int      s16;
 /* ========== SCC 状态 (平坦 xdata) ========== */
 static u32 xdata scc_cnt[SCC_CHANS];
 static u16 xdata scc_freq[SCC_CHANS];
+static u32 xdata scc_step_val[SCC_CHANS];
 static u8  xdata scc_vol[SCC_CHANS];
 static u8  xdata scc_key[SCC_CHANS];
-static u16 xdata scc_step[SCC_CHANS];
 static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
 static u8  xdata scc_creg;
 static u8  xdata scc_tst;
 
-/* ========== 16kHz 精确 tick (Timer0 ISR 递增) ========== */
+/* ========== 16kHz tick (Timer0 ISR) ========== */
 volatile u16 sample_tick;
 
 /* ========== SCC 初始化 ========== */
@@ -56,6 +84,7 @@ void scc_init_func(void) {
     for (i = 0; i < SCC_CHANS; i++) {
         scc_cnt[i] = 0;
         scc_freq[i] = 0;
+        scc_step_val[i] = 0;
         scc_vol[i] = 0;
         scc_key[i] = 0;
         for (j = 0; j < SCC_WAVELEN; j++)
@@ -89,10 +118,23 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
-                /* step = (SCC_CLOCK << SCC_FREQ_BITS) / ((freq+1) * SAMPLE_RATE)
-                   = (3579545 * 65536) / ((freq+1) * 16000)
-                   预计算 base = 3579545 * 65536 / 16000 = 14657952 */
-                scc_step[chi] = (u16)(14657952UL / ((u32)scc_freq[chi] + 1));
+                /* 实时计算 step (u32 除法, 只在频率写入时执行)
+                 * step = SCC_HALF_CLK << SCC_SHIFT / ((freq+1) * SAMPLE_RATE)
+                 * 但 SCC_HALF_CLK << 17 = 1789772 * 131072 = 溢出 u32
+                 * 改用: step = SCC_HALF_CLK / (freq+1) * (1<<SCC_SHIFT) / SAMPLE_RATE
+                 * 精度损失可接受 (误差 < 1/SAMPLE_RATE)
+                 */
+                {
+                    u32 f = (u32)scc_freq[chi] + 1;
+                    u32 step;
+                    if (f < 9) {
+                        step = 0;
+                    } else {
+                        step = SCC_HALF_CLK / f;
+                        step = step * (1UL << SCC_SHIFT) / SAMPLE_RATE;
+                    }
+                    scc_step_val[chi] = step;
+                }
             }
             break;
         case 2:
@@ -116,20 +158,23 @@ void scc_wr(u8 port, u8 dat) {
 }
 
 /* ========== SCC 渲染 ========== */
+/*
+ * counter += step[u32]; offs = (counter >> FREQ_BITS) & 0x1F
+ * step 范围: freq=100->step~145000, freq=4095->step~3579
+ */
+
 u8 scc_render(void) {
     s16 mix;
     u8 i;
-    u16 step;
     u8 vol, offs, b;
     s16 tmp;
 
     mix = 0;
     for (i = 0; i < SCC_CHANS; i++) {
-        step = scc_step[i];
-        if (step > 0) {
-            scc_cnt[i] += step;
+        if (scc_step_val[i] > 0) {
+            scc_cnt[i] += scc_step_val[i];
             if (scc_key[i]) {
-                offs = (u8)(scc_cnt[i] >> 16) & 0x1F;
+                offs = (u8)(scc_cnt[i] >> SCC_FREQ_BITS) & 0x1F;
                 vol = scc_vol[i];
                 b = scc_wav[i][offs];
                 if (b >= 128)
@@ -242,15 +287,12 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== UART → SCC (Python 控制节拍, 固件只做 SCC 写入) ========== */
+/* ========== UART → SCC ========== */
 /*
- * Python 端解析 VGM, 遇到 SCC/AY 命令发串口, 遇到 wait 用 sleep()
- * 固件收到后立即执行, 不做任何 wait 解析
- *
- * 格式:
- *   [0xD2][port][reg][data] → SCC (4 字节)
- *   [0xA0][reg][data]       → AY8910 (预留, 3 字节)
- *   其他字节: 忽略 (wait 等)
+ * Python 控制节拍, 固件只做 SCC 写入:
+ *   [0xD2][port][reg][data] → SCC (4 字节, 波形/频率/音量/keyon)
+ *   [0xA0][reg][data]       → AY8910 (预留)
+ *   其他: 忽略
  */
 
 void process_uart(void) {
@@ -261,7 +303,6 @@ void process_uart(void) {
         if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
         if (b == 0xD2) {
-            /* SCC: [0xD2][port][reg][data] → scc_wr(port<<1, reg) + scc_wr(port<<1|1, data) */
             if (TX1_Cnt == RX1_Cnt) break;
             p = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -275,19 +316,18 @@ void process_uart(void) {
             scc_wr(((p & 0x7F) << 1) | 1, d);
 
         } else if (b == 0xA0) {
-            /* AY8910: [0xA0][reg][data] (预留, 跳过) */
             if (TX1_Cnt == RX1_Cnt) break;
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (TX1_Cnt == RX1_Cnt) break;
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
         } else {
-            /* 其他字节 (wait, 未知命令): 忽略, Python 端处理 wait */
+            /* 忽略: wait, 未知命令等 */
         }
     }
 }
 
-/* ========== 开机音: C4 → G4 两个音各响一次后停止 ========== */
+/* ========== 开机音: C4 → G4 ========== */
 #define BOOT_NOTE_TICKS 3000
 #define BOOT_DECAY_EVERY 150
 #define LED_EVERY    100
@@ -313,8 +353,10 @@ void test_start(void) {
     test_dec_cnt = 0;
     test_active = 1;
 
+    /* C4: freq=1000
+     * step = 1789772 / 1001 * 131072 / 16000 = 1785 * 131072 / 16000 = 14632 */
     scc_freq[0] = 1000;
-    scc_step[0] = (u16)(14657952UL / ((u32)1000 + 1));
+    scc_step_val[0] = (1789772UL / 1001UL) * 131072UL / 16000UL;
     scc_cnt[0] = 0;
     scc_vol[0] = 15;
     scc_key[0] = 1;
@@ -327,8 +369,10 @@ void test_tick(void) {
     test_dec_cnt++;
 
     if (test_cnt == BOOT_NOTE_TICKS) {
+        /* G4: freq=1587
+         * step = 1789772 / 1588 * 131072 / 16000 = 1127 * 131072 / 16000 = 9236 */
         scc_freq[0] = 1587;
-        scc_step[0] = (u16)(14657952UL / ((u32)1587 + 1));
+        scc_step_val[0] = (1789772UL / 1588UL) * 131072UL / 16000UL;
         scc_cnt[0] = 0;
         scc_vol[0] = 15;
     }
@@ -378,9 +422,7 @@ void main(void) {
     led_tick = 0;
 
     while (1) {
-        if (test_active) {
-            test_tick();
-        }
+        if (test_active) test_tick();
         led_tick_update();
         process_uart();
         delay(1);

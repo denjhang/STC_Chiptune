@@ -154,7 +154,7 @@ for _i in range(0xF0, 0x100): VGM_CMD_LEN[_i] = 5
 def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     """
     Python 控制节拍:
-    - SCC (0xD2): 直接发 [0xD2][port][reg][data]
+    - SCC (0xD2): 直接发 [0xD2][port][reg][data], 固件查表算 step
     - AY  (0xA0): 发 [0xA0][reg][data]
     - wait: time.sleep() 精确等待
     - 其他: 跳过
