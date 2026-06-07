@@ -237,27 +237,41 @@ void process_uart(void) {
     }
 }
 
-/* ========== 测试: ch0 播放 sine ========== */
+/* ========== 测试: 2 音交替 (C4/G4) ========== */
+u16 code twn_freq[] = { 1000, 1587, 1000, 1587, 1000, 1587, 1000, 1587 };
+#define TWN_LEN 8
+
 void test_play(void) {
-    u8 i;
+    u8 i, t;
     u8 code st[] = {
          0, 12, 25, 37, 49, 60, 71, 81,
         90, 98,105,111,115,118,120,127,
         127,120,118,115,111,105, 98, 90,
         81, 71, 60, 49, 37, 25, 12,  0
     };
-    /* 写 32 点 sine 波形到 ch0 (存为 u8, 0~127=正, 128~255=负) */
     for (i = 0; i < 32; i++)
-        scc_wav[0][i] = st[i];  /* 0~127, 直接存 */
+        scc_wav[0][i] = st[i];
 
-    /* freq ch0 = 1000 (约 C4) */
-    scc_freq[0] = 1000;
-    scc_step[0] = (u16)(11568768UL / ((u32)1000 + 1));
-    /* vol ch0 = 15 */
     scc_vol[0] = 15;
-    /* key on ch0 */
-    scc_key[0] = 1;
+
+    while (1) {
+        for (i = 0; i < TWN_LEN; i++) {
+            scc_freq[0] = twn_freq[i];
+            scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[i] + 1));
+            scc_vol[0] = 15;
+            scc_key[0] = 1;
+
+            for (t = 0; t < 200; t++) {
+                if (scc_vol[0] > 0 && (t & 3))
+                    scc_vol[0]--;
+                delay(2);
+            }
+            P0 = led_val;
+            led_val = _crol_(led_val, 1);
+            }
+        }
 }
+
 
 /* ========== 主 ========== */
 void main(void) {
@@ -279,11 +293,4 @@ void main(void) {
     PrintString1("STC8H SCC Synth\r\n");
 
     test_play();
-
-    while (1) {
-        process_uart();
-        P0 = led_val;
-        led_val = _crol_(led_val, 1);
-        delay(50);
-    }
 }
