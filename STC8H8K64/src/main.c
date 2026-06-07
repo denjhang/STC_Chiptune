@@ -28,6 +28,8 @@
 #define SAMPLE_RATE     16000
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
+#define SCC_FREQ_BITS    16
+#define SCC_CLOCK       3579545L  /* MSX SCC clock */
 
 typedef unsigned char   u8;
 typedef unsigned int    u16;
@@ -87,7 +89,10 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
-                scc_step[chi] = (u16)(11568768UL / ((u32)scc_freq[chi] + 1));
+                /* step = (SCC_CLOCK << SCC_FREQ_BITS) / ((freq+1) * SAMPLE_RATE)
+                   = (3579545 * 65536) / ((freq+1) * 16000)
+                   预计算 base = 3579545 * 65536 / 16000 = 14657952 */
+                scc_step[chi] = (u16)(14657952UL / ((u32)scc_freq[chi] + 1));
             }
             break;
         case 2:
@@ -309,7 +314,7 @@ void test_start(void) {
     test_active = 1;
 
     scc_freq[0] = 1000;
-    scc_step[0] = (u16)(11568768UL / ((u32)1000 + 1));
+    scc_step[0] = (u16)(14657952UL / ((u32)1000 + 1));
     scc_cnt[0] = 0;
     scc_vol[0] = 15;
     scc_key[0] = 1;
@@ -323,7 +328,7 @@ void test_tick(void) {
 
     if (test_cnt == BOOT_NOTE_TICKS) {
         scc_freq[0] = 1587;
-        scc_step[0] = (u16)(11568768UL / ((u32)1587 + 1));
+        scc_step[0] = (u16)(14657952UL / ((u32)1587 + 1));
         scc_cnt[0] = 0;
         scc_vol[0] = 15;
     }
