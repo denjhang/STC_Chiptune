@@ -192,7 +192,7 @@ void play_music(void) {
 
         if (freq_reload) {
             pwma_timer_start(freq_reload);
-            pwm_range = 255;
+            pwm_range = 128;             /* 音量减半 */
             cur_freq = MAIN_Fosc / 2 / freq_reload;
         } else {
             P_SW2 |= 0x80;
@@ -201,12 +201,13 @@ void play_music(void) {
             pwma_timer_start(0);
         }
 
-        /* 音符时长 + 慢衰减 */
+        /* 音符时长 + 慢衰减 (每 2 tick 减 1) */
         {
             u16 sleep = twinkle[play_count + 1];
             while (sleep--) {
-                if (pwm_range) pwm_range -= 1;
-                delay(1);
+                if (pwm_range && (sleep & 0x01))
+                    pwm_range -= 1;
+                delay(2);
             }
         }
 
