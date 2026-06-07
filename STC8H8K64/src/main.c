@@ -1,6 +1,10 @@
 /*
  * STC8H8K64U 开发板综合 Demo
  * Keil C51 + stc8h.h, 22.1184MHz
+ *
+ * Timer0: 蜂鸣器方波（P1.6 toggle）
+ * Timer1: UART1 波特率
+ * main loop: 数码管扫描 + LED 流水 + RGB 变色 + UART echo
  */
 
 #include "stc8h.h"
@@ -35,22 +39,61 @@ u16 code twinkle_freq[] = {
 };
 #define NOTE_LEN 32
 
-/* ========== LED/RGB 状态（全局，持续） ========== */
+/* ========== LED/RGB ========== */
 u8  led_val = 0xFE;
 u8  rgb_idx = 0;
-u16 led_timer = 0;
-u16 rgb_timer = 0;
+bit buzzer_on;
 
-/* ========== volatile 防 Keil 优化空循环 ========== */
-volatile u16 vdelay;
+/* ========== volatile 延时 ========== */
+volatile u16 vd;
+
+/* ========== 延时 ========== */
+void delay(u16 i) {
+    u16 j, k;
+    for (j = 0; j < 500; j++)
+        for (k = 0; k < i; k++);
+}
+
+/* ========== Timer0: 蜂鸣器方波 ========== */
+void timer0_init(void) {
+    /* Timer0 16-bit auto-reload, 1T mode */
+    AUXR |= 0x80;       /* Timer0 1T mode */
+    TMOD &= 0xF0;       /* Timer0 mode 0 (16-bit auto) */
+    ET0 = 1;             /* enable Timer0 interrupt */
+}
+
+/* 设置蜂鸣器频率：重装 Timer0 */
+void buzzer_set_freq(u16 freq) {
+    u32 reload;
+    if (freq == 0) {
+        TR0 = 0;         /* 停止 Timer0 = 停止发声 */
+        P16 = 0;
+        buzzer_on = 0;
+        return;
+    }
+    /* 每 half 周期 toggle 一次：reload = Fosc / 2 / freq
+     * 但 Timer0 中断里只做一次 toggle，所以 reload = Fosc / 2 / freq
+     * reload = 22118400 / 2 / 262 = 42222
+     */
+    reload = MAIN_Fosc / 2 / freq;
+    if (reload > 65535) reload = 65535;
+    TH0 = (u8)(reload >> 8);
+    TL0 = (u8)(reload & 0xFF);
+    TR0 = 1;
+    buzzer_on = 1;
+}
+
+void timer0_isr(void) interrupt 1 {
+    P16 = !P16;          /* toggle 蜂鸣器 */
+}
 
 /* ========== UART ========== */
 void UART1_config(void) {
     TR1 = 0;
     AUXR &= ~0x01;
-    AUXR |=  (1<<6);
-    TMOD &= ~(1<<6);
-    TMOD &= ~0x30;
+    AUXR |=  (1<<6);     /* Timer1 1T */
+    TMOD &= ~(1<<6);      /* Timer1 as Timer */
+    TMOD &= ~0x30;        /* Timer1 16-bit */
     TH1 = (u8)((65536UL - (MAIN_Fosc / 4) / Baudrate1) / 256);
     TL1 = (u8)((65536UL - (MAIN_Fosc / 4) / Baudrate1) % 256);
     ET1 = 0;
@@ -78,77 +121,23 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== 数码管扫描一位 ========== */
-void digit_scan(void) {
+/* ========== 数码管 ========== */
+void display(u16 freq) {
     u8 d;
     switch (digit_pos) {
-        case 0: d = cur_freq / 1000;       P2 = table[d]; P41 = 0; vdelay = 120; while(vdelay--); P41 = 1; break;
-        case 1: d = (cur_freq / 100) % 10; P2 = table[d]; P42 = 0; vdelay = 120; while(vdelay--); P42 = 1; break;
-        case 2: d = (cur_freq / 10) % 10;  P2 = table[d]; P44 = 0; vdelay = 120; while(vdelay--); P44 = 1; break;
-        case 3: d = cur_freq % 10;         P2 = table[d]; P45 = 0; vdelay = 120; while(vdelay--); P45 = 1; break;
+        case 0: d = freq / 1000;           P2 = table[d]; P41 = 0; vd = 300; while(vd--); P41 = 1; break;
+        case 1: d = (freq / 100) % 10;     P2 = table[d]; P42 = 0; vd = 300; while(vd--); P42 = 1; break;
+        case 2: d = (freq / 10) % 10;      P2 = table[d]; P44 = 0; vd = 300; while(vd--); P44 = 1; break;
+        case 3: d = freq % 10;             P2 = table[d]; P45 = 0; vd = 300; while(vd--); P45 = 1; break;
     }
     digit_pos++;
     if (digit_pos >= 4) digit_pos = 0;
 }
 
-/* ========== LED + RGB 更新 ========== */
-void led_rgb_update(void) {
-    led_timer++;
-    if (led_timer >= 300) {
-        led_timer = 0;
-        P0 = led_val;
-        led_val = _crol_(led_val, 1);
-    }
-    rgb_timer++;
-    if (rgb_timer >= 600) {
-        rgb_timer = 0;
-        P35 = rgb_idx & 0x01;
-        P36 = (rgb_idx >> 1) & 0x01;
-        P37 = (rgb_idx >> 2) & 0x01;
-        rgb_idx++;
-        if (rgb_idx >= 7) rgb_idx = 0;
-    }
-}
-
-/* ========== 蜂鸣器播放一个音符，同时扫描数码管+LED+RGB ========== */
-void buzzer_beep(u16 freq, u16 dur_ms) {
-    u16 i, j, d;
-    u32 total;
-
-    if (freq == 0) {
-        total = (u32)dur_ms * 1000;
-        while (total > 480) {
-            digit_scan();
-            digit_scan();
-            digit_scan();
-            digit_scan();
-            led_rgb_update();
-            total -= 480;
-        }
-        return;
-    }
-
-    d = MAIN_Fosc / 4 / freq;
-    total = (u32)dur_ms * freq / 1000;
-
-    for (i = 0; i < total; i++) {
-        P16 = 1;
-        for (j = 0; j < d; j++) {
-            digit_scan();
-            led_rgb_update();
-        }
-        P16 = 0;
-        for (j = 0; j < d; j++) {
-            digit_scan();
-            led_rgb_update();
-        }
-    }
-    P16 = 0;
-}
-
 /* ========== 主 ========== */
 void main(void) {
     u8 note_idx = 0;
+    u16 note_timer = 0;
 
     P0M0=0; P0M1=0;
     P1M0=0; P1M1=0;
@@ -160,21 +149,44 @@ void main(void) {
     P35 = 0; P36 = 0; P37 = 0;
     P16 = 0;
 
+    timer0_init();
+    buzzer_set_freq(cur_freq);
     UART1_config();
     EA = 1;
     PrintString1("STC8H Board Demo\r\n");
 
     while (1) {
-        cur_freq = twinkle_freq[note_idx];
-        buzzer_beep(cur_freq, 300);
+        /* 数码管持续扫描 */
+        display(cur_freq);
 
+        /* LED 流水 */
+        P0 = led_val;
+        led_val = _crol_(led_val, 1);
+        delay(100);
+
+        /* RGB 变色 */
+        P35 = rgb_idx & 0x01;
+        P36 = (rgb_idx >> 1) & 0x01;
+        P37 = (rgb_idx >> 2) & 0x01;
+        rgb_idx++;
+        if (rgb_idx >= 7) rgb_idx = 0;
+        delay(100);
+
+        /* 音符计时 */
+        note_timer++;
+        if (note_timer >= 8) {
+            note_timer = 0;
+            note_idx++;
+            if (note_idx >= NOTE_LEN) note_idx = 0;
+            cur_freq = twinkle_freq[note_idx];
+            buzzer_set_freq(cur_freq);
+        }
+
+        /* UART echo */
         if ((TX1_Cnt != RX1_Cnt) && (!B_TX1_Busy)) {
             SBUF = RX1_Buffer[TX1_Cnt];
             B_TX1_Busy = 1;
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
         }
-
-        note_idx++;
-        if (note_idx >= NOTE_LEN) note_idx = 0;
     }
 }
