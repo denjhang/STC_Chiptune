@@ -3,11 +3,9 @@
  * Keil C51 + stc8h.h, 45.1584MHz (IRC 超频)
  *
  * PWMA PWM1 → P2.0: 8-bit DAC 载波 (~176kHz)
- * Timer0 ISR: 8kHz 固定采样率, 相位累加器 + 查表写 DAC
+ * Timer0 ISR: 16kHz 固定采样率, 16-bit 相位累加 + 64点 sine 表
  * Timer1:     UART1 波特率 230400
  * main loop:  LED 流水 + 音乐播放 + UART echo
- *
- * 波形: 方波/正弦, 每 8 音符切换
  */
 
 #include "stc8h.h"
@@ -16,7 +14,7 @@
 #define MAIN_Fosc       45158400L
 #define Baudrate1       230400L
 #define UART1_BUF_LENGTH 64
-#define SAMPLE_RATE     8000
+#define SAMPLE_RATE     16000
 
 typedef unsigned char   u8;
 typedef unsigned int    u16;
@@ -27,7 +25,7 @@ u8  TX1_Cnt, RX1_Cnt;
 bit B_TX1_Busy;
 u8  xdata RX1_Buffer[UART1_BUF_LENGTH];
 
-/* ========== 波形表 (32点, 0~255) ========== */
+/* ========== 波形表 (64点, 0~255) ========== */
 #define WAVE_SQUARE     0
 #define WAVE_SINE       1
 
@@ -59,10 +57,8 @@ u16 code note_freq[] = {
 };
 #define NOTE_LEN 48
 
-/* 音符名: 0=休止, 1~7=音阶 */
 u8 code note_name[] = {0, 1,1,2,2,3,3,4, 0, 5,5,6,6,7,7,0, 1,1,2,2,3,3,4,4, 0, 5,5,6,6,7,7,0, 0xff};
 
-/* 小星星: [音符索引, 时基单位] */
 u8 code twinkle[] = {
      0,250,  0,250,  1,250,  1,250,  2,250,  2,250,  1,250,
      3,250,  3,250,  4,250,  4,250,  5,250,  5,250,  0,250,
@@ -77,19 +73,21 @@ u8 code twinkle[] = {
 u8  led_val = 0xFE;
 
 /* ========== 采样/波形状态 ========== */
-volatile u8 wave_type = WAVE_SINE;  /* 全 sine, 不切换 */
+volatile u8 wave_type = WAVE_SINE;
 u16 phase_acc = 0;
 u16 phase_step = 0;
 volatile u8 pwm_range = 128;
 static u8 play_count = 0;
 static u8 note_in_phrase = 0;
 
-/* 计算相位步进: 输出频率 = step * 8000 / 65536
-   step = freq * 65536 / 8000 = freq * 8
-   降 2 八度 = freq / 4, step = freq * 2 */
+/*
+ * 16-bit 相位累加, 高 6 位 → 64 点表索引
+ * step = freq * 65536 / SAMPLE_RATE = freq * 65536 / 16000 = freq * 4
+ * 降 1 八度: step = freq * 2
+ */
 u16 calc_step(u16 freq) {
     u32 tmp;
-    tmp = (u32)freq * 4UL;    /* freq/2 * 8 = freq*4, 降 1 八度 */
+    tmp = (u32)freq * 2UL;
     if (tmp > 65535UL) tmp = 65535UL;
     return (u16)tmp;
 }
@@ -111,38 +109,38 @@ void pwma_dac_init(void) {
     PWMA_ENO   = 0x00;
     PWMA_CCER1 = 0x00;
     PWMA_CCER2 = 0x00;
-    PWMA_CCMR1 = 0x68;           /* PWM 模式1, 预装载 */
-    PWMA_CCER1 = 0x05;           /* CH1+CH2 使能 */
+    PWMA_CCMR1 = 0x68;
+    PWMA_CCER1 = 0x05;
 
     PWMA_ARRH  = 0x00;
-    PWMA_ARRL  = 255;            /* period=256, 8-bit */
+    PWMA_ARRL  = 255;
     PWMA_CCR1H = 0x00;
-    PWMA_CCR1L = 128;            /* 50% 初始 */
+    PWMA_CCR1L = 128;
     PWMA_PSCRH = 0x00;
-    PWMA_PSCRL = 0x00;           /* prescaler=0, 载波 ~176kHz */
+    PWMA_PSCRL = 0x00;
 
-    PWMA_PS = (PWMA_PS & ~0x03) | 0x01;  /* P2.0 */
+    PWMA_PS = (PWMA_PS & ~0x03) | 0x01;
     PWMA_ENO = 0x01;
     PWMA_BKR = 0x80;
     PWMA_CR1 = 0x01;
 
-    P_SW2 &= ~0x80;             /* 关闭, ISR 里临时开 */
+    P_SW2 &= ~0x80;
 }
 
-/* ========== Timer0: 8kHz 固定采样率 ========== */
+/* ========== Timer0: 16kHz ========== */
 void timer0_init(void) {
     u32 reload;
     reload = MAIN_Fosc / SAMPLE_RATE;
     reload = 65536UL - reload;
-    AUXR |= 0x80;               /* Timer0 1T */
-    TMOD &= 0xF0;               /* 16-bit auto */
+    AUXR |= 0x80;
+    TMOD &= 0xF0;
     TH0 = (u8)(reload >> 8);
     TL0 = (u8)(reload & 0xFF);
     ET0 = 1;
     TR0 = 1;
 }
 
-/* Timer0 ISR: 相位累加 + 查表 + 写 DAC */
+/* Timer0 ISR: 16-bit 相位 + 64点查表 + 写 DAC */
 void timer0_isr(void) interrupt 1 {
     u16 acc;
     u8 idx, s;
@@ -152,15 +150,15 @@ void timer0_isr(void) interrupt 1 {
     idx = (u8)(acc >> 10);        /* 高 6 位 → 0~63 */
 
     if (wave_type == WAVE_SQUARE)
-        s = square_table[idx];
-    else
         s = sine_table[idx];
+    else
+        s = square_table[idx];
 
     P_SW2 |= 0x80;
     if (pwm_range == 0)
         PWM1_CCR1L = 128;
     else
-        PWM1_CCR1L = s;            /* 先不加音量, 直接输出 */
+        PWM1_CCR1L = s;
     P_SW2 &= ~0x80;
 }
 
@@ -205,23 +203,16 @@ void play_music(void) {
     while (play_count < NOTE_LEN) {
         ni = twinkle[play_count];
 
-        /* 波形不切换, 全 sine */
-        /*
-        if (note_in_phrase >= 8) {
-            note_in_phrase = 0;
-            wave_type = !wave_type;
-        }
-        */
-
         if (note_name[ni]) {
             phase_step = calc_step(note_freq[ni]);
+            phase_acc = 0;
             pwm_range = 255;
         } else {
             phase_step = 0;
+            phase_acc = 0;
             pwm_range = 0;
         }
 
-        /* 音符时长 */
         {
             u16 sleep = twinkle[play_count + 1];
             while (sleep--) {
