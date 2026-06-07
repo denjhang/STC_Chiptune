@@ -30,6 +30,7 @@ static u32 xdata scc_cnt[SCC_CHANS];
 static u16 xdata scc_freq[SCC_CHANS];
 static u8  xdata scc_vol[SCC_CHANS];
 static u8  xdata scc_key[SCC_CHANS];
+static u16 xdata scc_step[SCC_CHANS];
 static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
 static u8  xdata scc_creg;
 static u8  xdata scc_tst;
@@ -73,6 +74,7 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
+                scc_step[chi] = (u16)(11568768UL / ((u32)scc_freq[chi] + 1));
             }
             break;
         case 2:
@@ -99,16 +101,14 @@ void scc_wr(u8 port, u8 dat) {
 u8 scc_render(void) {
     s16 mix;
     u8 i;
-    u32 step;
-    u16 freq;
+    u16 step;
     u8 vol, offs, b;
     s16 tmp;
 
     mix = 0;
     for (i = 0; i < SCC_CHANS; i++) {
-        freq = scc_freq[i];
-        if (freq > 8) {
-            step = 11568768UL / ((u32)freq + 1);
+        step = scc_step[i];
+        if (step > 0) {
             scc_cnt[i] += step;
             if (scc_key[i]) {
                 offs = (u8)(scc_cnt[i] >> 12) & 0x1F;
@@ -252,6 +252,7 @@ void test_play(void) {
 
     /* freq ch0 = 1000 (约 C4) */
     scc_freq[0] = 1000;
+    scc_step[0] = (u16)(11568768UL / ((u32)1000 + 1));
     /* vol ch0 = 15 */
     scc_vol[0] = 15;
     /* key on ch0 */
