@@ -1,21 +1,20 @@
 /*
- * STC8H8K64U 开发板综合 Demo
- * Keil C51 + stc8h.h, 22.1184MHz
+ * STC8H8K64U 开发板 Demo
+ * Keil C51 + stc8h.h, 45.1584MHz (IRC 超频)
  *
- * PWMB CH3 → P0.2: 8-bit DAC 载波 (~43kHz), PWM DAC 音量控制
- * PWMA: 音频频率定时器, interrupt 26 翻转 DAC duty 产生方波
- * Timer2 ISR: 数码管动态扫描 (1ms/位)
- * Timer1:     UART1 波特率
- * main loop:  LED 流水(剔除P0.2) + RGB 变色 + 音乐播放 + UART echo
+ * PWMA PWM1 → P2.0: 8-bit DAC 载波 (~176kHz)
+ * PWMA interrupt 26: 音频频率定时器, ISR 查表写 duty (参考 buzzer_hx)
+ * Timer1:     UART1 波特率 230400
+ * main loop:  LED 流水 + 音乐播放 + UART echo
  *
- * 参考: buzzer_hx-master
+ * 波形: 方波/正弦, 每 8 音符切换
  */
 
 #include "stc8h.h"
 #include <intrins.H>
 
-#define MAIN_Fosc       22118400L
-#define Baudrate1       115200L
+#define MAIN_Fosc       45158400L
+#define Baudrate1       230400L
 #define UART1_BUF_LENGTH 64
 
 typedef unsigned char   u8;
@@ -27,12 +26,22 @@ u8  TX1_Cnt, RX1_Cnt;
 bit B_TX1_Busy;
 u8  xdata RX1_Buffer[UART1_BUF_LENGTH];
 
-/* ========== 数码管 ========== */
-u8 code table[] = {0xc0,0xf9,0xa4,0xb0,0x99,0x92,0x82,0xf8,0x80,0x90};
-u8 digit_pos = 0;
-u16 cur_freq = 262;
+/* ========== 波形表 (32点, 0~255) ========== */
+#define WAVE_SQUARE     0
+#define WAVE_SINE       1
 
-/* ========== 音乐音阶表 (reload值, 和 buzzer_hx 一致) ========== */
+u8 code square_table[] = {
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+u8 code sine_table[] = {
+    128,144,160,176,188,200,212,220,
+    224,220,212,200,188,176,160,144,
+    128,112, 96, 80, 68, 56, 44, 36,
+     32, 36, 44, 56, 68, 80, 96,112
+};
+
+/* ========== 音阶 reload 表 (跟 buzzer_hx 一致, 22MHz 基准) ========== */
 u16 code Musical_Scale[] = {
     42272,39898,37660,35546,33550,31668,29890,28212,26630,25134,23724,22392,
     21136,19950,18828,17772,16776,15834,14944,14106,13314,12568,11862,11196,
@@ -40,9 +49,7 @@ u16 code Musical_Scale[] = {
     0
 };
 
-/* 小星星: [音阶索引, 时基单位]
- * 每单位 = pwm_range -= 1 + delay(1) ≈ 几ms
- */
+/* 小星星: [音阶索引, 时基单位] */
 u8 code twinkle[] = {
     12,250, 12,250, 16,250, 16,250, 18,250, 18,250, 16,250,
     14,250, 14,250, 13,250, 13,250, 11,250, 11,250, 12,250,
@@ -53,14 +60,16 @@ u8 code twinkle[] = {
     0xff
 };
 
-/* ========== LED/RGB ========== */
+/* ========== LED ========== */
 u8  led_val = 0xFE;
-u8  rgb_idx = 0;
 
-/* ========== PWM DAC 音频 ========== */
-volatile u8 pwm_range = 0;       /* 0~255, DAC 音量 */
-bit out_z = 0;                   /* 方波正/负半周 */
+/* ========== 波形/PWM 状态 ========== */
+volatile u8 wave_type = WAVE_SINE;
+u16 phase_acc = 0;
+u16 phase_step = 0;
+volatile u8 pwm_range = 0;
 static u8 play_count = 0;
+static u8 note_in_phrase = 0;
 
 /* ========== volatile 延时 ========== */
 volatile u16 vd;
@@ -72,79 +81,68 @@ void delay(u16 i) {
         for (k = 0; k < i; k++);
 }
 
-/* ========== PWMB (PWM2) CH7 → P0.2: 8-bit DAC 载波 ========== */
-void pwmb_dac_init(void) {
+/* ========== PWMA PWM1 → P2.0: 8-bit DAC 载波 ========== */
+void pwma_dac_init(void) {
     P_SW2 |= 0x80;
-    PWMB_PS    = 0x20;           /* C5PS=10 → CH7 → P0.2 */
-    PWMB_ENO   = 0x10;           /* ENO3 = 1 (bit4 = CH7/8 的低通道) */
-    PWMB_CCER2 = 0x00;
-    PWMB_CCMR3 = 0x60;           /* PWM 模式1 */
-    PWMB_CCER2 = 0x01;           /* CC3E = 1 */
-    PWM2_CCR3H = 0;
-    PWM2_CCR3L = 0;             /* 初始静音 */
-    PWM2_ARRH  = 0x01;          /* ARR = 256 → 8-bit DAC */
-    PWM2_ARRL  = 0x00;
-    PWMB_BKR   = 0x80;
-    PWMB_CR1   = 0x01;
-    P_SW2 &= ~0x80;
+
+    PWMA_ENO   = 0x00;
+    PWMA_CCER1 = 0x00;
+    PWMA_CCER2 = 0x00;
+    PWMA_CCMR1 = 0x68;           /* PWM 模式1, 预装载 */
+    PWMA_CCER1 = 0x05;           /* CH1+CH2 使能 */
+
+    PWMA_ARRH  = 0x00;
+    PWMA_ARRL  = 255;            /* period=256, 8-bit */
+    PWMA_CCR1H = 0x00;
+    PWMA_CCR1L = 128;            /* 50% 初始 */
+    PWMA_PSCRH = 0x00;
+    PWMA_PSCRL = 0x00;           /* prescaler=0, 载波 ~176kHz */
+
+    PWMA_PS = (PWMA_PS & ~0x03) | 0x01;  /* P2.0 */
+    PWMA_ENO = 0x01;
+    PWMA_BKR = 0x80;
+    PWMA_CR1 = 0x01;
+
+    /* P_SW2 保持开启 */
 }
 
-/* ========== PWMA (PWM1) 定时器: 音频频率 ========== */
+/* ========== PWMA 定时器: 音频频率 (参考 buzzer_hx) ========== */
 void pwma_timer_start(u16 reload) {
-    P_SW2 |= 0x80;
     if (reload == 0) {
         PWM1_CR1 = 0;
         PWM1_IER = 0;
-        P_SW2 &= ~0x80;
         return;
     }
     PWM1_CNTRH = 0;
     PWM1_CNTRL = 0;
-    PWM1_ARRH = (u8)(reload >> 8);
-    PWM1_ARRL = (u8)(reload & 0xFF);
-    PWM1_SR1 = 0x00;
-    PWM1_IER = 0x01;             /* 使能溢出中断 */
-    PWM1_CR1 = 0x01;
-    P_SW2 &= ~0x80;
+    PWM1_ARRH  = (u8)(reload >> 8);
+    PWM1_ARRL  = (u8)(reload & 0xFF);
+    PWM1_SR1   = 0x00;
+    PWM1_IER   = 0x01;           /* 使能溢出中断 */
+    PWM1_CR1   = 0x01;
 }
 
-/* PWMA 溢出中断 → 翻转 DAC duty 产生方波 + 音量 */
+/* ========== PWMA interrupt 26: 查表写 DAC ========== */
 void PWM1_Interrupt(void) interrupt 26 {
-    P_SW2 |= 0x80;
+    u16 acc;
+    u8 idx, s;
+
     PWM1_SR1 = 0x00;
-    if (out_z)
-        PWM2_CCR3L = pwm_range;  /* 正半周: 输出音量 */
+
+    acc = phase_acc + phase_step;
+    phase_acc = acc;
+    idx = (u8)(acc >> 11);        /* 高 5 位 → 0~31 */
+
+    if (wave_type == WAVE_SQUARE)
+        s = square_table[idx];
     else
-        PWM2_CCR3L = 0;          /* 负半周: 输出 0 */
-    out_z = !out_z;
-    P_SW2 &= ~0x80;
-}
+        s = sine_table[idx];
 
-/* ========== Timer2: 数码管扫描 ========== */
-void timer2_init(void) {
-    u32 reload;
-    reload = MAIN_Fosc / 1000;
-    reload = 65536UL - reload;
-    AUXR &= ~(1<<4);
-    AUXR &= ~(1<<3);
-    AUXR |=  (1<<2);
-    T2H = (u8)(reload >> 8);
-    T2L = (u8)(reload & 0xFF);
-    IE2 |= (1<<2);
-    AUXR |=  (1<<4);
-}
-
-void timer2_isr(void) interrupt 12 {
-    u8 d;
-    P41 = 1; P42 = 1; P44 = 1; P45 = 1;
-    switch (digit_pos) {
-        case 0: d = cur_freq / 1000;           P2 = table[d]; P41 = 0; break;
-        case 1: d = (cur_freq / 100) % 10;     P2 = table[d]; P42 = 0; break;
-        case 2: d = (cur_freq / 10) % 10;      P2 = table[d]; P44 = 0; break;
-        case 3: d = cur_freq % 10;             P2 = table[d]; P45 = 0; break;
-    }
-    digit_pos++;
-    if (digit_pos >= 4) digit_pos = 0;
+    /* 音量调制 */
+    if (pwm_range == 0)
+        PWM1_CCR1L = 128;        /* 静音: 50% duty = 0V */
+    else
+        PWM1_CCR1L = (u8)(((u16)s * pwm_range) >> 8);
 }
 
 /* ========== UART ========== */
@@ -190,18 +188,32 @@ void play_music(void) {
         note_idx = twinkle[play_count];
         freq_reload = Musical_Scale[note_idx];
 
+        /* 每 8 音符换波形 */
+        if (note_in_phrase >= 8) {
+            note_in_phrase = 0;
+            wave_type = !wave_type;
+        }
+
         if (freq_reload) {
+            /* 45MHz 下 interrupt 26 频率翻倍 = 音高 +1 八度
+               再降 2 八度 = 用 twinkle 索引对应 Musical_Scale 低 2 八度
+               twinkle[11~18] → Musical_Scale[35~42] 但表只有 0~35
+               所以: 用原始索引减 12 得到低八度, 再减 12 得到低 2 八度
+               11-24 = 负数... 换思路: 直接乘 2 补偿 45MHz */
+            freq_reload = Musical_Scale[note_idx];
+            freq_reload *= 2;        /* 补偿 45MHz (22MHz 的 ~2x) */
             pwma_timer_start(freq_reload);
-            pwm_range = 128;             /* 音量减半 */
-            cur_freq = MAIN_Fosc / 2 / freq_reload;
+            pwm_range = 128;         /* 音量 */
+            /* 计算相位步进: freq ≈ MAIN_Fosc/2/reload, 适配 45MHz */
+            /* Musical_Scale 是 22MHz 基准, 45MHz 下实际频率翻倍 */
+            /* phase_step = freq * 32 * 65536 / 采样率, 采样率=2*freq(reload) */
+            /* 简化: step ∝ reload, reload 越小频率越高 */
         } else {
-            P_SW2 |= 0x80;
-            PWM2_CCR3L = 0;
-            P_SW2 &= ~0x80;
+            PWM1_CCR1L = 128;       /* 静音 */
             pwma_timer_start(0);
         }
 
-        /* 音符时长 + 慢衰减 (每 2 tick 减 1) */
+        /* 音符时长 + 慢衰减 */
         {
             u16 sleep = twinkle[play_count + 1];
             while (sleep--) {
@@ -212,15 +224,15 @@ void play_music(void) {
         }
 
         play_count += 2;
+        note_in_phrase++;
     }
 
     /* 播放完毕 */
     pwma_timer_start(0);
     pwm_range = 0;
-    P_SW2 |= 0x80;
-    PWM2_CCR3L = 0;
-    P_SW2 &= ~0x80;
+    PWM1_CCR1L = 128;
     play_count = 0;
+    note_in_phrase = 0;
 }
 
 /* ========== 主 ========== */
@@ -232,31 +244,22 @@ void main(void) {
     P4M0=0; P4M1=0;
 
     P0 = 0xFF;
-    P35 = 1; P36 = 1; P37 = 1;  /* RGB 关闭 */
+    P35 = 1; P36 = 1; P37 = 1;
     P41 = 1; P42 = 1; P44 = 1; P45 = 1;
 
-    pwmb_dac_init();
-    timer2_init();
+    pwma_dac_init();
     UART1_config();
     EA = 1;
     PrintString1("STC8H PWM DAC Demo\r\n");
 
     while (1) {
-        /* 播放小星星 */
+        /* 播放小星星 (sine/square 交替) */
         play_music();
 
-        /* LED 流水 (P0.2 留给 PWM DAC, 掩码保护) */
-        P0 = led_val & 0xFB;
-        led_val = _crol_(led_val & 0xFB, 1) | 0x04;
+        /* LED 流水 */
+        P0 = led_val;
+        led_val = _crol_(led_val, 1);
         delay(50);
-
-        /* RGB 关闭
-        P35 = rgb_idx & 0x01;
-        P36 = (rgb_idx >> 1) & 0x01;
-        P37 = (rgb_idx >> 2) & 0x01;
-        rgb_idx++;
-        if (rgb_idx >= 7) rgb_idx = 0;
-        */
 
         /* UART echo */
         if ((TX1_Cnt != RX1_Cnt) && (!B_TX1_Busy)) {
