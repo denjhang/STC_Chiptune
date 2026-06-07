@@ -6,7 +6,17 @@
  * Timer0 ISR: 16kHz 采样率, scc_render() → PWM1_CCR1L
  * Timer1:     UART1 波特率 230400
  *
- * SCC 移植自 RPFM/rpfm/emu/scc.c
+ * 协议: Python 端分批灌入 VGM 原始字节流 (跳过 header)
+ * 固件自行解析 VGM 命令:
+ *   0xD2 [port][reg][data] → SCC 写入
+ *   0xA0 [reg][data]       → AY8910 (预留)
+ *   0x61 [lo][hi]          → wait N samples
+ *   0x62                  → wait 735 samples (60Hz frame)
+ *   0x63                  → wait 882 samples (50Hz frame)
+ *   0x70-0x7F             → wait (n&0xF)+1 samples
+ *   0x66                  → end of data
+ *
+ * 参考 RPFM vgm_player.h + protocol.h
  */
 
 #include "stc8h.h"
@@ -14,7 +24,7 @@
 
 #define MAIN_Fosc       45158400L
 #define Baudrate1       230400L
-#define UART1_BUF_LENGTH 128
+#define UART1_BUF_LENGTH 512
 #define SAMPLE_RATE     16000
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
@@ -34,6 +44,9 @@ static u16 xdata scc_step[SCC_CHANS];
 static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
 static u8  xdata scc_creg;
 static u8  xdata scc_tst;
+
+/* ========== 16kHz 精确 tick (Timer0 ISR 递增) ========== */
+volatile u16 sample_tick;
 
 /* ========== SCC 初始化 ========== */
 void scc_init_func(void) {
@@ -114,8 +127,6 @@ u8 scc_render(void) {
                 offs = (u8)(scc_cnt[i] >> 12) & 0x1F;
                 vol = scc_vol[i];
                 b = scc_wav[i][offs];
-                /* b 是 u8 (0~255), 但存的是 s8 波形 (-64~63)
-                   取值 >= 128 时为负 */
                 if (b >= 128)
                     tmp = -(((s16)(256 - (u16)b) * (u16)vol) >> 4);
                 else
@@ -185,6 +196,7 @@ void timer0_isr(void) interrupt 1 {
     P_SW2 |= 0x80;
     PWM1_CCR1L = out;
     P_SW2 &= ~0x80;
+    sample_tick++;
 }
 
 /* ========== UART ========== */
@@ -225,96 +237,62 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== 前向声明 ========== */
-void test_start(void);
-
-/* ========== VGM/UART → SCC 协议 ========== */
+/* ========== UART → SCC (Python 控制节拍, 固件只做 SCC 写入) ========== */
 /*
- * 协议:
+ * Python 端解析 VGM, 遇到 SCC/AY 命令发串口, 遇到 wait 用 sleep()
+ * 固件收到后立即执行, 不做任何 wait 解析
  *
- * [0xD2] [port] [reg] [data]  — SCC (VGM 标准, 4 字节)
- *                                内部展开: scc_wr((port<<1), reg) + scc_wr((port<<1)|1, data)
- * [port]  [data]              — SCC 简写（无前缀, 2 字节）→ 直接 scc_wr(port, data)
- * [0xA0] [reg]  [data]       — AY8910 (预留, TODO)
- * [0xFF]  [ticks]            — Wait N main-loop ticks
- * [0xFE]                    — 关闭测试播放, 切 UART 控制
- * [0xFD]                    — 开启测试播放
+ * 格式:
+ *   [0xD2][port][reg][data] → SCC (4 字节)
+ *   [0xA0][reg][data]       → AY8910 (预留, 3 字节)
+ *   其他字节: 忽略 (wait 等)
  */
-
-static u8  vgm_wait;       /* wait 计数器, >0 时暂停命令处理 */
-static bit test_active;     /* 1=内置测试播放, 0=UART 控制 */
 
 void process_uart(void) {
     u8 b, p, r, d;
+
     while (TX1_Cnt != RX1_Cnt) {
-        if (vgm_wait > 0) {
-            vgm_wait--;
-            return;
-        }
         b = RX1_Buffer[TX1_Cnt];
         if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
         if (b == 0xD2) {
-            /* VGM 0xD2: [0xD2][port][reg][data] → scc_wr(port<<1, reg) + scc_wr(port<<1|1, data) */
-            if (TX1_Cnt != RX1_Cnt) {
-                p = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            } else break;
-            if (TX1_Cnt != RX1_Cnt) {
-                r = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            } else break;
-            if (TX1_Cnt != RX1_Cnt) {
-                d = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            } else break;
-            scc_wr((p & 0x7F) << 1, r);       /* latch register */
-            scc_wr(((p & 0x7F) << 1) | 1, d);  /* write data */
+            /* SCC: [0xD2][port][reg][data] → scc_wr(port<<1, reg) + scc_wr(port<<1|1, data) */
+            if (TX1_Cnt == RX1_Cnt) break;
+            p = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            scc_wr((p & 0x7F) << 1, r);
+            scc_wr(((p & 0x7F) << 1) | 1, d);
+
         } else if (b == 0xA0) {
-            /* AY8910 写入 (预留): [0xA0] [reg] [data] */
-            /* TODO: ay8910_wr(p, d); */
-            if (TX1_Cnt != RX1_Cnt) {
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            }
-            if (TX1_Cnt != RX1_Cnt) {
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            }
-        } else if (b == 0xFF) {
-            /* Wait: [0xFF] [ticks] */
-            if (TX1_Cnt != RX1_Cnt) {
-                d = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                vgm_wait = d;
-            }
-        } else if (b == 0xFE) {
-            test_active = 0;
-            scc_key[0] = 0;  /* 关闭测试音 */
-        } else if (b == 0xFD) {
-            test_active = 1;
-            test_start();
+            /* AY8910: [0xA0][reg][data] (预留, 跳过) */
+            if (TX1_Cnt == RX1_Cnt) break;
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+
         } else {
-            /* 简写格式: [port] [data] */
-            if (TX1_Cnt != RX1_Cnt) {
-                d = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                scc_wr(b, d);
-            }
+            /* 其他字节 (wait, 未知命令): 忽略, Python 端处理 wait */
         }
     }
 }
 
-/* ========== 测试: 2 音交替 (C4/G4) — 非阻塞 ========== */
-u16 code twn_freq[] = { 1000, 1587, 1000, 1587, 1000, 1587, 1000, 1587 };
-#define TWN_LEN 8
-#define NOTE_TICKS  4000   /* 每个 note 持续 4000 main loop ticks */
-#define DECAY_EVERY 200    /* 每 200 ticks 衰减一次 */
-#define LED_EVERY    100    /* 每 100 ticks 切 LED */
+/* ========== 开机音: C4 → G4 两个音各响一次后停止 ========== */
+#define BOOT_NOTE_TICKS 3000
+#define BOOT_DECAY_EVERY 150
+#define LED_EVERY    100
 
-static u16 test_cnt;       /* 主循环 tick 计数 */
-static u8  test_note;      /* 当前音符索引 */
-static u8  test_dec_cnt;   /* 衰减子计数 */
-static u8  led_tick;       /* LED 流水计数（UART 模式下也运行） */
+static u16 test_cnt;
+static u8  test_dec_cnt;
+static u8  led_tick;
+static bit test_active;
 
+void test_start(void);
 void test_start(void) {
     u8 i;
     u8 code st[] = {
@@ -326,14 +304,12 @@ void test_start(void) {
     for (i = 0; i < 32; i++)
         scc_wav[0][i] = st[i];
 
-    test_note = 0;
     test_cnt = 0;
     test_dec_cnt = 0;
     test_active = 1;
 
-    /* 触发第一个音 */
-    scc_freq[0] = twn_freq[0];
-    scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[0] + 1));
+    scc_freq[0] = 1000;
+    scc_step[0] = (u16)(11568768UL / ((u32)1000 + 1));
     scc_cnt[0] = 0;
     scc_vol[0] = 15;
     scc_key[0] = 1;
@@ -345,21 +321,21 @@ void test_tick(void) {
     test_cnt++;
     test_dec_cnt++;
 
-    /* 切换音符 */
-    if (test_cnt >= NOTE_TICKS) {
-        test_cnt = 0;
-        test_dec_cnt = 0;
-        test_note = (test_note + 1) % TWN_LEN;
-
-        scc_freq[0] = twn_freq[test_note];
-        scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[test_note] + 1));
+    if (test_cnt == BOOT_NOTE_TICKS) {
+        scc_freq[0] = 1587;
+        scc_step[0] = (u16)(11568768UL / ((u32)1587 + 1));
         scc_cnt[0] = 0;
         scc_vol[0] = 15;
-        scc_key[0] = 1;
     }
 
-    /* 音量衰减 */
-    if (test_dec_cnt >= DECAY_EVERY) {
+    if (test_cnt >= BOOT_NOTE_TICKS * 2) {
+        test_active = 0;
+        scc_key[0] = 0;
+        scc_vol[0] = 0;
+        return;
+    }
+
+    if (test_dec_cnt >= BOOT_DECAY_EVERY) {
         test_dec_cnt = 0;
         if (scc_vol[0] > 0)
             scc_vol[0]--;
@@ -397,7 +373,9 @@ void main(void) {
     led_tick = 0;
 
     while (1) {
-        test_tick();
+        if (test_active) {
+            test_tick();
+        }
         led_tick_update();
         process_uart();
         delay(1);
