@@ -14,7 +14,7 @@
 
 #define MAIN_Fosc       45158400L
 #define Baudrate1       230400L
-#define UART1_BUF_LENGTH 64
+#define UART1_BUF_LENGTH 128
 #define SAMPLE_RATE     16000
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
@@ -225,15 +225,81 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== UART → SCC ========== */
+/* ========== 前向声明 ========== */
+void test_start(void);
+
+/* ========== VGM/UART → SCC 协议 ========== */
+/*
+ * 协议:
+ *
+ * [0xD2] [port] [reg] [data]  — SCC (VGM 标准, 4 字节)
+ *                                内部展开: scc_wr((port<<1), reg) + scc_wr((port<<1)|1, data)
+ * [port]  [data]              — SCC 简写（无前缀, 2 字节）→ 直接 scc_wr(port, data)
+ * [0xA0] [reg]  [data]       — AY8910 (预留, TODO)
+ * [0xFF]  [ticks]            — Wait N main-loop ticks
+ * [0xFE]                    — 关闭测试播放, 切 UART 控制
+ * [0xFD]                    — 开启测试播放
+ */
+
+static u8  vgm_wait;       /* wait 计数器, >0 时暂停命令处理 */
+static bit test_active;     /* 1=内置测试播放, 0=UART 控制 */
+
 void process_uart(void) {
-    u8 p, d;
+    u8 b, p, r, d;
     while (TX1_Cnt != RX1_Cnt) {
-        p = RX1_Buffer[TX1_Cnt];
+        if (vgm_wait > 0) {
+            vgm_wait--;
+            return;
+        }
+        b = RX1_Buffer[TX1_Cnt];
         if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-        d = RX1_Buffer[TX1_Cnt];
-        if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-        scc_wr(p, d);
+
+        if (b == 0xD2) {
+            /* VGM 0xD2: [0xD2][port][reg][data] → scc_wr(port<<1, reg) + scc_wr(port<<1|1, data) */
+            if (TX1_Cnt != RX1_Cnt) {
+                p = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            } else break;
+            if (TX1_Cnt != RX1_Cnt) {
+                r = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            } else break;
+            if (TX1_Cnt != RX1_Cnt) {
+                d = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            } else break;
+            scc_wr((p & 0x7F) << 1, r);       /* latch register */
+            scc_wr(((p & 0x7F) << 1) | 1, d);  /* write data */
+        } else if (b == 0xA0) {
+            /* AY8910 写入 (预留): [0xA0] [reg] [data] */
+            /* TODO: ay8910_wr(p, d); */
+            if (TX1_Cnt != RX1_Cnt) {
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            }
+            if (TX1_Cnt != RX1_Cnt) {
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            }
+        } else if (b == 0xFF) {
+            /* Wait: [0xFF] [ticks] */
+            if (TX1_Cnt != RX1_Cnt) {
+                d = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                vgm_wait = d;
+            }
+        } else if (b == 0xFE) {
+            test_active = 0;
+            scc_key[0] = 0;  /* 关闭测试音 */
+        } else if (b == 0xFD) {
+            test_active = 1;
+            test_start();
+        } else {
+            /* 简写格式: [port] [data] */
+            if (TX1_Cnt != RX1_Cnt) {
+                d = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                scc_wr(b, d);
+            }
+        }
     }
 }
 
@@ -247,6 +313,7 @@ u16 code twn_freq[] = { 1000, 1587, 1000, 1587, 1000, 1587, 1000, 1587 };
 static u16 test_cnt;       /* 主循环 tick 计数 */
 static u8  test_note;      /* 当前音符索引 */
 static u8  test_dec_cnt;   /* 衰减子计数 */
+static u8  led_tick;       /* LED 流水计数（UART 模式下也运行） */
 
 void test_start(void) {
     u8 i;
@@ -262,6 +329,7 @@ void test_start(void) {
     test_note = 0;
     test_cnt = 0;
     test_dec_cnt = 0;
+    test_active = 1;
 
     /* 触发第一个音 */
     scc_freq[0] = twn_freq[0];
@@ -272,6 +340,8 @@ void test_start(void) {
 }
 
 void test_tick(void) {
+    if (!test_active) return;
+
     test_cnt++;
     test_dec_cnt++;
 
@@ -294,9 +364,11 @@ void test_tick(void) {
         if (scc_vol[0] > 0)
             scc_vol[0]--;
     }
+}
 
-    /* LED 流水 */
-    if ((test_cnt % LED_EVERY) == 0) {
+void led_tick_update(void) {
+    led_tick++;
+    if ((led_tick % LED_EVERY) == 0) {
         P0 = led_val;
         led_val = _crol_(led_val, 1);
     }
@@ -322,9 +394,11 @@ void main(void) {
     PrintString1("STC8H SCC Synth\r\n");
 
     test_start();
+    led_tick = 0;
 
     while (1) {
         test_tick();
+        led_tick_update();
         process_uart();
         delay(1);
     }
