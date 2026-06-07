@@ -2,10 +2,9 @@
  * STC8H8K64U 开发板综合 Demo
  * Keil C51 + stc8h.h, 22.1184MHz
  *
- * Timer0 ISR: 蜂鸣器方波（P1.6 toggle）
- * Timer2 ISR: 数码管动态扫描（1ms 切一位）
- * Timer1:     UART1 波特率
- * main loop:  LED 流水 + RGB 变色 + 音符切换 + UART echo
+ * Timer0: 蜂鸣器方波（P1.6 toggle）
+ * Timer1: UART1 波特率
+ * main loop: 数码管扫描 + LED 流水 + RGB 变色 + UART echo
  */
 
 #include "stc8h.h"
@@ -43,67 +42,58 @@ u16 code twinkle_freq[] = {
 /* ========== LED/RGB ========== */
 u8  led_val = 0xFE;
 u8  rgb_idx = 0;
+bit buzzer_on;
+
+/* ========== volatile 延时 ========== */
+volatile u16 vd;
+
+/* ========== 延时 ========== */
+void delay(u16 i) {
+    u16 j, k;
+    for (j = 0; j < 500; j++)
+        for (k = 0; k < i; k++);
+}
 
 /* ========== Timer0: 蜂鸣器方波 ========== */
 void timer0_init(void) {
-    AUXR |= 0x80;       /* Timer0 1T */
-    TMOD &= 0xF0;       /* Timer0 16-bit auto */
-    ET0 = 1;
+    /* Timer0 16-bit auto-reload, 1T mode */
+    AUXR |= 0x80;       /* Timer0 1T mode */
+    TMOD &= 0xF0;       /* Timer0 mode 0 (16-bit auto) */
+    ET0 = 1;             /* enable Timer0 interrupt */
 }
 
+/* 设置蜂鸣器频率：重装 Timer0 */
 void buzzer_set_freq(u16 freq) {
     u32 reload;
-    if (freq == 0) { TR0 = 0; P16 = 0; return; }
+    if (freq == 0) {
+        TR0 = 0;         /* 停止 Timer0 = 停止发声 */
+        P16 = 0;
+        buzzer_on = 0;
+        return;
+    }
+    /* 每 half 周期 toggle 一次：reload = Fosc / 2 / freq
+     * 但 Timer0 中断里只做一次 toggle，所以 reload = Fosc / 2 / freq
+     * reload = 22118400 / 2 / 262 = 42222
+     */
     reload = MAIN_Fosc / 2 / freq;
     if (reload > 65535) reload = 65535;
     TH0 = (u8)(reload >> 8);
     TL0 = (u8)(reload & 0xFF);
     TR0 = 1;
+    buzzer_on = 1;
 }
 
 void timer0_isr(void) interrupt 1 {
-    P16 = !P16;
-}
-
-/* ========== Timer2: 数码管扫描 ========== */
-void timer2_init(void) {
-    u32 reload;
-    /* 1ms per digit, 4 digits = 4ms full scan = 250Hz refresh
-     * reload = 65536 - Fosc / 1T / 1000 = 65536 - 22118 = 43418 = 0xA97A
-     */
-    reload = MAIN_Fosc / 1000;
-    reload = 65536UL - reload;
-    AUXR &= ~(1<<4);     /* stop Timer2 */
-    AUXR &= ~(1<<3);     /* Timer2 as Timer */
-    AUXR |=  (1<<2);     /* Timer2 1T mode */
-    T2H = (u8)(reload >> 8);
-    T2L = (u8)(reload & 0xFF);
-    IE2 |= (1<<2);       /* enable Timer2 interrupt */
-    AUXR |=  (1<<4);     /* start Timer2 */
-}
-
-void timer2_isr(void) interrupt 12 {
-    u8 d;
-    /* 先关所有位选，消除鬼影 */
-    P41 = 1; P42 = 1; P44 = 1; P45 = 1;
-
-    switch (digit_pos) {
-        case 0: d = cur_freq / 1000;           P2 = table[d]; P41 = 0; break;
-        case 1: d = (cur_freq / 100) % 10;     P2 = table[d]; P42 = 0; break;
-        case 2: d = (cur_freq / 10) % 10;      P2 = table[d]; P44 = 0; break;
-        case 3: d = cur_freq % 10;             P2 = table[d]; P45 = 0; break;
-    }
-    digit_pos++;
-    if (digit_pos >= 4) digit_pos = 0;
+    P16 = !P16;          /* toggle 蜂鸣器 */
 }
 
 /* ========== UART ========== */
 void UART1_config(void) {
     TR1 = 0;
     AUXR &= ~0x01;
-    AUXR |=  (1<<6);
-    TMOD &= ~(1<<6);
-    TMOD &= ~0x30;
+    AUXR |=  (1<<6);     /* Timer1 1T */
+    TMOD &= ~(1<<6);      /* Timer1 as Timer */
+    TMOD &= ~0x30;        /* Timer1 16-bit */
     TH1 = (u8)((65536UL - (MAIN_Fosc / 4) / Baudrate1) / 256);
     TL1 = (u8)((65536UL - (MAIN_Fosc / 4) / Baudrate1) % 256);
     ET1 = 0;
@@ -131,11 +121,17 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== 延时 ========== */
-void delay(u16 i) {
-    u16 j, k;
-    for (j = 0; j < 500; j++)
-        for (k = 0; k < i; k++);
+/* ========== 数码管 ========== */
+void display(u16 freq) {
+    u8 d;
+    switch (digit_pos) {
+        case 0: d = freq / 1000;           P2 = table[d]; P41 = 0; vd = 300; while(vd--); P41 = 1; break;
+        case 1: d = (freq / 100) % 10;     P2 = table[d]; P42 = 0; vd = 300; while(vd--); P42 = 1; break;
+        case 2: d = (freq / 10) % 10;      P2 = table[d]; P44 = 0; vd = 300; while(vd--); P44 = 1; break;
+        case 3: d = freq % 10;             P2 = table[d]; P45 = 0; vd = 300; while(vd--); P45 = 1; break;
+    }
+    digit_pos++;
+    if (digit_pos >= 4) digit_pos = 0;
 }
 
 /* ========== 主 ========== */
@@ -151,17 +147,18 @@ void main(void) {
 
     P0 = 0xFF;
     P35 = 0; P36 = 0; P37 = 0;
-    P41 = 1; P42 = 1; P44 = 1; P45 = 1;
     P16 = 0;
 
     timer0_init();
     buzzer_set_freq(cur_freq);
-    timer2_init();
     UART1_config();
     EA = 1;
     PrintString1("STC8H Board Demo\r\n");
 
     while (1) {
+        /* 数码管持续扫描 */
+        display(cur_freq);
+
         /* LED 流水 */
         P0 = led_val;
         led_val = _crol_(led_val, 1);
@@ -175,7 +172,7 @@ void main(void) {
         if (rgb_idx >= 7) rgb_idx = 0;
         delay(100);
 
-        /* 音符切换 ~300ms */
+        /* 音符计时 */
         note_timer++;
         if (note_timer >= 8) {
             note_timer = 0;
