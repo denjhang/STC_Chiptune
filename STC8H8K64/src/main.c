@@ -237,12 +237,19 @@ void process_uart(void) {
     }
 }
 
-/* ========== 测试: 2 音交替 (C4/G4) ========== */
+/* ========== 测试: 2 音交替 (C4/G4) — 非阻塞 ========== */
 u16 code twn_freq[] = { 1000, 1587, 1000, 1587, 1000, 1587, 1000, 1587 };
 #define TWN_LEN 8
+#define NOTE_TICKS  4000   /* 每个 note 持续 4000 main loop ticks */
+#define DECAY_EVERY 200    /* 每 200 ticks 衰减一次 */
+#define LED_EVERY    100    /* 每 100 ticks 切 LED */
 
-void test_play(void) {
-    u8 i, t;
+static u16 test_cnt;       /* 主循环 tick 计数 */
+static u8  test_note;      /* 当前音符索引 */
+static u8  test_dec_cnt;   /* 衰减子计数 */
+
+void test_start(void) {
+    u8 i;
     u8 code st[] = {
          0, 12, 25, 37, 49, 60, 71, 81,
         90, 98,105,111,115,118,120,127,
@@ -252,26 +259,48 @@ void test_play(void) {
     for (i = 0; i < 32; i++)
         scc_wav[0][i] = st[i];
 
+    test_note = 0;
+    test_cnt = 0;
+    test_dec_cnt = 0;
+
+    /* 触发第一个音 */
+    scc_freq[0] = twn_freq[0];
+    scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[0] + 1));
+    scc_cnt[0] = 0;
     scc_vol[0] = 15;
-
-    while (1) {
-        for (i = 0; i < TWN_LEN; i++) {
-            scc_freq[0] = twn_freq[i];
-            scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[i] + 1));
-            scc_vol[0] = 15;
-            scc_key[0] = 1;
-
-            for (t = 0; t < 200; t++) {
-                if (scc_vol[0] > 0 && (t & 3))
-                    scc_vol[0]--;
-                delay(2);
-            }
-            P0 = led_val;
-            led_val = _crol_(led_val, 1);
-            }
-        }
+    scc_key[0] = 1;
 }
 
+void test_tick(void) {
+    test_cnt++;
+    test_dec_cnt++;
+
+    /* 切换音符 */
+    if (test_cnt >= NOTE_TICKS) {
+        test_cnt = 0;
+        test_dec_cnt = 0;
+        test_note = (test_note + 1) % TWN_LEN;
+
+        scc_freq[0] = twn_freq[test_note];
+        scc_step[0] = (u16)(11568768UL / ((u32)twn_freq[test_note] + 1));
+        scc_cnt[0] = 0;
+        scc_vol[0] = 15;
+        scc_key[0] = 1;
+    }
+
+    /* 音量衰减 */
+    if (test_dec_cnt >= DECAY_EVERY) {
+        test_dec_cnt = 0;
+        if (scc_vol[0] > 0)
+            scc_vol[0]--;
+    }
+
+    /* LED 流水 */
+    if ((test_cnt % LED_EVERY) == 0) {
+        P0 = led_val;
+        led_val = _crol_(led_val, 1);
+    }
+}
 
 /* ========== 主 ========== */
 void main(void) {
@@ -292,5 +321,11 @@ void main(void) {
     EA = 1;
     PrintString1("STC8H SCC Synth\r\n");
 
-    test_play();
+    test_start();
+
+    while (1) {
+        test_tick();
+        process_uart();
+        delay(1);
+    }
 }
