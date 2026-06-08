@@ -16,19 +16,19 @@
 #include <intrins.H>
 
 #define MAIN_Fosc       48000000L
-#define Baudrate1       230400L
+#define Baudrate1       115200L
 #define UART1_BUF_LENGTH 2048
 #define SAMPLE_RATE     22050
+#define SCC_RATE        4410
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
 #define SCC_FREQ_BITS    16
 #define SCC_CLOCK       3579545L
 
-/* 预计算常量: step = (SCC_HALF_CLK / SAMPLE_RATE) << SCC_SHIFT / (freq+1)
- * = 81 * 131072 / (freq+1) = 10616832 / (freq+1) */
+/* SCC step = (SCC_HALF_CLK / SCC_RATE) << SCC_SHIFT / (freq+1) */
 #define SCC_HALF_CLK    1789772UL
 #define SCC_SHIFT       (SCC_FREQ_BITS + 1)  /* 17 */
-#define SCC_STEP_BASE   (SCC_HALF_CLK / SAMPLE_RATE * (1UL << SCC_SHIFT))  /* 10616832 */
+#define SCC_STEP_BASE   (SCC_HALF_CLK / SCC_RATE * (1UL << SCC_SHIFT))
 
 typedef unsigned char   u8;
 typedef unsigned int    u16;
@@ -550,7 +550,7 @@ void led_tick_update(void) {
 }
 
 /* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
-/* 22050Hz ISR, AY 每 tick 渲染, SCC 每 2 tick 渲染 (11025Hz) */
+/* 22050Hz ISR, AY 每 tick, SCC 每 5 tick (4410Hz) */
 static u8 scc_tick_div;
 
 void timer0_isr(void) interrupt 1 {
@@ -559,16 +559,13 @@ void timer0_isr(void) interrupt 1 {
     u8 out;
     u8 scc_out;
 
-    /* AY: 每次都渲染 */
     ay_mix = ay_render();
 
-    /* SCC: 每 2 次渲染一次 */
-    if (scc_tick_div) {
+    if (++scc_tick_div >= 5) {
+        scc_tick_div = 0;
         scc_out = scc_render();
     }
-    scc_tick_div = !scc_tick_div;
 
-    /* 混合: SCC 输出 + AY 输出 */
     mix = (s16)((u16)scc_out - 128) + ay_mix;
 
     if (mix > 127) mix = 127;
