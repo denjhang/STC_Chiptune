@@ -550,15 +550,16 @@ static void gb_frame_step_fn(u16 cycles) {
 
 /* ========== 渲染: 每次 ISR 调用一次 (4410Hz) ========== */
 s16 gb_render(void) {
-    u16 incr;
+    u8 ticks, i;
     s16 mix_l, sample;
 
     gb_base_count += GB_BASE_INCR;
-    incr = (u16)(gb_base_count >> GB_GETA_BITS);
+    ticks = (u8)(gb_base_count >> GB_GETA_BITS);
     gb_base_count &= (1UL << GB_GETA_BITS) - 1;
 
-    if (incr > 0) {
-        gb_frame_step_fn(incr);
+    /* 每个 tick 传 64 clock cycles, 和 libvgm 一致 */
+    for (i = 0; i < ticks; i++) {
+        gb_frame_step_fn(64);
     }
 
     if (!gb_ctrl_on) return 0;
