@@ -50,10 +50,10 @@ static u8  xdata scc_tst;
 
 /* ========== AY8910 状态 ========== */
 #define AY_CHANS    3
-#define AY_CLK      3579545UL
+#define AY_CLK      1789772UL
 #define AY_GETA_BITS 24
-/* base_incr = CLK * (1 << 24) / 8 / RATE = 3579545 * 16777216 / 8 / 11025 = 680893420 */
-#define AY_BASE_INCR   680893420UL
+/* base_incr = CLK * (1 << 24) / 8 / RATE = 1789772 * 16777216 / 8 / 11025 = 340446710 */
+#define AY_BASE_INCR   340446710UL
 
 static u8  xdata ay_reg[16];
 static u16 xdata ay_count[AY_CHANS];
