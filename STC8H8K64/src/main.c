@@ -64,9 +64,9 @@ static u8  xdata ay_tmask[AY_CHANS];
 static u8  xdata ay_nmask[AY_CHANS];
 static u16 xdata ay_env_freq;
 static u32 xdata ay_env_count;
-static u8  xdata ay_env_ptr;
-static u8  xdata ay_env_face;
-static u8  xdata ay_env_continue, ay_env_attack, ay_env_alternate, ay_env_hold, ay_env_pause;
+static u8  xdata ay_env_step;
+static u8  xdata ay_env_attack;
+static u8  xdata ay_env_continue, ay_env_alternate, ay_env_hold, ay_env_pause;
 static u32 xdata ay_noise_seed;
 static u8  xdata ay_noise_scaler;
 static u8  xdata ay_noise_count;
@@ -212,10 +212,9 @@ void ay_init(void) {
     }
     ay_env_freq = 0;
     ay_env_count = 0;
-    ay_env_ptr = 0;
-    ay_env_face = 0;
-    ay_env_continue = 0;
+    ay_env_step = 0;
     ay_env_attack = 0;
+    ay_env_continue = 0;
     ay_env_alternate = 0;
     ay_env_hold = 0;
     ay_env_pause = 0;
@@ -266,9 +265,8 @@ void ay_wr(u8 reg, u8 val) {
         ay_env_attack   = (val >> 2) & 1;
         ay_env_alternate= (val >> 1) & 1;
         ay_env_hold     = val & 1;
-        ay_env_face     = ay_env_attack;
         ay_env_pause    = 0;
-        ay_env_ptr      = ay_env_face ? 0 : 0x1F;
+        ay_env_step     = ay_env_attack ? 0 : 0x0F;
         break;
     }
 }
@@ -290,19 +288,17 @@ s16 ay_render(void) {
         ay_env_count += incr;
         if (ay_env_freq > 0 && ay_env_count >= ay_env_freq) {
             if (!ay_env_pause) {
-                if (ay_env_face)
-                    ay_env_ptr = (ay_env_ptr + 1) & 0x3F;
-                else
-                    ay_env_ptr = (ay_env_ptr + 0x3F) & 0x3F;
+                ay_env_step--;
             }
-            if (ay_env_ptr & 0x20) {
-                if (ay_env_continue) {
-                    if (ay_env_alternate ^ ay_env_hold) ay_env_face ^= 1;
-                    if (ay_env_hold) ay_env_pause = 1;
-                    ay_env_ptr = ay_env_face ? 0 : 0x1F;
-                } else {
+            if (ay_env_step == 0xFF) {
+                if (ay_env_hold) {
+                    if (ay_env_alternate) ay_env_attack ^= 0x0F;
                     ay_env_pause = 1;
-                    ay_env_ptr = 0;
+                    ay_env_step = 0;
+                } else {
+                    if (ay_env_alternate && ay_env_step & 0x10)
+                        ay_env_attack ^= 0x0F;
+                    ay_env_step = 0x0F;
                 }
             }
             if (ay_env_freq >= incr)
@@ -347,7 +343,7 @@ s16 ay_render(void) {
         if ((ay_tmask[i] || ay_edge[i]) && (ay_nmask[i] || noise)) {
             vol_idx = ay_volume[i] & 0x0F;
             if (ay_volume[i] & 0x10)
-                vol_idx = ay_env_ptr & 0x1F;
+                vol_idx = ay_env_step ^ ay_env_attack;
             vol_val = ay_voltbl[vol_idx];
             ch_out = (u16)vol_val << 4;
         }
