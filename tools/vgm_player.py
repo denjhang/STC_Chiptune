@@ -153,11 +153,10 @@ for _i in range(0xF0, 0x100): VGM_CMD_LEN[_i] = 5
 
 def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     """
-    Python 控制节拍:
-    - SCC (0xD2): 直接发 [0xD2][port][reg][data], 固件查表算 step
-    - AY  (0xA0): 发 [0xA0][reg][data]
-    - wait: time.sleep() 精确等待
-    - 其他: 跳过
+    Python 控制节拍 (perf_counter 累积模式):
+    - perf_counter 记录实际流逝时间 → 转为 VGM samples budget
+    - 每个 1ms Sleep 轮询一次, 累积 budget, 一次性处理所有命令
+    - 避免 time.sleep() 累积误差
     """
     pos = hdr['data_offset']
     end = min(hdr['eof'], len(data))
@@ -170,16 +169,34 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 
-    start_time = time.monotonic()
+    last_time = time.perf_counter()
+    samples_budget = 0.0  # 累积的 VGM samples budget
+    current_samples = 0
     iteration = 0
 
     while True:
-        while pos < end:
+        # 1ms 轮询
+        time.sleep(0.001)
+
+        now = time.perf_counter()
+        elapsed_sec = now - last_time
+        last_time = now
+
+        # 累积 budget (实际时间 → VGM samples)
+        samples_budget += elapsed_sec * SAMPLES_PER_SEC * speed
+
+        # 处理所有可以发送的命令
+        while samples_budget >= 1.0 and pos < end:
             b = data[pos]
             pos += 1
 
             if b == 0x66:
-                break
+                if loop and hdr['loop_offset'] > 0:
+                    pos = hdr['loop_offset']
+                    continue
+                else:
+                    pos = end
+                    break
 
             elif b == 0xD2:
                 # SCC: [0xD2][port][reg][data]
@@ -198,29 +215,31 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                 if pos + 2 <= end:
                     n = struct.unpack_from('<H', data, pos)[0]
                     pos += 2
-                    sleep_sec = (n / SAMPLES_PER_SEC) / speed
-                    if sleep_sec > 0.001:
-                        time.sleep(sleep_sec)
+                    samples_budget -= n
+                    current_samples += n
 
             elif b == 0x62:
-                # 735 samples (60Hz)
-                time.sleep((735 / SAMPLES_PER_SEC) / speed)
+                samples_budget -= 735
+                current_samples += 735
 
             elif b == 0x63:
-                # 882 samples (50Hz)
-                time.sleep((882 / SAMPLES_PER_SEC) / speed)
+                samples_budget -= 882
+                current_samples += 882
 
             elif 0x70 <= b <= 0x7F:
                 n = (b & 0x0F) + 1
-                time.sleep((n / SAMPLES_PER_SEC) / speed)
+                samples_budget -= n
+                current_samples += n
 
             elif 0x80 <= b <= 0x8F:
                 n = (b & 0x0F) + 1
-                time.sleep((n / SAMPLES_PER_SEC) / speed)
+                samples_budget -= n
+                current_samples += n
 
             elif 0x90 <= b <= 0x9F:
                 n = (b & 0x0F) * 2 + 1
-                time.sleep((n / SAMPLES_PER_SEC) / speed)
+                samples_budget -= n
+                current_samples += n
 
             elif b == 0x67:
                 # Data block: skip
@@ -236,15 +255,11 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                 if skip > 1:
                     pos += skip - 1
 
-        elapsed = time.monotonic() - start_time
-        if not loop:
+        if pos >= end:
             break
-        iteration += 1
-        print(f"  [Loop #{iteration}] elapsed={elapsed:.1f}s")
-        pos = hdr['data_offset']
 
-    elapsed = time.monotonic() - start_time
-    print(f"  [END] {elapsed:.1f}s")
+    real_sec = current_samples / SAMPLES_PER_SEC / speed
+    print(f"  [END] {real_sec:.1f}s")
 
 
 def list_songs(vgm_dir):
