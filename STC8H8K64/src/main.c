@@ -16,9 +16,9 @@
 #include <intrins.H>
 
 #define MAIN_Fosc       48000000L
-#define Baudrate1       115200L
+#define Baudrate1       230400L
 #define UART1_BUF_LENGTH 2048
-#define SAMPLE_RATE     11025
+#define SAMPLE_RATE     22050
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
 #define SCC_FREQ_BITS    16
@@ -52,8 +52,8 @@ static u8  xdata scc_tst;
 #define AY_CHANS    3
 #define AY_CLK      1789772UL
 #define AY_GETA_BITS 24
-/* base_incr = CLK * (1 << 24) / 8 / RATE = 1789772 * 16777216 / 8 / 11025 = 340446710 */
-#define AY_BASE_INCR   340446710UL
+/* base_incr = CLK * (1 << 24) / 8 / RATE = 1789772 * 16777216 / 8 / 22050 = 170223307 */
+#define AY_BASE_INCR   170223307UL
 
 static u8  xdata ay_reg[16];
 static u16 xdata ay_count[AY_CHANS];
@@ -169,7 +169,7 @@ void scc_wr(u8 port, u8 dat) {
  * step 范围: freq=100->step~145000, freq=4095->step~3579
  */
 
-s16 scc_and_ay_render(void) {
+u8 scc_render(void) {
     s16 mix;
     u8 i;
     u8 vol, offs, b;
@@ -191,7 +191,6 @@ s16 scc_and_ay_render(void) {
             }
         }
     }
-    mix += ay_render();
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     return 128 + (u8)mix;
@@ -363,7 +362,7 @@ u8  led_val = 0xFE;
 
 /* ========== 任务调度: Timer0 ISR 软件分频 ========== */
 /* 11025 / 60 ≈ 184, 每 184 次 Timer0 ISR 处理一次任务 */
-#define TASK_DIVIDER    184
+#define TASK_DIVIDER    368
 static u16 task_div;
 
 /* ========== PWMA PWM1 → P2.0 ========== */
@@ -482,9 +481,9 @@ void process_uart(void) {
     }
 }
 
-/* ========== 开机音: C4 → G4 ========== */
-#define BOOT_NOTE_TICKS 180
-#define BOOT_DECAY_EVERY 12
+/* ========== 开机音: AY C4 E4 G4 和弦 ========== */
+#define BOOT_NOTE_TICKS 300
+#define BOOT_DECAY_EVERY 15
 #define LED_EVERY    8
 
 static u16 test_cnt;
@@ -494,55 +493,51 @@ static bit test_active;
 
 void test_start(void);
 void test_start(void) {
-    u8 i;
-    u8 code st[] = {
-         0, 12, 25, 37, 49, 60, 71, 81,
-        90, 98,105,111,115,118,120,127,
-        127,120,118,115,111,105, 98, 90,
-        81, 71, 60, 49, 37, 25, 12,  0
-    };
-    for (i = 0; i < 32; i++)
-        scc_wav[0][i] = st[i];
-
     test_cnt = 0;
     test_dec_cnt = 0;
     test_active = 1;
 
-    /* C4: freq=1000
-     * step = 1789772 / 1001 * 131072 / 16000 = 1785 * 131072 / 16000 = 14632 */
-    scc_freq[0] = 1000;
-    scc_step_val[0] = (1789772UL / 1001UL) * 131072UL / 16000UL;
-    scc_cnt[0] = 0;
-    scc_vol[0] = 15;
-    scc_key[0] = 1;
+    /* C4: freq_lo=433, freq_hi=5 → 0x1B1 = 433
+     * E4: freq_lo=649, freq_hi=5 → 0x289 = 649
+     * G4: freq_lo=971, freq_hi=5 → 0x3CB = 971 */
+    ay_freq_lo[0] = 433; ay_freq_hi[0] = 5;
+    ay_freq_lo[1] = 649; ay_freq_hi[1] = 5;
+    ay_freq_lo[2] = 971; ay_freq_hi[2] = 5;
+
+    /* 启用包络衰减，shape=4 (decay once), freq_lo=0x91 freq_hi=0x0C */
+    ay_reg[11] = 0x91; ay_reg[12] = 0x0C;
+    ay_env_freq = ((u16)ay_reg[12] << 8) + ay_reg[11];
+    ay_reg[13] = 4; /* decay once */
+    ay_env_continue = 0;
+    ay_env_attack = 0;
+    ay_env_alternate = 0;
+    ay_env_hold = 0;
+    ay_env_pause = 0;
+    ay_env_step = 0x0F;
+
+    /* 3 通道启用包络 (bit4=1), 混合器全开 (0x00) */
+    ay_volume[0] = 0x10; /* CH A: 包络 */
+    ay_volume[1] = 0x10; /* CH B: 包络 */
+    ay_volume[2] = 0x10; /* CH C: 包络 */
+    ay_tmask[0] = 0; ay_tmask[1] = 0; ay_tmask[2] = 0;
+    ay_nmask[0] = 0; ay_nmask[1] = 0; ay_nmask[2] = 0;
+
+    /* 计数器清零 */
+    ay_count[0] = 0; ay_count[1] = 0; ay_count[2] = 0;
+    ay_base_count = 0;
 }
 
 void test_tick(void) {
     if (!test_active) return;
 
     test_cnt++;
-    test_dec_cnt++;
 
-    if (test_cnt == BOOT_NOTE_TICKS) {
-        /* G4: freq=1587
-         * step = 1789772 / 1588 * 131072 / 16000 = 1127 * 131072 / 16000 = 9236 */
-        scc_freq[0] = 1587;
-        scc_step_val[0] = (1789772UL / 1588UL) * 131072UL / 16000UL;
-        scc_cnt[0] = 0;
-        scc_vol[0] = 15;
-    }
-
-    if (test_cnt >= BOOT_NOTE_TICKS * 2) {
+    if (test_cnt >= BOOT_NOTE_TICKS) {
         test_active = 0;
-        scc_key[0] = 0;
-        scc_vol[0] = 0;
+        ay_volume[0] = 0;
+        ay_volume[1] = 0;
+        ay_volume[2] = 0;
         return;
-    }
-
-    if (test_dec_cnt >= BOOT_DECAY_EVERY) {
-        test_dec_cnt = 0;
-        if (scc_vol[0] > 0)
-            scc_vol[0]--;
     }
 }
 
@@ -555,9 +550,30 @@ void led_tick_update(void) {
 }
 
 /* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
+/* 22050Hz ISR, AY 每 tick 渲染, SCC 每 2 tick 渲染 (11025Hz) */
+static u8 scc_tick_div;
+
 void timer0_isr(void) interrupt 1 {
+    s16 ay_mix;
+    s16 mix;
     u8 out;
-    out = scc_and_ay_render();
+    u8 scc_out;
+
+    /* AY: 每次都渲染 */
+    ay_mix = ay_render();
+
+    /* SCC: 每 2 次渲染一次 */
+    if (scc_tick_div) {
+        scc_out = scc_render();
+    }
+    scc_tick_div = !scc_tick_div;
+
+    /* 混合: SCC 输出 + AY 输出 */
+    mix = (s16)((u16)scc_out - 128) + ay_mix;
+
+    if (mix > 127) mix = 127;
+    if (mix < -128) mix = -128;
+    out = 128 + (u8)mix;
     PWM1_CCR1L = out;
     sample_tick++;
 

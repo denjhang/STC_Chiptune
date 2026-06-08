@@ -369,6 +369,10 @@ def main():
     except KeyboardInterrupt:
         print("\n  Stopped.")
     finally:
+        # 复位 SCC 寄存器：静音所有通道
+        scc_reset = bytes([0xD2, 0x00, 0x03, 0x00])  # keyon = 0
+        ser.write(scc_reset)
+        time.sleep(0.01)
         ser.close()
 
 
