@@ -40,8 +40,8 @@ u8  xdata RX1_Buffer[UART1_BUF_LENGTH];
 u8  led_val = 0xFE;
 
 /* ========== 任务调度: Timer0 ISR 软件分频 ========== */
-/* 11025 / 60 ≈ 184, 每 184 次 Timer0 ISR 处理一次任务 */
-#define TASK_DIVIDER    294
+/* 17640 / 60 ≈ 294, 每 294 次 ISR 处理一次任务 (~16.7ms) */
+#define TASK_DIVIDER    147
 static u16 task_div;
 
 /* ========== PWMA PWM1 → P2.0 ========== */
