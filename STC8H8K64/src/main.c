@@ -345,8 +345,8 @@ s16 ay_render(void) {
 
         ch_out = 0;
         if ((ay_tmask[i] || ay_edge[i]) && (ay_nmask[i] || noise)) {
-            vol_idx = ay_volume[i] & 0x1F;
-            if (ay_volume[i] & 0x20)
+            vol_idx = ay_volume[i] & 0x0F;
+            if (ay_volume[i] & 0x10)
                 vol_idx = ay_env_ptr & 0x1F;
             vol_val = ay_voltbl[vol_idx];
             ch_out = (u16)vol_val << 4;
