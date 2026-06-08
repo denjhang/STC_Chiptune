@@ -5,6 +5,7 @@
  * PWMA PWM1 → P2.0: 8-bit DAC 载波 (~176kHz)
  * Timer0 ISR: 11025Hz 采样率, scc_render() → PWM1_CCR1L
  * Timer1:     UART1 波特率 230400
+ * Timer2 ISR: 60Hz 任务调度 (UART处理/LED/test_tick)
  *
  * 协议: Python 控制节拍, 固件只做 SCC 写入
  *   [0xD2][port][reg][data] → SCC (4 字节, 波形/频率/音量/keyon)
@@ -39,12 +40,14 @@ typedef unsigned long   u32;
 typedef signed char     s8;
 typedef signed int      s16;
 
-/* ========== SCC 状态 (平坦 xdata) ========== */
-static u32 xdata scc_cnt[SCC_CHANS];
+/* ========== SCC 状态 ========== */
+/* ISR 热路径: idata (快) */
+static u32 idata scc_cnt[SCC_CHANS];
+static u32 idata scc_step_val[SCC_CHANS];
+static u8  idata scc_vol[SCC_CHANS];
+static u8  idata scc_key[SCC_CHANS];
+/* 非热路径: xdata (省 idata 空间) */
 static u16 xdata scc_freq[SCC_CHANS];
-static u32 xdata scc_step_val[SCC_CHANS];
-static u8  xdata scc_vol[SCC_CHANS];
-static u8  xdata scc_key[SCC_CHANS];
 static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
 static u8  xdata scc_creg;
 static u8  xdata scc_tst;
@@ -165,13 +168,10 @@ u8  xdata RX1_Buffer[UART1_BUF_LENGTH];
 /* ========== LED ========== */
 u8  led_val = 0xFE;
 
-volatile u16 vd;
-
-void delay(u16 i) {
-    u16 j, k;
-    for (j = 0; j < 500; j++)
-        for (k = 0; k < i; k++);
-}
+/* ========== 任务调度: Timer0 ISR 软件分频 ========== */
+/* 11025 / 60 ≈ 184, 每 184 次 Timer0 ISR 处理一次任务 */
+#define TASK_DIVIDER    184
+static u16 task_div;
 
 /* ========== PWMA PWM1 → P2.0 ========== */
 void pwma_dac_init(void) {
@@ -205,15 +205,6 @@ void timer0_init(void) {
     TL0 = (u8)(reload & 0xFF);
     ET0 = 1;
     TR0 = 1;
-}
-
-void timer0_isr(void) interrupt 1 {
-    u8 out;
-    out = scc_render();
-    P_SW2 |= 0x80;
-    PWM1_CCR1L = out;
-    P_SW2 &= ~0x80;
-    sample_tick++;
 }
 
 /* ========== UART ========== */
@@ -295,9 +286,9 @@ void process_uart(void) {
 }
 
 /* ========== 开机音: C4 → G4 ========== */
-#define BOOT_NOTE_TICKS 3000
-#define BOOT_DECAY_EVERY 150
-#define LED_EVERY    100
+#define BOOT_NOTE_TICKS 180
+#define BOOT_DECAY_EVERY 12
+#define LED_EVERY    8
 
 static u16 test_cnt;
 static u8  test_dec_cnt;
@@ -366,6 +357,25 @@ void led_tick_update(void) {
     }
 }
 
+/* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
+void timer0_isr(void) interrupt 1 {
+    u8 out;
+    out = scc_render();
+    P_SW2 |= 0x80;
+    PWM1_CCR1L = out;
+    P_SW2 &= ~0x80;
+    sample_tick++;
+
+    if (++task_div >= TASK_DIVIDER) {
+        task_div = 0;
+        EA = 0;
+        process_uart();
+        EA = 1;
+        if (test_active) test_tick();
+        led_tick_update();
+    }
+}
+
 /* ========== 主 ========== */
 void main(void) {
     P0M0=0; P0M1=0;
@@ -379,19 +389,13 @@ void main(void) {
     P41 = 1; P42 = 1; P44 = 1; P45 = 1;
 
     pwma_dac_init();
-    timer0_init();
     UART1_config();
     scc_init_func();
+    test_start();
+    led_tick = 0;
+    timer0_init();
     EA = 1;
     PrintString1("STC8H SCC Synth\r\n");
 
-    test_start();
-    led_tick = 0;
-
-    while (1) {
-        if (test_active) test_tick();
-        led_tick_update();
-        process_uart();
-        delay(1);
-    }
+    while (1);
 }
