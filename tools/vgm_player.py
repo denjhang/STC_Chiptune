@@ -94,7 +94,7 @@ def parse_vgm_header(data):
 def scan_vgm_stats(data, hdr):
     pos = hdr['data_offset']
     end = min(hdr['eof'], len(data))
-    scc = ay = sn = wait = other = 0
+    scc = ay = sn = gb = wait = other = 0
     total_wait_samples = 0
     while pos < end:
         b = data[pos]
@@ -102,6 +102,7 @@ def scan_vgm_stats(data, hdr):
         if b == 0xD2: scc += 1; pos += 4
         elif b == 0xA0: ay += 1; pos += 3
         elif b == 0x50: sn += 1; pos += 2
+        elif b == 0xB3: gb += 1; pos += 3
         elif b == 0x61:
             if pos + 3 <= end:
                 total_wait_samples += struct.unpack_from('<H', data, pos+1)[0]
@@ -117,7 +118,7 @@ def scan_vgm_stats(data, hdr):
         else:
             other += 1; pos += 1
     duration = total_wait_samples / SAMPLES_PER_SEC
-    return {'scc': scc, 'ay': ay, 'sn': sn, 'wait': wait, 'other': other,
+    return {'scc': scc, 'ay': ay, 'sn': sn, 'gb': gb, 'wait': wait, 'other': other,
             'total_wait_samples': total_wait_samples, 'duration': duration}
 
 
@@ -134,6 +135,9 @@ def dump_vgm(data, hdr):
             pos += 4
         elif b == 0xA0 and pos + 3 <= end:
             print(f"  AY   reg={data[pos+1]:02X} data={data[pos+2]:02X}")
+            pos += 3
+        elif b == 0xB3 and pos + 3 <= end:
+            print(f"  GB   reg={data[pos+1]:02X} data={data[pos+2]:02X}")
             pos += 3
         elif b == 0x61 and pos + 3 <= end:
             n = struct.unpack_from('<H', data, pos+1)[0]
@@ -186,7 +190,7 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     print(f"  GD3: {gd3_text}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz")
     print(f"  Data: {end - pos} bytes")
-    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} Wait:{stats['wait']}")
+    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} Wait:{stats['wait']}")
     # SN76489 变体自动检测
     sn_var = hdr.get('sn_variant')
     sn_names = {0: 'SN76489(15bit)', 1: 'SegaVDP(16bit)', 2: 'SN76489A(17bit)'}
@@ -242,6 +246,12 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                 if pos + 1 <= end:
                     ser.write(data[pos-1:pos+1])
                     pos += 1
+
+            elif b == 0xB3:
+                # GB DMG: [0xB3][reg][data]
+                if pos + 2 <= end:
+                    ser.write(data[pos-1:pos+2])
+                    pos += 2
 
             elif b == 0x61:
                 # Wait N samples
@@ -311,7 +321,7 @@ def list_songs(vgm_dir):
         name = os.path.basename(f); size = os.path.getsize(f)
         try:
             d = load_vgm(f); h = parse_vgm_header(d); s = scan_vgm_stats(d, h)
-            info = f"SCC:{s['scc']} PSG:{s['ay']} SN:{s['sn']}"
+            info = f"SCC:{s['scc']} PSG:{s['ay']} SN:{s['sn']} GB:{s['gb']}"
             dur = f"{s['duration']:.1f}s"
         except Exception:
             info = "?"; dur = "?"

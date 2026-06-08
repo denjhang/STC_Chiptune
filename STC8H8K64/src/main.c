@@ -27,11 +27,13 @@
 #include "scc.h"
 #include "ay8910.h"
 #include "sn76489.h"
+#include "gb.h"
 
 /* ========== 芯片活跃标志 (收到命令才 render) ========== */
 bit scc_active;
 bit ay_active;
 bit sn_active;
+bit gb_active;
 
 /* ========== 16kHz tick (Timer0 ISR) ========== */
 volatile u16 sample_tick;
@@ -128,6 +130,7 @@ void UART1_int(void) interrupt 4 {
  *   [0x50][data]            → SN76489 写寄存器 (2 字节)
  *   [0x51][variant]         → SN76489 变体选择 (2 字节)
  *     variant: 0=SN76489(15bit), 1=SegaVDP(16bit), 2=SN76489A(17bit)
+ *   [0xB3][reg][data]       → GB DMG 寄存器写入 (3 字节)
  *   其他: 忽略
  */
 
@@ -177,6 +180,17 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_set_variant(d);
+
+        } else if (b == 0xB3) {
+            /* GB DMG: [0xB3][reg][data] */
+            gb_active = 1;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            gb_wr(r, d);
 
         } else {
             /* 忽略: wait, 未知命令等 */
@@ -245,9 +259,11 @@ void led_tick_update(void) {
 }
 
 /* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
-/* 17640Hz ISR, AY+SN 每 tick, SCC 每 4 tick (4410Hz) */
+/* 17640Hz ISR, AY+SN 每 tick, SCC 每 4 tick (4410Hz), GB 每 4 tick (4410Hz) */
 static u8 scc_tick_div;
+static u8 gb_tick_div;
 static u8 scc_out = 128;
+static s16 gb_out = 0;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -258,9 +274,15 @@ void timer0_isr(void) interrupt 1 {
         scc_out = scc_render();
     }
 
+    if (gb_active && ++gb_tick_div >= 4) {
+        gb_tick_div = 0;
+        gb_out = gb_render();
+    }
+
     mix = (s16)((u16)scc_out - 128);
     if (ay_active) mix += ay_render() << 1;
     if (sn_active) mix += sn_render() << 1;
+    if (gb_active) mix += gb_out << 1;
 
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
@@ -293,6 +315,7 @@ void main(void) {
     scc_init();
     ay_init();
     sn_init();
+    gb_init();
     test_start();
     led_tick = 0;
     timer0_init();
