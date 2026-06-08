@@ -19,10 +19,10 @@
 #include "stc8h.h"
 #include <intrins.H>
 
-#define MAIN_Fosc       45158400L
+#define MAIN_Fosc       48000000L
 #define Baudrate1       230400L
 #define UART1_BUF_LENGTH 512
-#define SAMPLE_RATE     11025
+#define SAMPLE_RATE     8820
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
 #define SCC_FREQ_BITS    16
@@ -170,7 +170,7 @@ u8  led_val = 0xFE;
 
 /* ========== 任务调度: Timer0 ISR 软件分频 ========== */
 /* 11025 / 60 ≈ 184, 每 184 次 Timer0 ISR 处理一次任务 */
-#define TASK_DIVIDER    184
+#define TASK_DIVIDER    147
 static u16 task_div;
 
 /* ========== PWMA PWM1 → P2.0 ========== */
