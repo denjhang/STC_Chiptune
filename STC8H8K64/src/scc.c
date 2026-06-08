@@ -1,107 +1,109 @@
+/* scc.c - SCC (K051649) 仿真核心 (从 main.c 剥离) */
+#include <stc8h.h>
 #include "scc.h"
-#include <string.h>
 
-void scc_init(scc_state_t *s, uint32_t clock_hz) {
-    uint32_t tmp;
-    memset(s, 0, sizeof(*s));
-    s->rate = 44100;
-    /* Precompute (clock/2) << (FREQ_BITS+1), clamped to 32-bit */
-    tmp = clock_hz >> 1;
-    s->clock_factor = tmp << (SCC_FREQ_BITS + 1);
-}
+/* ISR 热路径: idata */
+static u32 idata scc_cnt[SCC_CHANS];
+static u32 idata scc_step_val[SCC_CHANS];
+static u8  idata scc_vol[SCC_CHANS];
+static u8  idata scc_key[SCC_CHANS];
+/* 非热路径: xdata */
+static u16 xdata scc_freq[SCC_CHANS];
+static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
+static u8  xdata scc_creg;
+static u8  xdata scc_tst;
 
-void scc_reset(scc_state_t *s) {
-    uint8_t i;
+void scc_init(void) {
+    u8 i, j;
     for (i = 0; i < SCC_CHANS; i++) {
-        s->ch[i].counter = 0;
-        s->ch[i].frequency = 0;
-        s->ch[i].volume = 0;
-        s->ch[i].key = 0;
-        memset(s->ch[i].waveram, 0, SCC_WAVELEN);
+        scc_cnt[i] = 0;
+        scc_freq[i] = 0;
+        scc_step_val[i] = 0;
+        scc_vol[i] = 0;
+        scc_key[i] = 0;
+        for (j = 0; j < SCC_WAVELEN; j++)
+            scc_wav[i][j] = 0;
     }
-    s->test = 0;
-    s->cur_reg = 0;
+    scc_creg = 0;
+    scc_tst = 0;
 }
 
-void scc_write(scc_state_t *s, uint8_t port, uint8_t data) {
-    uint8_t offset, ch;
+void scc_wr(u8 port, u8 dat) {
+    u8 off, chi, hi, lo;
+
     if (port & 1) {
         switch (port >> 1) {
-        case 0x00:
-        case 0x04: {
-            offset = s->cur_reg;
-            if (s->test & 0x40) return;
-            if (!s->mode_plus) {
-                if (offset >= 0x60) {
-                    s->ch[3].waveram[offset & 0x1f] = (int8_t)data;
-                    s->ch[4].waveram[offset & 0x1f] = (int8_t)data;
+        case 0:
+        case 4:
+            off = scc_creg;
+            if (scc_tst & 0x40) return;
+            scc_wav[off >> 5][off & 0x1f] = dat;
+            break;
+        case 1:
+            off = scc_creg;
+            chi = off >> 1;
+            if (chi < SCC_CHANS) {
+                if (off & 1) {
+                    hi = dat & 0x0F;
+                    lo = scc_freq[chi] & 0xFF;
+                    scc_freq[chi] = ((u16)hi << 8) | lo;
                 } else {
-                    s->ch[offset >> 5].waveram[offset & 0x1f] = (int8_t)data;
+                    hi = scc_freq[chi] & 0x0F00;
+                    scc_freq[chi] = hi | dat;
                 }
-            } else {
-                s->ch[offset >> 5].waveram[offset & 0x1f] = (int8_t)data;
+                {
+                    u32 f = (u32)scc_freq[chi] + 1;
+                    if (f < 9) {
+                        scc_step_val[chi] = 0;
+                    } else {
+                        scc_step_val[chi] = SCC_STEP_BASE / f;
+                    }
+                }
             }
             break;
-        }
-        case 0x01: {
-            offset = s->cur_reg;
-            ch = offset >> 1;
-            if (ch < SCC_CHANS) {
-                if (offset & 1)
-                    s->ch[ch].frequency = (s->ch[ch].frequency & 0x00FF) | ((uint16_t)(data & 0x0F) << 8);
-                else
-                    s->ch[ch].frequency = (s->ch[ch].frequency & 0x0F00) | data;
-                /* precompute step at write time, not at render time */
-                if (s->ch[ch].frequency > 8) {
-                    s->ch[ch].step = s->clock_factor / ((uint32_t)(s->ch[ch].frequency + 1) * s->rate);
-                } else {
-                    s->ch[ch].step = 0;
-                }
-                s->ch[ch].counter &= 0xFFFF0000u;
-                if (s->test & 0x20)
-                    s->ch[ch].counter = 0xFFFFFFFF;
-                else if (s->ch[ch].frequency < 9)
-                    s->ch[ch].counter |= ((1 << SCC_FREQ_BITS) - 1);
-            }
+        case 2:
+            chi = scc_creg & 0x07;
+            if (chi < SCC_CHANS)
+                scc_vol[chi] = dat & 0x0F;
             break;
-        }
-        case 0x02: {
-            ch = s->cur_reg & 0x07;
-            if (ch < SCC_CHANS)
-                s->ch[ch].volume = data & 0x0F;
+        case 3:
+            for (chi = 0; chi < SCC_CHANS; chi++)
+                scc_key[chi] = (dat >> chi) & 1;
             break;
-        }
-        case 0x03:
-            for (ch = 0; ch < SCC_CHANS; ch++)
-                s->ch[ch].key = (data >> ch) & 1;
+        case 5:
+            scc_tst = dat;
             break;
-        case 0x05:
-            s->test = data;
+        default:
             break;
         }
     } else {
-        s->cur_reg = data;
+        scc_creg = dat;
     }
 }
 
-int8_t scc_render(scc_state_t *s) {
-    int16_t mix = 0;
-    uint8_t i;
+u8 scc_render(void) {
+    s16 mix;
+    u8 i;
+    u8 vol, offs, b;
+    s16 tmp;
+
+    mix = 0;
     for (i = 0; i < SCC_CHANS; i++) {
-        scc_channel_t *c = &s->ch[i];
-        if (c->step) {
-            uint32_t offs;
-            int16_t smpl;
-            c->counter += c->step;
-            if (c->key) {
-                offs = (c->counter >> SCC_FREQ_BITS) & 0x1F;
-                smpl = (int16_t)c->waveram[offs] * c->volume;
-                smpl >>= 4;
-                mix += smpl;
+        if (scc_step_val[i] > 0) {
+            scc_cnt[i] += scc_step_val[i];
+            if (scc_key[i]) {
+                offs = (u8)(scc_cnt[i] >> SCC_FREQ_BITS) & 0x1F;
+                vol = scc_vol[i];
+                b = scc_wav[i][offs];
+                if (b >= 128)
+                    tmp = -(((s16)(256 - (u16)b) * (u16)vol) >> 4);
+                else
+                    tmp = ((s16)(u16)b * (u16)vol) >> 4;
+                mix += tmp;
             }
         }
     }
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
-    return (int8_t)mix;
+    return 128 + (u8)mix;
 }
