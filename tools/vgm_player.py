@@ -65,10 +65,29 @@ def parse_vgm_header(data):
                 gd3 = f"{fields[0]} - {fields[2]}"
         except Exception:
             pass
+    # SN76489 变体检测 (header 0x0C=SN clock, 0x28=taps, 0x2A=SRWidth, 0x2B=flags)
+    sn_variant = None
+    sn_clock = struct.unpack_from('<I', data, 0x0C)[0] if len(data) > 0x0F else 0
+    if sn_clock & 0x3FFFFFFF:  # SN76489 clock present
+        sn_taps = struct.unpack_from('<H', data, 0x28)[0] if len(data) > 0x29 else 0
+        sn_srw = data[0x2A] if len(data) > 0x2A else 0
+        if not sn_srw:
+            sn_srw = 16  # default Sega VDP
+        if not sn_taps:
+            sn_taps = 0x09  # default Sega VDP
+        # 映射到固件变体: 0=SN76489(15bit), 1=SegaVDP(16bit), 2=SN76489A(17bit)
+        if sn_srw <= 15 or sn_taps == 0x03:
+            sn_variant = 0  # SN76489
+        elif sn_srw >= 17:
+            sn_variant = 2  # SN76489A
+        else:
+            sn_variant = 1  # Sega VDP (default)
+
     return {
         'version': ver, 'eof': eof, 'data_offset': data_off,
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
+        'sn_variant': sn_variant,
     }
 
 
@@ -137,6 +156,7 @@ VGM_CMD_LEN[0x20] = 3
 for _i in range(0x30, 0x40): VGM_CMD_LEN[_i] = 4
 VGM_CMD_LEN[0x4E] = 4; VGM_CMD_LEN[0x4F] = 4
 VGM_CMD_LEN[0x50] = 2  # SN76489: 0x50 + 1 byte data
+VGM_CMD_LEN[0x51] = 2  # SN76489 variant select (custom)
 VGM_CMD_LEN[0x61] = 3
 VGM_CMD_LEN[0x62] = 1; VGM_CMD_LEN[0x63] = 1; VGM_CMD_LEN[0x66] = 1
 for _i in range(0x70, 0x80): VGM_CMD_LEN[_i] = 1
@@ -167,6 +187,12 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz")
     print(f"  Data: {end - pos} bytes")
     print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} Wait:{stats['wait']}")
+    # SN76489 变体自动检测
+    sn_var = hdr.get('sn_variant')
+    sn_names = {0: 'SN76489(15bit)', 1: 'SegaVDP(16bit)', 2: 'SN76489A(17bit)'}
+    if sn_var is not None:
+        print(f"  SN variant: {sn_names.get(sn_var, '?')}")
+        ser.write(bytes([0x51, sn_var]))
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 

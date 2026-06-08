@@ -120,7 +120,9 @@ void UART1_int(void) interrupt 4 {
 /*
  *   [0xD2][port][reg][data] → SCC (4 字节)
  *   [0xA0][reg][data]       → AY8910 (3 字节)
- *   [0x50][data]            → SN76489 (2 字节)
+ *   [0x50][data]            → SN76489 写寄存器 (2 字节)
+ *   [0x51][variant]         → SN76489 变体选择 (2 字节)
+ *     variant: 0=SN76489(15bit), 1=SegaVDP(16bit), 2=SN76489A(17bit)
  *   其他: 忽略
  */
 
@@ -160,6 +162,13 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_wr(d);
+
+        } else if (b == 0x51) {
+            /* SN76489 变体: [0x51][variant] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            sn_set_variant(d);
 
         } else {
             /* 忽略: wait, 未知命令等 */
