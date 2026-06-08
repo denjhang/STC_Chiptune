@@ -273,11 +273,13 @@ void led_tick_update(void) {
 }
 
 /* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
-/* 17640Hz ISR, AY+SN 每 tick, SCC/GB 每 4 tick (4410Hz) */
+/* 17640Hz ISR, AY+SN 每 tick, SCC/GB/NES 每 4 tick (4410Hz) */
 static u8 scc_tick_div;
 static u8 gb_tick_div;
+static u8 nes_tick_div;
 static u8 scc_out = 128;
 static s16 gb_out = 0;
+static s16 nes_out = 0;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -293,11 +295,16 @@ void timer0_isr(void) interrupt 1 {
         gb_out = gb_render();
     }
 
+    if (nes_active && ++nes_tick_div >= 4) {
+        nes_tick_div = 0;
+        nes_out = nes_render();
+    }
+
     mix = (s16)((u16)scc_out - 128);
     if (ay_active) mix += ay_render() << 1;
     if (sn_active) mix += sn_render() << 1;
     if (gb_active) mix += gb_out << 1;
-    if (nes_active) mix += nes_render();
+    if (nes_active) mix += nes_out;
 
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;

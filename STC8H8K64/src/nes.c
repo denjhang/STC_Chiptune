@@ -378,9 +378,9 @@ s16 nes_render(void) {
     cycles = (u16)(nes_base_count >> NES_GETA_BITS);
     nes_base_count &= (1UL << NES_GETA_BITS) - 1;
 
-    /* 每 294 样本触发一次帧事件 (~60Hz) */
+    /* 每 294 样本触发一次帧事件 (~60Hz @ 17640, 但 NES @ 4410 所以 294/4=74) */
     nes_frame_div++;
-    if (nes_frame_div >= 294) {
+    if (nes_frame_div >= 74) {
         nes_frame_div = 0;
         do_frame = 1;
     }
