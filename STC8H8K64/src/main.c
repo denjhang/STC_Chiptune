@@ -368,9 +368,7 @@ void timer0_isr(void) interrupt 1 {
 
     if (++task_div >= TASK_DIVIDER) {
         task_div = 0;
-        EA = 0;
         process_uart();
-        EA = 1;
         if (test_active) test_tick();
         led_tick_update();
     }
