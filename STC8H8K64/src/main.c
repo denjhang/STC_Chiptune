@@ -3,7 +3,7 @@
  * Keil C51 + stc8h.h, 45.1584MHz
  *
  * PWMA PWM1 → P2.0: 8-bit DAC 载波 (~176kHz)
- * Timer0 ISR: 16kHz 采样率, scc_render() → PWM1_CCR1L
+ * Timer0 ISR: 11025Hz 采样率, scc_render() → PWM1_CCR1L
  * Timer1:     UART1 波特率 230400
  *
  * 协议: Python 控制节拍, 固件只做 SCC 写入
@@ -11,9 +11,8 @@
  *   [0xA0][reg][data]       → AY8910 (预留)
  *   其他字节: 忽略
  *
- * 频率写入后实时计算 step:
- *   step = (SCC_CLOCK/2) << (FREQ_BITS+1) / ((freq+1) * SAMPLE_RATE)
- *   u32 除法, Keil C51 自动调用库函数, 只在频率写入时计算
+ * step 预计算: step = (SCC_HALF_CLK / SAMPLE_RATE) << SCC_SHIFT / (freq+1)
+ *   = 81 * 131072 / (freq+1) = 10616832 / (freq+1)
  */
 
 #include "stc8h.h"
@@ -22,42 +21,17 @@
 #define MAIN_Fosc       45158400L
 #define Baudrate1       230400L
 #define UART1_BUF_LENGTH 512
-#define SAMPLE_RATE     16000
+#define SAMPLE_RATE     11025
 #define SCC_CHANS        5
 #define SCC_WAVELEN      32
 #define SCC_FREQ_BITS    16
 #define SCC_CLOCK       3579545L
 
-/* step 公式常量: (clock/2) << (FREQ_BITS+1) = 1789772 * 131072 = 溢出 u32
- * 拆成两步: step = (1789772UL / (freq+1)) * 131072UL / SAMPLE_RATE
- * 或: step = 1789772UL * 131072UL / ((u32)(freq+1) * SAMPLE_RATE)
- * Keil C51 u32*u32 会溢出, 所以用 (1789772UL / (freq+1)) 先除
- * 但 1789772 / (freq+1) 精度不够 (小数部分丢失)
- *
- * Okazaki 方案: base_incr = clk * (1<<GETA_BITS) / rate
- *              incr = base_incr / (freq+1)
- * 用 GETA_BITS=22: base_incr = 3579545 * 4194304 / 16000 = 93850680(溢出 u32!)
- *
- * 解决: 降低 GETA_BITS 使 base_incr 不溢出
- * base_incr = clk * (1<<N) / rate <= 0xFFFFFFFF
- * 3579545 * (1<<N) / 16000 <= 4294967295
- * 3579545 / 16000 = 223.7
- * (1<<N) <= 4294967295 / 223.7 = 19192833
- * N <= 24 (2^24 = 16777216 < 19192833)
- *
- * 用 N=20: base_incr = 3579545 * 1048576 / 16000 = 233947 (u16 够!)
- * 但 freq=100: incr = 233947 / 101 = 2316 -> step=2316, FREQ_BITS=20 -> offs = cnt>>20 & 0x1F
- * 等效波形步进: 2316/1048576 = 0.002209
- * 对比 RPFM: 145166/65536 = 2.215 (差 1000 倍因为 FREQ_BITS 差 4)
- *
- * 不管 FREQ_BITS 多少, 等效波形步进 = step / (1<<FREQ_BITS)
- * 只要不溢出就行. 用 u32 step + FREQ_BITS=16 最简单.
- * step 最大值: 1789772*131072/16000 = 14657932 (fit u32!)
- */
-
-/* 预计算常量: 1789772UL, 在 scc_wr 频率写入时用 */
+/* 预计算常量: step = (SCC_HALF_CLK / SAMPLE_RATE) << SCC_SHIFT / (freq+1)
+ * = 81 * 131072 / (freq+1) = 10616832 / (freq+1) */
 #define SCC_HALF_CLK    1789772UL
 #define SCC_SHIFT       (SCC_FREQ_BITS + 1)  /* 17 */
+#define SCC_STEP_BASE   (SCC_HALF_CLK / SAMPLE_RATE * (1UL << SCC_SHIFT))  /* 10616832 */
 
 typedef unsigned char   u8;
 typedef unsigned int    u16;
@@ -118,20 +92,13 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
-                /* 实时计算 step (u32 除法, 只在频率写入时执行)
-                 * step = SCC_HALF_CLK << SCC_SHIFT / ((freq+1) * SAMPLE_RATE)
-                 * 但 SCC_HALF_CLK << 17 = 1789772 * 131072 = 溢出 u32
-                 * 改用: step = SCC_HALF_CLK / (freq+1) * (1<<SCC_SHIFT) / SAMPLE_RATE
-                 * 精度损失可接受 (误差 < 1/SAMPLE_RATE)
-                 */
                 {
                     u32 f = (u32)scc_freq[chi] + 1;
                     u32 step;
                     if (f < 9) {
                         step = 0;
                     } else {
-                        step = SCC_HALF_CLK / f;
-                        step = step * (1UL << SCC_SHIFT) / SAMPLE_RATE;
+                        step = SCC_STEP_BASE / f;
                     }
                     scc_step_val[chi] = step;
                 }
@@ -227,7 +194,7 @@ void pwma_dac_init(void) {
     P_SW2 &= ~0x80;
 }
 
-/* ========== Timer0: 16kHz ========== */
+/* ========== Timer0: 11025Hz ========== */
 void timer0_init(void) {
     u32 reload;
     reload = MAIN_Fosc / SAMPLE_RATE;
