@@ -20,7 +20,7 @@
 #include <intrins.H>
 
 #define MAIN_Fosc       48000000L
-#define Baudrate1       230400L
+#define Baudrate1       115200L
 #define UART1_BUF_LENGTH 512
 #define SAMPLE_RATE     8820
 #define SCC_CHANS        5
