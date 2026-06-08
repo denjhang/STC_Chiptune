@@ -183,15 +183,15 @@ void pwma_dac_init(void) {
     PWMA_CCER1 = 0x05;
     PWMA_ARRH  = 0x00;
     PWMA_ARRL  = 255;
-    PWMA_CCR1H = 0x00;
-    PWMA_CCR1L = 128;
+    PWM1_CCR1H = 0x00;
+    PWM1_CCR1L = 128;
     PWMA_PSCRH = 0x00;
     PWMA_PSCRL = 0x00;
     PWMA_PS = (PWMA_PS & ~0x03) | 0x01;
     PWMA_ENO = 0x01;
     PWMA_BKR = 0x80;
     PWMA_CR1 = 0x01;
-    P_SW2 &= ~0x80;
+    /* P_SW2 保持开启，加速 PWM 访问 */
 }
 
 /* ========== Timer0: 11025Hz ========== */
@@ -361,9 +361,7 @@ void led_tick_update(void) {
 void timer0_isr(void) interrupt 1 {
     u8 out;
     out = scc_render();
-    P_SW2 |= 0x80;
     PWM1_CCR1L = out;
-    P_SW2 &= ~0x80;
     sample_tick++;
 
     if (++task_div >= TASK_DIVIDER) {
