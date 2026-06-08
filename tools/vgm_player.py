@@ -75,13 +75,14 @@ def parse_vgm_header(data):
 def scan_vgm_stats(data, hdr):
     pos = hdr['data_offset']
     end = min(hdr['eof'], len(data))
-    scc = ay = wait = other = 0
+    scc = ay = sn = wait = other = 0
     total_wait_samples = 0
     while pos < end:
         b = data[pos]
         if b == 0x66: break
         if b == 0xD2: scc += 1; pos += 4
         elif b == 0xA0: ay += 1; pos += 3
+        elif b == 0x50: sn += 1; pos += 2
         elif b == 0x61:
             if pos + 3 <= end:
                 total_wait_samples += struct.unpack_from('<H', data, pos+1)[0]
@@ -97,7 +98,7 @@ def scan_vgm_stats(data, hdr):
         else:
             other += 1; pos += 1
     duration = total_wait_samples / SAMPLES_PER_SEC
-    return {'scc': scc, 'ay': ay, 'wait': wait, 'other': other,
+    return {'scc': scc, 'ay': ay, 'sn': sn, 'wait': wait, 'other': other,
             'total_wait_samples': total_wait_samples, 'duration': duration}
 
 
@@ -135,7 +136,7 @@ VGM_CMD_LEN = [0]*256
 VGM_CMD_LEN[0x20] = 3
 for _i in range(0x30, 0x40): VGM_CMD_LEN[_i] = 4
 VGM_CMD_LEN[0x4E] = 4; VGM_CMD_LEN[0x4F] = 4
-for _i in range(0x50, 0x60): VGM_CMD_LEN[_i] = 4
+VGM_CMD_LEN[0x50] = 2  # SN76489: 0x50 + 1 byte data
 VGM_CMD_LEN[0x61] = 3
 VGM_CMD_LEN[0x62] = 1; VGM_CMD_LEN[0x63] = 1; VGM_CMD_LEN[0x66] = 1
 for _i in range(0x70, 0x80): VGM_CMD_LEN[_i] = 1
@@ -165,7 +166,7 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     print(f"  GD3: {gd3_text}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz")
     print(f"  Data: {end - pos} bytes")
-    print(f"  SCC:{stats['scc']} AY:{stats['ay']} Wait:{stats['wait']}")
+    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} Wait:{stats['wait']}")
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 
@@ -209,6 +210,12 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                 if pos + 2 <= end:
                     ser.write(data[pos-1:pos+2])
                     pos += 2
+
+            elif b == 0x50:
+                # SN76489: [0x50][data]
+                if pos + 1 <= end:
+                    ser.write(data[pos-1:pos+1])
+                    pos += 1
 
             elif b == 0x61:
                 # Wait N samples
@@ -278,7 +285,7 @@ def list_songs(vgm_dir):
         name = os.path.basename(f); size = os.path.getsize(f)
         try:
             d = load_vgm(f); h = parse_vgm_header(d); s = scan_vgm_stats(d, h)
-            info = f"SCC:{s['scc']} PSG:{s['ay']}"
+            info = f"SCC:{s['scc']} PSG:{s['ay']} SN:{s['sn']}"
             dur = f"{s['duration']:.1f}s"
         except Exception:
             info = "?"; dur = "?"

@@ -1,14 +1,15 @@
 /*
- * STC8H8K64U SCC + AY8910 合成器
+ * STC8H8K64U SCC + AY8910 + SN76489 合成器
  * Keil C51 + stc8h.h, 48MHz
  *
- * PWMA PWM1 → P2.0: 8-bit DAC 载波 (~176kHz)
- * Timer0 ISR: 11025Hz 采样率, scc_render() + ay_render() → PWM1_CCR1L
+ * PWMA PWM1 → P2.0: 8-bit DAC 载波
+ * Timer0 ISR: 17640Hz, AY+SN 每 tick, SCC 每 5 tick (4410Hz)
  * Timer1:     UART1 波特率 115200
  *
  * 协议: Python 控制节拍
  *   [0xD2][port][reg][data] → SCC (4 字节)
  *   [0xA0][reg][data]       → AY8910 (3 字节)
+ *   [0x50][data]            → SN76489 (2 字节)
  *   其他: 忽略
  */
 
@@ -25,6 +26,7 @@
 /* ========== 仿真核心 ========== */
 #include "scc.h"
 #include "ay8910.h"
+#include "sn76489.h"
 
 /* ========== 16kHz tick (Timer0 ISR) ========== */
 volatile u16 sample_tick;
@@ -114,11 +116,11 @@ void UART1_int(void) interrupt 4 {
     if (TI) { TI = 0; B_TX1_Busy = 0; }
 }
 
-/* ========== UART → SCC ========== */
+/* ========== UART 命令协议 ========== */
 /*
- * Python 控制节拍, 固件只做 SCC 写入:
- *   [0xD2][port][reg][data] → SCC (4 字节, 波形/频率/音量/keyon)
- *   [0xA0][reg][data]       → AY8910 (预留)
+ *   [0xD2][port][reg][data] → SCC (4 字节)
+ *   [0xA0][reg][data]       → AY8910 (3 字节)
+ *   [0x50][data]            → SN76489 (2 字节)
  *   其他: 忽略
  */
 
@@ -151,6 +153,13 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             ay_wr(r, d);
+
+        } else if (b == 0x50) {
+            /* SN76489: [0x50][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            sn_wr(d);
 
         } else {
             /* 忽略: wait, 未知命令等 */
@@ -222,19 +231,20 @@ void led_tick_update(void) {
 static u8 scc_tick_div;
 
 void timer0_isr(void) interrupt 1 {
-    s16 ay_mix;
+    s16 ay_mix, sn_mix;
     s16 mix;
     u8 out;
     u8 scc_out;
 
     ay_mix = ay_render();
+    sn_mix = sn_render();
 
     if (++scc_tick_div >= 5) {
         scc_tick_div = 0;
         scc_out = scc_render();
     }
 
-    mix = (s16)((u16)scc_out - 128) + ay_mix;
+    mix = (s16)((u16)scc_out - 128) + ay_mix + sn_mix;
 
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
@@ -266,6 +276,7 @@ void main(void) {
     UART1_config();
     scc_init();
     ay_init();
+    sn_init();
     test_start();
     led_tick = 0;
     timer0_init();
