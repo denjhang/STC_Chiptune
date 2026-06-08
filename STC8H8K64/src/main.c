@@ -14,6 +14,7 @@
 
 #include "stc8h.h"
 #include <intrins.H>
+#include "types.h"
 
 #define MAIN_Fosc       48000000L
 #define Baudrate1       115200L
@@ -30,12 +31,6 @@
 #define SCC_SHIFT       (SCC_FREQ_BITS + 1)  /* 17 */
 #define SCC_STEP_BASE   (SCC_HALF_CLK / SCC_RATE * (1UL << SCC_SHIFT))
 
-typedef unsigned char   u8;
-typedef unsigned int    u16;
-typedef unsigned long   u32;
-typedef signed char     s8;
-typedef signed int      s16;
-
 /* ========== SCC 状态 ========== */
 /* ISR 热路径: idata (快) */
 static u32 idata scc_cnt[SCC_CHANS];
@@ -48,47 +43,8 @@ static u8  xdata scc_wav[SCC_CHANS][SCC_WAVELEN];
 static u8  xdata scc_creg;
 static u8  xdata scc_tst;
 
-/* ========== AY8910 状态 ========== */
-#define AY_CHANS    3
-#define AY_CLK      1789772UL
-#define AY_GETA_BITS 24
-/* base_incr = CLK * (1 << 24) / 8 / RATE = 1789772 * 16777216 / 8 / 22050 = 170223307 */
-#define AY_BASE_INCR   170223307UL
-
-static u8  xdata ay_reg[16];
-static u16 xdata ay_count[AY_CHANS];
-static u8  xdata ay_freq_lo[AY_CHANS];
-static u8  xdata ay_freq_hi[AY_CHANS];
-static u8  xdata ay_edge[AY_CHANS];
-static u8  xdata ay_tmask[AY_CHANS];
-static u8  xdata ay_nmask[AY_CHANS];
-static u16 xdata ay_env_freq;
-static u32 xdata ay_env_count;
-static u8  xdata ay_env_step;
-static u8  xdata ay_env_attack;
-static u8  xdata ay_env_continue, ay_env_alternate, ay_env_hold, ay_env_pause;
-static u32 xdata ay_noise_seed;
-static u8  xdata ay_noise_scaler;
-static u8  xdata ay_noise_count;
-static u8  xdata ay_noise_freq;
-static u8  xdata ay_volume[AY_CHANS];
-static u32 xdata ay_base_count;
-
-/* AY-3-8910 音量表 (16 steps) */
-static u8 code ay_voltbl[32] = {
-    0x00, 0x00, 0x03, 0x03, 0x04, 0x04, 0x06, 0x06,
-    0x09, 0x09, 0x0D, 0x0D, 0x12, 0x12, 0x1D, 0x1D,
-    0x22, 0x22, 0x37, 0x37, 0x4D, 0x4D, 0x62, 0x62,
-    0x82, 0x82, 0xA6, 0xA6, 0xD0, 0xD0, 0xFF, 0xFF
-};
-
-s16 ay_render(void);
-
-/* 寄存器写掩码 */
-static u8 code ay_regmsk[16] = {
-    0xff, 0x0f, 0xff, 0x0f, 0xff, 0x0f, 0x1f, 0x3f,
-    0x1f, 0x1f, 0x1f, 0xff, 0xff, 0x0f, 0xff, 0xff
-};
+/* ========== AY8910 (ay8910.c) ========== */
+#include "ay8910.h"
 
 /* ========== 16kHz tick (Timer0 ISR) ========== */
 volatile u16 sample_tick;
@@ -194,162 +150,6 @@ u8 scc_render(void) {
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     return 128 + (u8)mix;
-}
-
-/* ========== AY8910 初始化 ========== */
-void ay_init(void) {
-    u8 i;
-    for (i = 0; i < 16; i++) ay_reg[i] = 0;
-    for (i = 0; i < AY_CHANS; i++) {
-        ay_count[i] = 0;
-        ay_freq_lo[i] = 0;
-        ay_freq_hi[i] = 0;
-        ay_edge[i] = 0;
-        ay_tmask[i] = 0;
-        ay_nmask[i] = 0;
-        ay_volume[i] = 0;
-    }
-    ay_env_freq = 0;
-    ay_env_count = 0;
-    ay_env_step = 0;
-    ay_env_attack = 0;
-    ay_env_continue = 0;
-    ay_env_alternate = 0;
-    ay_env_hold = 0;
-    ay_env_pause = 0;
-    ay_noise_seed = 1;
-    ay_noise_scaler = 0;
-    ay_noise_count = 0;
-    ay_noise_freq = 0;
-    ay_base_count = 0;
-}
-
-/* ========== AY8910 写寄存器 ========== */
-void ay_wr(u8 reg, u8 val) {
-    u8 c;
-    u16 freq;
-
-    if (reg > 15) return;
-    val &= ay_regmsk[reg];
-    ay_reg[reg] = val;
-
-    switch (reg) {
-    case 0: case 2: case 4:
-    case 1: case 3: case 5:
-        c = reg >> 1;
-        freq = ((u16)ay_reg[c * 2 + 1] & 0x0F) << 8;
-        freq |= ay_reg[c * 2];
-        ay_freq_lo[c] = ay_reg[c * 2];
-        ay_freq_hi[c] = ay_reg[c * 2 + 1] & 0x0F;
-        break;
-    case 6:
-        ay_noise_freq = val & 31;
-        break;
-    case 7:
-        ay_tmask[0] = (val & 1) ? 1 : 0;
-        ay_tmask[1] = (val & 2) ? 1 : 0;
-        ay_tmask[2] = (val & 4) ? 1 : 0;
-        ay_nmask[0] = (val & 8) ? 1 : 0;
-        ay_nmask[1] = (val & 16) ? 1 : 0;
-        ay_nmask[2] = (val & 32) ? 1 : 0;
-        break;
-    case 8: case 9: case 10:
-        ay_volume[reg - 8] = val;
-        break;
-    case 11: case 12:
-        ay_env_freq = ((u16)ay_reg[12] << 8) + ay_reg[11];
-        break;
-    case 13:
-        ay_env_continue = (val >> 3) & 1;
-        ay_env_attack   = (val >> 2) & 1;
-        ay_env_alternate= (val >> 1) & 1;
-        ay_env_hold     = val & 1;
-        ay_env_pause    = 0;
-        ay_env_step     = ay_env_attack ? 0 : 0x0F;
-        break;
-    }
-}
-
-/* ========== AY8910 渲染 ========== */
-s16 ay_render(void) {
-    u8 i, incr, noise;
-    u16 freq;
-    u16 ch_out;
-    s16 mix;
-    u8 vol_idx, vol_val;
-
-    ay_base_count += AY_BASE_INCR;
-    incr = (u8)(ay_base_count >> AY_GETA_BITS);
-    ay_base_count &= (1UL << AY_GETA_BITS) - 1;
-
-    /* Envelope */
-    if (incr > 0) {
-        ay_env_count += incr;
-        if (ay_env_freq > 0 && ay_env_count >= ay_env_freq) {
-            if (!ay_env_pause) {
-                ay_env_step--;
-            }
-            if (ay_env_step == 0xFF) {
-                if (ay_env_hold) {
-                    if (ay_env_alternate) ay_env_attack ^= 0x0F;
-                    ay_env_pause = 1;
-                    ay_env_step = 0;
-                } else {
-                    if (ay_env_alternate && ay_env_step & 0x10)
-                        ay_env_attack ^= 0x0F;
-                    ay_env_step = 0x0F;
-                }
-            }
-            if (ay_env_freq >= incr)
-                ay_env_count -= ay_env_freq;
-            else
-                ay_env_count = 0;
-        }
-
-        /* Noise */
-        ay_noise_count += incr;
-        if (ay_noise_freq > 0 && ay_noise_count >= ay_noise_freq) {
-            ay_noise_scaler ^= 1;
-            if (ay_noise_scaler) {
-                if (ay_noise_seed & 1)
-                    ay_noise_seed ^= 0x24000;
-                ay_noise_seed >>= 1;
-            }
-            if (ay_noise_freq >= incr)
-                ay_noise_count -= ay_noise_freq;
-            else
-                ay_noise_count = 0;
-        }
-    }
-    noise = ay_noise_seed & 1;
-
-    /* Tone channels */
-    mix = 0;
-    for (i = 0; i < AY_CHANS; i++) {
-        if (incr > 0) {
-            freq = ((u16)ay_freq_hi[i] << 8) | ay_freq_lo[i];
-            ay_count[i] += incr;
-            if (freq > 0 && ay_count[i] >= freq) {
-                ay_edge[i] = !ay_edge[i];
-                if (freq >= incr)
-                    ay_count[i] -= freq;
-                else
-                    ay_count[i] = 0;
-            }
-        }
-
-        ch_out = 0;
-        if ((ay_tmask[i] || ay_edge[i]) && (ay_nmask[i] || noise)) {
-            vol_idx = ay_volume[i] & 0x0F;
-            if (ay_volume[i] & 0x10)
-                vol_idx = ay_env_step ^ ay_env_attack;
-            vol_val = ay_voltbl[vol_idx];
-            ch_out = (u16)vol_val << 4;
-        }
-        /* AY 输出 0~0xFF0, 缩放到 SCC 的 -128~127 范围 */
-        mix += (s16)((u16)ch_out >> 4) - 8;
-    }
-    return mix;
 }
 
 /* ========== UART ========== */
@@ -497,34 +297,25 @@ void test_start(void) {
     test_dec_cnt = 0;
     test_active = 1;
 
-    /* C4: freq_lo=433, freq_hi=5 → 0x1B1 = 433
-     * E4: freq_lo=649, freq_hi=5 → 0x289 = 649
-     * G4: freq_lo=971, freq_hi=5 → 0x3CB = 971 */
-    ay_freq_lo[0] = 433; ay_freq_hi[0] = 5;
-    ay_freq_lo[1] = 649; ay_freq_hi[1] = 5;
-    ay_freq_lo[2] = 971; ay_freq_hi[2] = 5;
+    /* C4: freq=433 → R0=0xB1, R1=0x01 */
+    ay_wr(0, 0xB1); ay_wr(1, 0x01);
+    /* E4: freq=649 → R2=0x89, R3=0x02 */
+    ay_wr(2, 0x89); ay_wr(3, 0x02);
+    /* G4: freq=971 → R4=0xCB, R5=0x03 */
+    ay_wr(4, 0xCB); ay_wr(5, 0x03);
 
-    /* 启用包络衰减，shape=4 (decay once), freq_lo=0x91 freq_hi=0x0C */
-    ay_reg[11] = 0x91; ay_reg[12] = 0x0C;
-    ay_env_freq = ((u16)ay_reg[12] << 8) + ay_reg[11];
-    ay_reg[13] = 4; /* decay once */
-    ay_env_continue = 0;
-    ay_env_attack = 0;
-    ay_env_alternate = 0;
-    ay_env_hold = 0;
-    ay_env_pause = 0;
-    ay_env_step = 0x0F;
+    /* 混合器: 全部音调开启, 噪声关闭 */
+    ay_wr(7, 0x00);
 
-    /* 3 通道启用包络 (bit4=1), 混合器全开 (0x00) */
-    ay_volume[0] = 0x10; /* CH A: 包络 */
-    ay_volume[1] = 0x10; /* CH B: 包络 */
-    ay_volume[2] = 0x10; /* CH C: 包络 */
-    ay_tmask[0] = 0; ay_tmask[1] = 0; ay_tmask[2] = 0;
-    ay_nmask[0] = 0; ay_nmask[1] = 0; ay_nmask[2] = 0;
+    /* 包络频率 */
+    ay_wr(11, 0x91); ay_wr(12, 0x0C);
+    /* 包络形状: decay once (continue=0, attack=1, alternate=0, hold=0 → 0x04) */
+    ay_wr(13, 0x04);
 
-    /* 计数器清零 */
-    ay_count[0] = 0; ay_count[1] = 0; ay_count[2] = 0;
-    ay_base_count = 0;
+    /* 3 通道启用包络 (bit4=1) */
+    ay_wr(8, 0x10);
+    ay_wr(9, 0x10);
+    ay_wr(10, 0x10);
 }
 
 void test_tick(void) {
@@ -534,9 +325,9 @@ void test_tick(void) {
 
     if (test_cnt >= BOOT_NOTE_TICKS) {
         test_active = 0;
-        ay_volume[0] = 0;
-        ay_volume[1] = 0;
-        ay_volume[2] = 0;
+        ay_wr(8, 0x00);
+        ay_wr(9, 0x00);
+        ay_wr(10, 0x00);
         return;
     }
 }
