@@ -27,6 +27,12 @@
 #include "scc.h"
 #include "ay8910.h"
 #include "sn76489.h"
+#include "saa1099.h"
+
+/* ========== 芯片活跃标志 (收到命令才 render) ========== */
+bit ay_active;
+bit sn_active;
+bit saa_active;
 
 /* ========== 16kHz tick (Timer0 ISR) ========== */
 volatile u16 sample_tick;
@@ -148,6 +154,7 @@ void process_uart(void) {
 
         } else if (b == 0xA0) {
             /* AY8910: [0xA0][reg][data] */
+            ay_active = 1;
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -158,6 +165,7 @@ void process_uart(void) {
 
         } else if (b == 0x50) {
             /* SN76489: [0x50][data] */
+            sn_active = 1;
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -169,6 +177,18 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_set_variant(d);
+
+        } else if (b == 0xBD) {
+            /* SAA1099: [0xBD][reg][data] */
+            saa_active = 1;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            saa_write_addr(r);
+            saa_write_data(d);
 
         } else {
             /* 忽略: wait, 未知命令等 */
@@ -191,6 +211,7 @@ void test_start(void) {
     test_cnt = 0;
     test_dec_cnt = 0;
     test_active = 1;
+    ay_active = 1;
 
     /* C4: freq=433 → R0=0xB1, R1=0x01 */
     ay_wr(0, 0xB1); ay_wr(1, 0x01);
@@ -236,8 +257,10 @@ void led_tick_update(void) {
 }
 
 /* ========== Timer0 ISR: 音频 + 软件分频任务 ========== */
-/* 22050Hz ISR, AY 每 tick, SCC 每 5 tick (4410Hz) */
+/* 17640Hz ISR, AY+SN 每 tick, SCC 每 5 tick (4410Hz), SAA 每 4 tick (4410Hz) */
 static u8 scc_tick_div;
+static u8 saa_tick_div;
+static u8 saa_out = 128;
 
 void timer0_isr(void) interrupt 1 {
     s16 ay_mix, sn_mix;
@@ -245,15 +268,20 @@ void timer0_isr(void) interrupt 1 {
     u8 out;
     u8 scc_out;
 
-    ay_mix = ay_render();
-    sn_mix = sn_render();
+    ay_mix = ay_active ? ay_render() : 0;
+    sn_mix = sn_active ? sn_render() : 0;
 
     if (++scc_tick_div >= 5) {
         scc_tick_div = 0;
         scc_out = scc_render();
     }
 
-    mix = (s16)((u16)scc_out - 128) + ay_mix + sn_mix;
+    if (saa_active && ++saa_tick_div >= 4) {
+        saa_tick_div = 0;
+        saa_out = (u8)(saa_render() + 128);
+    }
+
+    mix = (s16)((u16)scc_out - 128) + ay_mix + sn_mix + (s16)((u16)saa_out - 128);
 
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
@@ -286,6 +314,7 @@ void main(void) {
     scc_init();
     ay_init();
     sn_init();
+    saa_init();
     test_start();
     led_tick = 0;
     timer0_init();
