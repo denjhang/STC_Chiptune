@@ -247,6 +247,7 @@ static bit test_active;
 void test_start(void) {
     test_cnt = 0;
     test_active = 1;
+    ay_active = 1;
 
     ay_wr(0, 0xB1); ay_wr(1, 0x01);
     ay_wr(2, 0x89); ay_wr(3, 0x02);
