@@ -5,7 +5,7 @@ VGM Player for STC Chiptune Synth (STC8H / STC32G)
 Python 控制节拍: 解析 VGM, 芯片命令直接发串口, wait 用 time.sleep()
 固件只做芯片写入, 不解析 wait
 
-支持芯片: SCC, AY8910, SN76489, GB DMG, NES APU, SAA1099, YM2413
+支持芯片: SCC, AY8910, SN76489, GB DMG, NES APU, SAA1099, FM (custom 2-op)
 
 Usage:
   python vgm_player.py --list
@@ -13,6 +13,9 @@ Usage:
   python vgm_player.py "02 Vampire Killer" --port COM3
   python vgm_player.py 3 --speed 0.5 --loop
   python vgm_player.py --dump 1
+  python vgm_player.py --fm-note 0 60          # FM voice 0, MIDI C4
+  python vgm_player.py --fm-off 0              # FM voice 0 off
+  python vgm_player.py --fm-demo               # FM demo melody
 """
 
 import argparse
@@ -393,6 +396,52 @@ def resolve_song(selector, vgm_dir):
     return None
 
 
+# FM 波形名称
+FM_WAVE_NAMES = ['tri', 'clipsin', 'rect', 'sin', 'saw', 'abssin']
+
+def fm_send_note(ser, voice, note, duration_ms=300):
+    """发送 FM Note On, 等待, Note Off"""
+    ser.write(bytes([0x51, 0x00, voice & 0x03, note & 0x7F]))
+    time.sleep(duration_ms / 1000.0)
+    ser.write(bytes([0x51, 0x01, voice & 0x03]))
+    time.sleep(0.05)
+
+def fm_demo(ser):
+    """FM 演示: C E G 和弦 + 波形切换"""
+    print("\n  === FM Demo ===")
+    print("  Playing C4 E4 G4 on voices 0,1,2 ...")
+
+    # C4=60, E4=64, G4=67
+    ser.write(bytes([0x51, 0x00, 0, 60]))  # voice 0, C4
+    ser.write(bytes([0x51, 0x00, 1, 64]))  # voice 1, E4
+    ser.write(bytes([0x51, 0x00, 2, 67]))  # voice 2, G4
+    time.sleep(0.8)
+    for v in range(3):
+        ser.write(bytes([0x51, 0x01, v]))
+    time.sleep(0.1)
+
+    # 波形演示
+    for wi, wname in enumerate(FM_WAVE_NAMES):
+        print(f"  Wave: {wname}")
+        for v in range(3):
+            ser.write(bytes([0x51, 0x11, v, wi]))
+        ser.write(bytes([0x51, 0x00, 0, 60]))  # C4
+        time.sleep(0.5)
+        ser.write(bytes([0x51, 0x01, 0]))
+        time.sleep(0.1)
+
+    # 旋律
+    print("  Melody...")
+    melody = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60]
+    for note in melody:
+        ser.write(bytes([0x51, 0x00, 0, note]))
+        time.sleep(0.2)
+    ser.write(bytes([0x51, 0x01, 0]))
+    time.sleep(0.1)
+
+    print("  FM Demo done.")
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vgm_dir = os.path.join(script_dir, '..', 'vgm')
@@ -401,13 +450,52 @@ def main():
     parser.add_argument('song', nargs='?', help='Track number or name')
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--port', help='Serial port')
-    parser.add_argument('--baud', type=int, default=230400)
+    parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--speed', type=float, default=1.0)
     parser.add_argument('--loop', action='store_true')
     parser.add_argument('--dump', action='store_true')
     parser.add_argument('--vgm-dir', default=None)
+    parser.add_argument('--fm-note', nargs=2, type=int, metavar=('VOICE', 'NOTE'),
+                        help='FM Note On: voice(0-2) note(24-127)')
+    parser.add_argument('--fm-off', type=int, metavar='VOICE',
+                        help='FM Note Off: voice(0-2)')
+    parser.add_argument('--fm-wave', nargs=2, type=int, metavar=('VOICE', 'WAVE'),
+                        help='FM Set Wave: voice(0-2) wave(0-5)')
+    parser.add_argument('--fm-demo', action='store_true',
+                        help='FM demo melody')
     args = parser.parse_args()
     if args.vgm_dir: vgm_dir = args.vgm_dir
+
+    # FM direct commands (no VGM needed)
+    if args.fm_note is not None or args.fm_off is not None or args.fm_wave is not None or args.fm_demo:
+        if not HAS_SERIAL:
+            print("Error: pyserial required"); sys.exit(1)
+        port = args.port or find_serial_port()
+        if not port:
+            print("Error: no serial port. --port COMx"); sys.exit(1)
+        print(f"Serial: {port} @ {args.baud} baud")
+        ser = serial.Serial(port, args.baud, timeout=0.1)
+        time.sleep(0.1)
+        ser.reset_input_buffer()
+        try:
+            if args.fm_note:
+                voice, note = args.fm_note
+                ser.write(bytes([0x51, 0x00, voice & 0x03, note & 0x7F]))
+                print(f"FM Note On: voice={voice} note={note}")
+            if args.fm_off is not None:
+                ser.write(bytes([0x51, 0x01, args.fm_off & 0x03]))
+                print(f"FM Note Off: voice={args.fm_off}")
+            if args.fm_wave:
+                voice, wave = args.fm_wave
+                ser.write(bytes([0x51, 0x11, voice & 0x03, wave & 0x07]))
+                print(f"FM Set Wave: voice={voice} wave={wave}")
+            if args.fm_demo:
+                fm_demo(ser)
+        except Exception as e:
+            print(f"Error: {e}")
+        finally:
+            ser.close()
+        return
 
     if args.list:
         list_songs(vgm_dir); return

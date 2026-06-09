@@ -28,8 +28,8 @@ echo === Compile saa1099.c ===
 D:\Keil_v5\C251\BIN\C251.EXE saa1099.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
-echo === Compile ym2413.c ===
-D:\Keil_v5\C251\BIN\C251.EXE ym2413.c LARGE OPTIMIZE(8,SPEED) NOALIAS
+echo === Compile fm.c ===
+D:\Keil_v5\C251\BIN\C251.EXE fm.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile main.c ===
@@ -37,7 +37,7 @@ D:\Keil_v5\C251\BIN\C251.EXE main.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Link ===
-D:\Keil_v5\C251\BIN\l251.exe ay8910.OBJ,scc.OBJ,sn76489.OBJ,gb.OBJ,nes.OBJ,saa1099.OBJ,ym2413.OBJ,main.OBJ TO build\MAIN
+D:\Keil_v5\C251\BIN\l251.exe ay8910.OBJ,scc.OBJ,sn76489.OBJ,gb.OBJ,nes.OBJ,saa1099.OBJ,fm.OBJ,main.OBJ TO build\MAIN
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === HEX ===

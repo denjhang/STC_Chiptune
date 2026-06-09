@@ -8,13 +8,19 @@
  *
  * 协议: 与 VGM 标准命令字节一致, Python 直接透传
  *   [0x50][data]            -> SN76489 (2 字节)
- *   [0x51][reg][data]       -> YM2413 (3 字节)
+ *   [0x51][subcmd][...]     -> FM 合成 (自定义, 2-19 字节)
  *   [0xA0][reg][data]       -> AY8910 (3 字节)
  *   [0xB3][reg][data]       -> GB DMG (3 字节)
  *   [0xB4][reg][data]       -> NES APU (3 字节)
  *   [0xBD][addr][data]      -> SAA1099 (3 字节)
  *   [0xD2][port][reg][data] -> SCC (4 字节)
  *   [0x52][variant]         -> SN76489 变体 (自定义, 2 字节)
+ *
+ * FM 子命令 (0x51 后跟):
+ *   [0x00][voice][note]      -> Note On (voice 0-2, note 24-127)
+ *   [0x01][voice]           -> Note Off
+ *   [0x10][voice][17 bytes]  -> Set Tone (fb,atk,dcy,sul,sus,rel,tl,mul,wav x2)
+ *   [0x11][voice][wave]     -> Set Wave (0-5: tri,clipsin,rect,sin,saw,abssin)
  */
 
 #pragma LARGE
@@ -37,6 +43,7 @@
 #include "gb.h"
 #include "nes.h"
 #include "saa1099.h"
+#include "fm.h"
 
 /* ========== 芯片活跃标志 ========== */
 bit scc_active;
@@ -45,6 +52,7 @@ bit sn_active;
 bit gb_active;
 bit nes_active;
 bit saa_active;
+bit fm_active;
 
 /* ========== 16kHz tick ========== */
 volatile u16 sample_tick;
@@ -156,6 +164,54 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_set_variant(d);
+
+        } else if (b == 0x51) {
+            /* FM 合成: [0x51][subcmd][...] (自定义, 可变长度) */
+            fm_active = 1;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            switch (r) {
+            case 0x00: /* Note On: [0x51][0x00][voice][note] */
+                if (TX1_Cnt == RX1_Cnt) break;
+                p = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                if (TX1_Cnt == RX1_Cnt) break;
+                d = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                fm_note_on(p & 0x03, d);
+                break;
+            case 0x01: /* Note Off: [0x51][0x01][voice] */
+                if (TX1_Cnt == RX1_Cnt) break;
+                p = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                fm_note_off(p & 0x03);
+                break;
+            case 0x10: /* Set Tone: [0x51][0x10][voice][17 bytes] */
+                if (TX1_Cnt == RX1_Cnt) break;
+                p = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                { u8 tdat[17]; u8 ti;
+                  for (ti = 0; ti < 17; ti++) {
+                      if (TX1_Cnt == RX1_Cnt) break;
+                      tdat[ti] = RX1_Buffer[TX1_Cnt];
+                      if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                  }
+                  fm_set_tone(p & 0x03, tdat);
+                }
+                break;
+            case 0x11: /* Set Wave: [0x51][0x11][voice][wave] */
+                if (TX1_Cnt == RX1_Cnt) break;
+                p = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                if (TX1_Cnt == RX1_Cnt) break;
+                d = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+                fm_set_wave(p & 0x03, d);
+                break;
+            default:
+                break;
+            }
 
         } else if (b == 0xA0) {
             /* AY8910: [0xA0][reg][data] (VGM 标准) */
@@ -303,6 +359,7 @@ void timer0_isr(void) interrupt 1 {
     if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8;
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
+    if (fm_active) mix += fm_render() * 3 / 4;
     if (gb_active) mix += gb_out * 3 / 4;
     if (nes_active) mix += nes_out * 3 / 4;
     if (saa_active) mix += saa_out * 3 / 4;
@@ -342,6 +399,7 @@ void main(void) {
     scc_init();
     ay_init();
     sn_init();
+    fm_init();
     gb_init();
     nes_init();
     saa_init();
