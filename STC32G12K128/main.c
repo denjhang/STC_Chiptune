@@ -322,6 +322,8 @@ void led_tick_update(void) {
 /* ========== Timer0 ISR: 17640Hz ========== */
 static u8 scc_tick_div;
 static u8 scc_out = 128;
+static u8 gt_tick_div;
+static s16 gt_out;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -331,6 +333,13 @@ void timer0_isr(void) interrupt 1 {
         scc_out = scc_render();
     }
 
+    if (gt_active) {
+        if (++gt_tick_div >= 2) {
+            gt_tick_div = 0;
+            gt_out = gt_render();
+        }
+    }
+
     /* gb/nes/saa 暂不启用 */
 
     mix = 0;
@@ -338,7 +347,7 @@ void timer0_isr(void) interrupt 1 {
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
     if (fm_active) mix += fm_render() * 3 / 2;
-    if (gt_active) mix += gt_render() * 3 / 2;
+    if (gt_active) mix += gt_out * 3 / 2;
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;

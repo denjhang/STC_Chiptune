@@ -81,7 +81,7 @@ s16 gt_render(void) {
     samp = 3;
     for (n = 0; n < GT_CHANS; n++) {
         if (!(gt_active & (1 << n))) continue;
-        gt_ch[n].osc += (u16)((u32)gt_ch[n].key * 22 / 101);
+        gt_ch[n].osc += (u16)((u32)gt_ch[n].key * 44 / 101);
 
         idx = (u8)((gt_ch[n].osc >> 7) & 0xFC);
         idx ^= gt_ch[n].wavX;
