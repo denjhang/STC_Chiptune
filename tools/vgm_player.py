@@ -400,43 +400,53 @@ def resolve_song(selector, vgm_dir):
 FM_WAVE_NAMES = ['tri', 'clipsin', 'rect', 'sin', 'saw', 'abssin']
 
 def fm_send_note(ser, voice, note, duration_ms=300):
-    """发送 FM Note On, 等待, Note Off"""
-    ser.write(bytes([0x51, 0x00, voice & 0x03, note & 0x7F]))
+    """发送 FM Note On, 等待, Note Off (寄存器模式)"""
+    ser.write(bytes([0x51, voice & 0x0F, note & 0x7F]))
     time.sleep(duration_ms / 1000.0)
-    ser.write(bytes([0x51, 0x01, voice & 0x03]))
+    ser.write(bytes([0x51, 0x10 | (voice & 0x0F), 0]))
     time.sleep(0.05)
 
 def fm_demo(ser):
-    """FM 演示: C E G 和弦 + 波形切换"""
+    """FM 演示: C E G 和弦 + 波形切换 + 9 voice"""
     print("\n  === FM Demo ===")
-    print("  Playing C4 E4 G4 on voices 0,1,2 ...")
 
-    # C4=60, E4=64, G4=67
-    ser.write(bytes([0x51, 0x00, 0, 60]))  # voice 0, C4
-    ser.write(bytes([0x51, 0x00, 1, 64]))  # voice 1, E4
-    ser.write(bytes([0x51, 0x00, 2, 67]))  # voice 2, G4
-    time.sleep(0.8)
+    # C4+E4+G4 三音和弦
+    print("  C4 E4 G4 chord (voices 0,1,2) ...")
+    ser.write(bytes([0x51, 0x00, 60]))  # voice0 C4
+    ser.write(bytes([0x51, 0x01, 64]))  # voice1 E4
+    ser.write(bytes([0x51, 0x02, 67]))  # voice2 G4
+    time.sleep(1.0)
     for v in range(3):
-        ser.write(bytes([0x51, 0x01, v]))
+        ser.write(bytes([0x51, 0x10 | v, 0]))
+    time.sleep(0.1)
+
+    # 9 voice 和弦 (C大七)
+    print("  9-voice chord ...")
+    notes = [60, 64, 67, 72, 76, 79, 84, 88, 91]
+    for i, n in enumerate(notes):
+        ser.write(bytes([0x51, i, n]))
+    time.sleep(1.5)
+    for i in range(9):
+        ser.write(bytes([0x51, 0x10 | i, 0]))
     time.sleep(0.1)
 
     # 波形演示
+    print("  Wave sweep (voice 0) ...")
     for wi, wname in enumerate(FM_WAVE_NAMES):
-        print(f"  Wave: {wname}")
-        for v in range(3):
-            ser.write(bytes([0x51, 0x11, v, wi]))
-        ser.write(bytes([0x51, 0x00, 0, 60]))  # C4
+        print(f"    {wname}")
+        ser.write(bytes([0x51, 0x20, wi]))
+        ser.write(bytes([0x51, 0x00, 60]))
         time.sleep(0.5)
-        ser.write(bytes([0x51, 0x01, 0]))
+        ser.write(bytes([0x51, 0x10, 0]))
         time.sleep(0.1)
 
     # 旋律
-    print("  Melody...")
+    print("  Melody ...")
     melody = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60]
     for note in melody:
-        ser.write(bytes([0x51, 0x00, 0, note]))
+        ser.write(bytes([0x51, 0x00, note]))
         time.sleep(0.2)
-    ser.write(bytes([0x51, 0x01, 0]))
+    ser.write(bytes([0x51, 0x10, 0]))
     time.sleep(0.1)
 
     print("  FM Demo done.")
@@ -456,11 +466,11 @@ def main():
     parser.add_argument('--dump', action='store_true')
     parser.add_argument('--vgm-dir', default=None)
     parser.add_argument('--fm-note', nargs=2, type=int, metavar=('VOICE', 'NOTE'),
-                        help='FM Note On: voice(0-2) note(24-127)')
+                        help='FM Note On: voice(0-8) note(24-127)')
     parser.add_argument('--fm-off', type=int, metavar='VOICE',
-                        help='FM Note Off: voice(0-2)')
+                        help='FM Note Off: voice(0-8)')
     parser.add_argument('--fm-wave', nargs=2, type=int, metavar=('VOICE', 'WAVE'),
-                        help='FM Set Wave: voice(0-2) wave(0-5)')
+                        help='FM Set Wave: voice(0-8) wave(0-5)')
     parser.add_argument('--fm-demo', action='store_true',
                         help='FM demo melody')
     args = parser.parse_args()
@@ -480,14 +490,14 @@ def main():
         try:
             if args.fm_note:
                 voice, note = args.fm_note
-                ser.write(bytes([0x51, 0x00, voice & 0x03, note & 0x7F]))
+                ser.write(bytes([0x51, voice & 0x0F, note & 0x7F]))
                 print(f"FM Note On: voice={voice} note={note}")
             if args.fm_off is not None:
-                ser.write(bytes([0x51, 0x01, args.fm_off & 0x03]))
+                ser.write(bytes([0x51, 0x10 | (args.fm_off & 0x0F), 0]))
                 print(f"FM Note Off: voice={args.fm_off}")
             if args.fm_wave:
                 voice, wave = args.fm_wave
-                ser.write(bytes([0x51, 0x11, voice & 0x03, wave & 0x07]))
+                ser.write(bytes([0x51, 0x20 | (voice & 0x0F), wave & 0x07]))
                 print(f"FM Set Wave: voice={voice} wave={wave}")
             if args.fm_demo:
                 fm_demo(ser)

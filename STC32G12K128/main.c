@@ -16,11 +16,10 @@
  *   [0xD2][port][reg][data] -> SCC (4 字节)
  *   [0x52][variant]         -> SN76489 变体 (自定义, 2 字节)
  *
- * FM 子命令 (0x51 后跟):
- *   [0x00][voice][note]      -> Note On (voice 0-2, note 24-127)
- *   [0x01][voice]           -> Note Off
- *   [0x10][voice][17 bytes]  -> Set Tone (fb,atk,dcy,sul,sus,rel,tl,mul,wav x2)
- *   [0x11][voice][wave]     -> Set Wave (0-5: tri,clipsin,rect,sin,saw,abssin)
+ * FM 寄存器 (0x51 后跟):
+ *   [0x00-0x08][note]        -> Note On (voice 0-8, note 24-127)
+ *   [0x10-0x18]             -> Note Off (voice 0-8)
+ *   [0x20-0x28][wave]       -> Set Wave (0-5: tri,clipsin,rect,sin,saw,abssin)
  */
 
 #pragma LARGE
@@ -166,52 +165,15 @@ void process_uart(void) {
             sn_set_variant(d);
 
         } else if (b == 0x51) {
-            /* FM 合成: [0x51][subcmd][...] (自定义, 可变长度) */
+            /* FM: [0x51][addr][data] (寄存器模式, 同 AY) */
             fm_active = 1;
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            switch (r) {
-            case 0x00: /* Note On: [0x51][0x00][voice][note] */
-                if (TX1_Cnt == RX1_Cnt) break;
-                p = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                if (TX1_Cnt == RX1_Cnt) break;
-                d = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                fm_note_on(p & 0x03, d);
-                break;
-            case 0x01: /* Note Off: [0x51][0x01][voice] */
-                if (TX1_Cnt == RX1_Cnt) break;
-                p = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                fm_note_off(p & 0x03);
-                break;
-            case 0x10: /* Set Tone: [0x51][0x10][voice][17 bytes] */
-                if (TX1_Cnt == RX1_Cnt) break;
-                p = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                { u8 tdat[17]; u8 ti;
-                  for (ti = 0; ti < 17; ti++) {
-                      if (TX1_Cnt == RX1_Cnt) break;
-                      tdat[ti] = RX1_Buffer[TX1_Cnt];
-                      if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                  }
-                  fm_set_tone(p & 0x03, tdat);
-                }
-                break;
-            case 0x11: /* Set Wave: [0x51][0x11][voice][wave] */
-                if (TX1_Cnt == RX1_Cnt) break;
-                p = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                if (TX1_Cnt == RX1_Cnt) break;
-                d = RX1_Buffer[TX1_Cnt];
-                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-                fm_set_wave(p & 0x03, d);
-                break;
-            default:
-                break;
-            }
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            fm_wr(r, d);
 
         } else if (b == 0xA0) {
             /* AY8910: [0xA0][reg][data] (VGM 标准) */
@@ -359,7 +321,7 @@ void timer0_isr(void) interrupt 1 {
     if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8;
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
-    if (fm_active) mix += fm_render() * 3 / 4;
+    if (fm_active) mix += fm_render() * 3 / 2;
     if (gb_active) mix += gb_out * 3 / 4;
     if (nes_active) mix += nes_out * 3 / 4;
     if (saa_active) mix += saa_out * 3 / 4;

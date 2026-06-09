@@ -207,101 +207,70 @@ static u8 fm_wait_cnt;
 
 /* ========== 内部函数 ========== */
 
-void fm_note_on(u8 voice, u8 note) {
-    u8 opi;
+/* 寄存器映射:
+ * 0x00-0x08: voice 0-8 note on (data=MIDI note)
+ * 0x10-0x18: voice 0-8 note off
+ * 0x20-0x28: voice 0-8 wave select (data 0-5)
+ */
+void fm_wr(u8 addr, u8 dat) {
+    u8 voice, opi, note;
     u16 f;
 
+    voice = addr & 0x0F;
     if (voice >= FM_VOICES) return;
-    if (note < 24) note = 24;
-    if (note > 115) note = 115;
-    note -= 24;
 
-    f = fm_note_freq[note];
+    if (addr < 0x10) {
+        /* note on */
+        note = dat;
+        if (note < 24) note = 24;
+        if (note > 115) note = 115;
+        note -= 24;
 
-    /* OP1: modulator */
-    opi = voice * 2;
-    if (fm_op[opi].mul == 0) {
-        fm_op[opi].sin_step = f >> 1;
-    } else {
-        fm_op[opi].sin_step = (u16)((u32)f * fm_op[opi].mul);
+        f = fm_note_freq[note];
+
+        /* OP1 modulator */
+        opi = voice * 2;
+        fm_op[opi].sin_step = fm_op[opi].mul ?
+            (u16)((u32)f * fm_op[opi].mul) : (f >> 1);
+        fm_op[opi].sin_pos = 0;
+        fm_op[opi].env_state = 1;
+        fm_op[opi].env_cnt = 250;
+        fm_op[opi].level = 0;
+        fm_op[opi].fb_val = 0;
+        fm_op[opi].env_step = fm_op[opi].atk;
+
+        /* OP2 carrier */
+        opi = voice * 2 + 1;
+        fm_op[opi].sin_step = fm_op[opi].mul ?
+            (u16)((u32)f * fm_op[opi].mul) : (f >> 1);
+        fm_op[opi].sin_pos = 0;
+        fm_op[opi].env_state = 1;
+        fm_op[opi].env_cnt = 250;
+        fm_op[opi].level = 0;
+        fm_op[opi].fb_val = 0;
+        fm_op[opi].env_step = fm_op[opi].atk;
+
+        fm_midino[voice] = note + 24;
+
+    } else if (addr < 0x20) {
+        /* note off */
+        if (fm_midino[voice] == 0) return;
+        opi = voice * 2;
+        fm_op[opi].env_state = 4;
+        fm_op[opi].env_step = fm_op[opi].rel;
+        opi = voice * 2 + 1;
+        fm_op[opi].env_state = 4;
+        fm_op[opi].env_step = fm_op[opi].rel;
+        fm_midino[voice] = 0;
+
+    } else if (addr < 0x30) {
+        /* wave select */
+        dat = dat % 6;
+        opi = voice * 2;
+        fm_op[opi].wave_idx = dat;
+        opi = voice * 2 + 1;
+        fm_op[opi].wave_idx = dat;
     }
-    fm_op[opi].sin_pos = 0;
-    fm_op[opi].env_state = 1;    /* attack */
-    fm_op[opi].env_cnt = 250;
-    fm_op[opi].level = 0;
-    fm_op[opi].fb_val = 0;
-    fm_op[opi].env_step = fm_op[opi].atk;
-
-    /* OP2: carrier */
-    opi = voice * 2 + 1;
-    if (fm_op[opi].mul == 0) {
-        fm_op[opi].sin_step = f >> 1;
-    } else {
-        fm_op[opi].sin_step = (u16)((u32)f * fm_op[opi].mul);
-    }
-    fm_op[opi].sin_pos = 0;
-    fm_op[opi].env_state = 1;
-    fm_op[opi].env_cnt = 250;
-    fm_op[opi].level = 0;
-    fm_op[opi].fb_val = 0;
-    fm_op[opi].env_step = fm_op[opi].atk;
-
-    fm_midino[voice] = note + 24;
-}
-
-void fm_note_off(u8 voice) {
-    u8 opi;
-    if (voice >= FM_VOICES) return;
-    if (fm_midino[voice] == 0) return;
-
-    opi = voice * 2;
-    fm_op[opi].env_state = 4;    /* release */
-    fm_op[opi].env_step = fm_op[opi].rel;
-
-    opi = voice * 2 + 1;
-    fm_op[opi].env_state = 4;
-    fm_op[opi].env_step = fm_op[opi].rel;
-
-    fm_midino[voice] = 0;
-}
-
-void fm_set_tone(u8 voice, u8 *dat) {
-    u8 opi;
-    if (voice >= FM_VOICES) return;
-
-    /* OP1 (modulator) */
-    opi = voice * 2;
-    fm_op[opi].fb = dat[0] & 0x07;
-    fm_op[opi].atk  = fm_env_cnt[dat[1] & 0x0F];
-    fm_op[opi].decy = fm_env_cnt[dat[2] & 0x0F];
-    fm_op[opi].sul  = (dat[3] == 15) ? 0 : (31 - dat[3] * 2);
-    fm_op[opi].sus  = fm_env_cnt[dat[4] & 0x0F];
-    fm_op[opi].rel  = fm_env_cnt[dat[5] & 0x0F];
-    fm_op[opi].tl   = 31 - (dat[6] & 0x1F);
-    fm_op[opi].mul  = dat[7] & 0x0F;
-    fm_op[opi].wave_idx = dat[8] % 6;
-
-    /* OP2 (carrier) */
-    opi = voice * 2 + 1;
-    fm_op[opi].fb = 0;
-    fm_op[opi].atk  = fm_env_cnt[dat[9] & 0x0F];
-    fm_op[opi].decy = fm_env_cnt[dat[10] & 0x0F];
-    fm_op[opi].sul  = (dat[11] == 15) ? 0 : (31 - dat[11] * 2);
-    fm_op[opi].sus  = fm_env_cnt[dat[12] & 0x0F];
-    fm_op[opi].rel  = fm_env_cnt[dat[13] & 0x0F];
-    fm_op[opi].tl   = 31 - (dat[14] & 0x1F);
-    fm_op[opi].mul  = dat[15] & 0x0F;
-    fm_op[opi].wave_idx = dat[16] % 6;
-}
-
-void fm_set_wave(u8 voice, u8 wave) {
-    u8 opi;
-    if (voice >= FM_VOICES) return;
-    wave = wave % 6;
-    opi = voice * 2;
-    fm_op[opi].wave_idx = wave;
-    opi = voice * 2 + 1;
-    fm_op[opi].wave_idx = wave;
 }
 
 /* 包络更新 (简化版: 每次调用更新一个 operator) */
