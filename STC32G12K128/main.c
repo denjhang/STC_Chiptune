@@ -60,7 +60,7 @@ u8  RX1_Buffer[UART1_BUF_LENGTH];
 u8  led_val = 0xFE;
 
 /* ========== 任务调度 ========== */
-#define TASK_DIVIDER    294
+#define TASK_DIVIDER    147
 static u16 task_div;
 
 /* ========== PWM1 P/P2.0 端口选择 ========== */
@@ -319,13 +319,14 @@ void timer0_isr(void) interrupt 1 {
         ym_out = ym_render();
     }
 
-    mix = (s16)((u16)scc_out - 128);
-    if (ay_active) mix += ay_render() << 1;
-    if (sn_active) mix += sn_render() << 1;
-    if (gb_active) mix += gb_out << 1;
-    if (nes_active) mix += nes_out;
-    if (saa_active) mix += saa_out;
-    if (ym_active) mix += ym_out;
+    mix = 0;
+    if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 4;
+    if (ay_active) mix += ay_render() * 3 / 4;
+    if (sn_active) mix += sn_render() * 3 / 4;
+    if (gb_active) mix += gb_out * 3 / 4;
+    if (nes_active) mix += nes_out * 3 / 4;
+    if (saa_active) mix += saa_out * 3 / 4;
+    if (ym_active) mix += ym_out * 3 / 4;
 
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
