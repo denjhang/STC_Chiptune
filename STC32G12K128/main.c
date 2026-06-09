@@ -10,6 +10,7 @@
  *   [0x50][data]            -> SN76489 (2 字节)
  *   [0x51][subcmd][...]     -> FM 合成 (自定义, 2-19 字节)
  *   [0xA0][reg][data]       -> AY8910 (3 字节)
+ *   [0xB0][addr][data]       -> Gigatron (3 字节)
  *   [0xB3][reg][data]       -> GB DMG (3 字节)
  *   [0xB4][reg][data]       -> NES APU (3 字节)
  *   [0xBD][addr][data]      -> SAA1099 (3 字节)
@@ -41,6 +42,7 @@
 #include "ay8910.h"
 #include "sn76489.h"
 #include "fm.h"
+#include "gigatron.h"
 /* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
@@ -48,6 +50,7 @@ bit scc_active;
 bit ay_active;
 bit sn_active;
 bit fm_active;
+bit gt_active;
 /* gb/nes/saa 暂不启用 */
 
 /* ========== 16kHz tick ========== */
@@ -205,6 +208,17 @@ void process_uart(void) {
         } else if (b == 0xB3) {
             /* GB DMG: 暂不启用 */
 
+        } else if (b == 0xB0) {
+            /* Gigatron: [0xB0][addr][data] */
+            gt_active = 1;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            gt_wr(r, d);
+
         } else if (b == 0xB4) {
             /* NES APU: 暂不启用 */
 
@@ -284,6 +298,7 @@ void led_tick_update(void) {
     if ((led_tick % LED_EVERY) == 0) {
         mask = 0;
         if (fm_active) mask |= fm_channel_mask();
+        if (gt_active) mask |= gt_channel_mask();
         if (ay_active) mask |= ay_channel_mask() << 3;
         if (sn_active) mask |= sn_channel_mask() << 4;
 
@@ -323,6 +338,7 @@ void timer0_isr(void) interrupt 1 {
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
     if (fm_active) mix += fm_render() * 3 / 2;
+    if (gt_active) mix += gt_render() * 3 / 2;
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -360,6 +376,7 @@ void main(void) {
     ay_init();
     sn_init();
     fm_init();
+    gt_init();
     /* gb/nes/saa 暂不启用 */
     test_start();
     led_tick = 0;
