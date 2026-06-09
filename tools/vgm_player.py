@@ -22,6 +22,7 @@ import argparse
 import gzip
 import glob
 import os
+import re
 import struct
 import sys
 import time
@@ -461,6 +462,251 @@ def fm_scale(ser):
     time.sleep(0.1)
     print("  FM Scale done.")
 
+
+# ========== Gigatron .gbas.c Player ==========
+
+# FNUM 频率表 (同参考实现 fnum_table.h, 96 条, index 0-95)
+GT_FNUM_TABLE = [
+    0x0045, 0x0049, 0x004d, 0x0052, 0x0056, 0x005c, 0x0061, 0x0067, 0x006d, 0x0073, 0x007a, 0x0081,
+    0x0089, 0x0091, 0x009a, 0x00a3, 0x00ad, 0x00b7, 0x00c2, 0x00ce, 0x00da, 0x00e7, 0x00f4, 0x0103,
+    0x0112, 0x0123, 0x0134, 0x0146, 0x015a, 0x016e, 0x0184, 0x019b, 0x01b3, 0x01cd, 0x01e9, 0x0206,
+    0x0225, 0x0245, 0x0268, 0x028c, 0x02b3, 0x02dc, 0x0308, 0x0336, 0x0367, 0x039b, 0x03d2, 0x040c,
+    0x0449, 0x048b, 0x04d0, 0x0519, 0x0567, 0x05b9, 0x0610, 0x066c, 0x06ce, 0x0735, 0x07a3, 0x0817,
+    0x0893, 0x0915, 0x099f, 0x0a32, 0x0acd, 0x0b72, 0x0c20, 0x0cd8, 0x0d9c, 0x0e6b, 0x0f46, 0x102f,
+    0x1125, 0x122a, 0x133f, 0x1464, 0x159a, 0x16e3, 0x183f, 0x19b1, 0x1b38, 0x1cd6, 0x1e8d, 0x205e,
+    0x224b, 0x2455, 0x267e, 0x28c8, 0x2b34, 0x2dc6, 0x307f, 0x3361, 0x366f, 0x39ac, 0x3d1a, 0x0000,
+]
+
+# Gigatron 帧率: 60Hz (Gigatron 原始 vCPU 帧率)
+GT_FRAME_RATE = 60.0
+
+# GT UART 命令前缀
+GT_CMD = 0xB0
+
+# GT 固件寄存器地址
+GT_REG_FNUML = 0x00  # ch0-3: +ch
+GT_REG_FNUMH = 0x04  # ch0-3: +ch
+GT_REG_WAVX  = 0x08  # ch0-3: +ch
+GT_REG_WAVA  = 0x0C  # ch0-3: +ch
+GT_REG_OFF   = 0x10  # ch0-3: +ch, note off
+
+
+def gt_send(ser, addr, data):
+    """发送 GT 寄存器写入 (VGM 裸发, 无校验)"""
+    ser.write(bytes([GT_CMD, addr, data]))
+
+
+def gt_note_off(ser, ch):
+    gt_send(ser, GT_REG_OFF + ch, 0)
+
+
+def gt_note_on(ser, ch, note, wavA=0, wavX=0, octave_shift=0.0):
+    """发送 note on: 查 FNUM 表, 写 fnumL + fnumH + wavA + wavX
+    ch: 0-3 (固件地址), note: FNUM 表索引
+    octave_shift: 正数降八度 (1=-1oct), 负数升八度, 支持小数
+    """
+    if note >= len(GT_FNUM_TABLE) or note < 0:
+        gt_note_off(ser, ch)
+        return
+    fnum = GT_FNUM_TABLE[note]
+    # key = FNUM * 3125 / 882: 参考实现→STC32G tick rate 精确换算
+    key = (fnum * 3125 + 441) // 882
+    # 八度偏移: 每八度除以2
+    if octave_shift != 0.0:
+        key = int(key / (2.0 ** octave_shift) + 0.5)
+    if key > 16383:
+        key = 16383
+    if key < 1:
+        key = 1
+    fnumL = key & 0x7F
+    fnumH = (key >> 7) & 0x7F
+    fnumL = fnum & 0x7F
+    fnumH = (fnum >> 7) & 0x7F
+    gt_send(ser, GT_REG_WAVA + ch, wavA)
+    gt_send(ser, GT_REG_WAVX + ch, wavX)
+    gt_send(ser, GT_REG_FNUML + ch, fnumL)
+    gt_send(ser, GT_REG_FNUMH + ch, fnumH)
+
+
+def parse_gbas_c(filepath):
+    """解析 .gbas.c 文件, 返回帧事件列表 [(frame, cmd, ch, note, wavA, wavX), ...]
+    cmd: 'D'=delay, 'X'=off, 'N'=note, 'M'=note+wavA, 'W'=note+wavA+wavX
+    """
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+
+    # 找到所有 segment: nohop static const byte xxx[] = { ... };
+    segments = []
+    pattern = r'nohop\s+static\s+const\s+byte\s+\w+\[\]\s*=\s*\{([^}]*)\}'
+    for m in re.finditer(pattern, content):
+        seg_text = m.group(1)
+        seg_bytes = []
+        # 解析宏调用
+        pos = 0
+        while pos < len(seg_text):
+            # 跳过空白和逗号
+            m2 = re.match(r'[\s,]+', seg_text[pos:])
+            if m2:
+                pos += m2.end()
+                continue
+            if pos >= len(seg_text):
+                break
+
+            # 检查结尾 0
+            m2 = re.match(r'\b0\b\s*([,}\s]|$)', seg_text[pos:])
+            if m2:
+                seg_bytes.append(('Z', 0, 0, 0, 0))
+                pos += 1
+                continue
+
+            # 匹配宏: D(x), X(c), N(c,n), M(c,n,v), W(c,n,v,w)
+            m2 = re.match(r'([DZXNMW])\s*\(([^)]*)\)', seg_text[pos:])
+            if m2:
+                cmd = m2.group(1)
+                args = [int(x.strip()) for x in m2.group(2).split(',')]
+                if cmd == 'D':
+                    seg_bytes.append(('D', args[0], 0, 0, 0))
+                elif cmd == 'X':
+                    seg_bytes.append(('X', args[0], 0, 0, 0))
+                elif cmd == 'N':
+                    seg_bytes.append(('N', args[0], args[1], 0, 0))
+                elif cmd == 'M':
+                    seg_bytes.append(('M', args[0], args[1], args[2], 0))
+                elif cmd == 'W':
+                    seg_bytes.append(('W', args[0], args[1], args[2], args[3]))
+                pos += m2.end()
+            else:
+                pos += 1
+        segments.append(seg_bytes)
+
+    return segments
+
+
+def build_gt_timeline(segments):
+    """将解析后的 segments 构建为帧事件时间轴
+    返回: [(frame, cmd, ch, note, wavA, wavX), ...] 已按 frame 排序
+    """
+    timeline = []
+    abs_frame = 0
+
+    for seg in segments:
+        for cmd, a1, a2, a3, a4 in seg:
+            if cmd == 'Z':
+                continue  # segment 结束标记
+            elif cmd == 'D':
+                abs_frame += a1
+            elif cmd == 'X':
+                # ch off: ch = a1 (0-3)
+                timeline.append((abs_frame, 'X', a1, 0, 0, 0))
+            elif cmd == 'N':
+                # note on: ch=a1, note=a2
+                timeline.append((abs_frame, 'N', a1, a2, 0, 0))
+            elif cmd == 'M':
+                # note+wavA: ch=a1, note=a2, wavA=a3
+                timeline.append((abs_frame, 'M', a1, a2, a3, 0))
+            elif cmd == 'W':
+                # note+wavA+wavX: ch=a1, note=a2, wavA=a3, wavX=a4
+                timeline.append((abs_frame, 'W', a1, a2, a3, a4))
+        # segments 之间 frame 继续累加 (不重置)
+
+    timeline.sort(key=lambda e: e[0])
+    return timeline
+
+
+def play_gigatron(ser, filepath, speed=1.0, loop=False, octave_shift=0.0):
+    """播放 Gigatron .gbas.c 文件"""
+    segments = parse_gbas_c(filepath)
+    if not segments:
+        print(f"  No data in {filepath}")
+        return
+
+    total_notes = sum(len(s) for s in segments)
+    timeline = build_gt_timeline(segments)
+    if not timeline:
+        print(f"  Empty timeline")
+        return
+
+    max_frame = timeline[-1][0]
+    duration = max_frame / GT_FRAME_RATE
+
+    print(f"  Segments: {len(segments)}, Events: {len(timeline)}, Frames: {max_frame}")
+    print(f"  Duration: {duration:.1f}s @60Hz")
+    print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
+    if octave_shift != 0.0:
+        print(f"  Octave shift: {-octave_shift:+.1f} oct ({'down' if octave_shift > 0 else 'up'})")
+    print()
+
+    while True:
+        play_pos = 0
+        last_time = time.perf_counter()
+        frame_budget = 0.0
+        current_frame = 0
+
+        while True:
+            time.sleep(0.001)
+            now = time.perf_counter()
+            elapsed = now - last_time
+            last_time = now
+            frame_budget += elapsed * GT_FRAME_RATE * speed
+
+            while frame_budget >= 1.0 and play_pos < len(timeline):
+                target_frame = int(current_frame)
+                # 发送当前帧的所有事件
+                while play_pos < len(timeline) and timeline[play_pos][0] <= target_frame:
+                    evt = timeline[play_pos]
+                    cmd = evt[1]
+                    ch = evt[2] - 1  # 1-indexed → 0-indexed
+                    if ch < 0 or ch > 3:
+                        play_pos += 1
+                        continue
+                    if cmd == 'X':
+                        gt_note_off(ser, ch)
+                    elif cmd in ('N', 'M', 'W'):
+                        note = evt[3]
+                        wavA = evt[4] if cmd in ('M', 'W') else 0
+                        wavX = evt[5] if cmd == 'W' else 0
+                        gt_note_on(ser, ch, note, wavA, wavX, octave_shift)
+                    play_pos += 1
+
+                frame_budget -= 1.0
+                current_frame += 1
+
+            if play_pos >= len(timeline):
+                break
+
+        if not loop:
+            break
+        # loop: 全部 off 再重来
+        for c in range(4):
+            gt_note_off(ser, c)
+        time.sleep(0.1)
+
+    # 结束: 全部静音
+    for c in range(4):
+        gt_note_off(ser, c)
+    print(f"  [END] {duration / speed:.1f}s")
+
+
+def list_gt_songs(gt_dir):
+    files = sorted(glob.glob(os.path.join(gt_dir, '*.gbas.c')))
+    files += sorted(glob.glob(os.path.join(gt_dir, '*.c')))
+    if not files:
+        print(f"No .gbas.c in {gt_dir}/")
+        return
+    print(f"\n{'#':>3}  {'File':<50} {'Segs':>5} {'Events':>7} {'Duration':>8}")
+    print("-" * 80)
+    for i, f in enumerate(files, 1):
+        name = os.path.basename(f)
+        try:
+            segs = parse_gbas_c(f)
+            tl = build_gt_timeline(segs)
+            max_frame = tl[-1][0] if tl else 0
+            dur = f"{max_frame / GT_FRAME_RATE:.1f}s"
+            print(f"{i:3}  {name:<50} {len(segs):5} {len(tl):7} {dur:>8}")
+        except Exception as e:
+            print(f"{i:3}  {name:<50} ERROR: {e}")
+
+
 def fm_demo(ser):
     """FM 演示: 和弦 + 音色切换 + 旋律"""
     print("\n  === FM Demo ===")
@@ -520,6 +766,14 @@ def main():
                         help='FM demo melody')
     parser.add_argument('--fm-scale', action='store_true',
                         help='FM full scale test (C1-C9, 8 voices)')
+    parser.add_argument('--gt', type=int, metavar='N',
+                        help='Play Gigatron .gbas.c track number')
+    parser.add_argument('--gt-dir', default=None,
+                        help='Gigatron music directory')
+    parser.add_argument('--gt-list', action='store_true',
+                        help='List Gigatron .gbas.c tracks')
+    parser.add_argument('--gt-shift', type=float, default=0.0, metavar='OCT',
+                        help='Gigatron octave shift (1 = -1 octave, -0.5 = +half octave)')
     args = parser.parse_args()
     if args.vgm_dir: vgm_dir = args.vgm_dir
 
@@ -554,6 +808,40 @@ def main():
         except Exception as e:
             print(f"Error: {e}")
         finally:
+            ser.close()
+        return
+
+    # Gigatron commands
+    gt_dir = args.gt_dir or os.path.join(script_dir, '..', 'vgm', 'giagtron')
+    if args.gt_list:
+        list_gt_songs(gt_dir); return
+
+    if args.gt is not None:
+        files = sorted(glob.glob(os.path.join(gt_dir, '*.gbas.c')))
+        if not files:
+            print(f"No .gbas.c files in {gt_dir}/"); sys.exit(1)
+        idx = args.gt - 1
+        if idx < 0 or idx >= len(files):
+            print(f"Track {args.gt} out of range (1-{len(files)})"); sys.exit(1)
+        filepath = files[idx]
+        print(f"GT: {os.path.basename(filepath)}")
+        if not HAS_SERIAL:
+            print("Error: pyserial required"); sys.exit(1)
+        port = args.port or find_serial_port()
+        if not port:
+            print("Error: no serial port. --port COMx"); sys.exit(1)
+        print(f"Serial: {port} @ {args.baud} baud")
+        ser = serial.Serial(port, args.baud, timeout=0.1)
+        time.sleep(0.1)
+        ser.reset_input_buffer()
+        try:
+            play_gigatron(ser, filepath, speed=args.speed, loop=args.loop, octave_shift=args.gt_shift)
+        except KeyboardInterrupt:
+            print("\n  Stopped.")
+        finally:
+            for c in range(4):
+                gt_note_off(ser, c)
+            time.sleep(0.01)
             ser.close()
         return
 

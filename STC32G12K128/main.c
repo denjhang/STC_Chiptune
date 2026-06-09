@@ -10,7 +10,7 @@
  *   [0x50][data]            -> SN76489 (2 字节)
  *   [0x51][subcmd][...]     -> FM 合成 (自定义, 2-19 字节)
  *   [0xA0][reg][data]       -> AY8910 (3 字节)
- *   [0xB0][addr][data]       -> Gigatron (3 字节)
+ *   [0xB0][addr][data]       -> Gigatron fnumL/fnumH/wavX/wavA (3 字节)
  *   [0xB3][reg][data]       -> GB DMG (3 字节)
  *   [0xB4][reg][data]       -> NES APU (3 字节)
  *   [0xBD][addr][data]      -> SAA1099 (3 字节)
