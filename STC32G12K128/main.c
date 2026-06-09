@@ -140,48 +140,66 @@ void UART1_int(void) interrupt 4 {
 }
 
 /* ========== UART 命令协议 ========== */
+/*
+ * VGM 命令 (0x50/0x52/0xA0/0xB3/0xB4/0xBD/0xD2): 直接透传, 不校验不回ACK
+ * FM 命令 (0x51): [0x51][addr][data][xor] XOR校验, 通过回0xAA, 失败回0xFF
+ */
+#define ACK_OK   0xAA
+#define ACK_ERR  0xFF
+
+static void uart_send_ack(u8 ack) {
+    SBUF = ack;
+    B_TX1_Busy = 1;
+}
+
 void process_uart(void) {
-    u8 b, p, r, d;
+    u8 b, p, r, d, chk, calc;
 
     while (TX1_Cnt != RX1_Cnt) {
         b = RX1_Buffer[TX1_Cnt];
         if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
         if (b == 0x50) {
-            /* SN76489: [0x50][data] (VGM 标准) */
-            sn_active = 1;
+            /* SN76489: [0x50][data] */
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            sn_active = 1;
             sn_wr(d);
 
         } else if (b == 0x52) {
-            /* SN76489 变体: [0x52][variant] (自定义) */
+            /* SN76489 变体: [0x52][variant] */
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_set_variant(d);
 
         } else if (b == 0x51) {
-            /* FM: [0x51][addr][data] (寄存器模式, 同 AY) */
-            fm_active = 1;
+            /* FM: [0x51][addr][data][xor] 校验+ACK */
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            chk = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            calc = 0x51 ^ r ^ d;
+            if (chk != calc) { uart_send_ack(ACK_ERR); continue; }
+            fm_active = 1;
             fm_wr(r, d);
+            uart_send_ack(ACK_OK);
 
         } else if (b == 0xA0) {
-            /* AY8910: [0xA0][reg][data] (VGM 标准) */
-            ay_active = 1;
+            /* AY8910: [0xA0][reg][data] */
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            ay_active = 1;
             ay_wr(r, d);
 
         } else if (b == 0xB3) {
@@ -194,8 +212,7 @@ void process_uart(void) {
             /* SAA1099: 暂不启用 */
 
         } else if (b == 0xD2) {
-            /* SCC: [0xD2][port][reg][data] (VGM 标准) */
-            scc_active = 1;
+            /* SCC: [0xD2][port][reg][data] */
             if (TX1_Cnt == RX1_Cnt) break;
             p = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -205,11 +222,12 @@ void process_uart(void) {
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            scc_active = 1;
             scc_wr((p & 0x7F) << 1, r);
             scc_wr(((p & 0x7F) << 1) | 1, d);
 
         } else {
-            /* 忽略 */
+            /* 忽略未知命令 */
         }
     }
 }

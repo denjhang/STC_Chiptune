@@ -438,7 +438,10 @@ void fm_init(void) {
 u8 fm_channel_mask(void) {
     u8 mask = 0, i;
     for (i = 0; i < FM_VOICES; i++) {
-        if (fm_op[i * 2 + 1].sin_step) mask |= (1 << i);
+        if (fm_op[i * 2 + 1].sin_step) {
+            if (i < 8) mask |= (1 << i);
+            else mask |= (1 << (i & 7));  /* voice 8-15 复用 P0.0-7 */
+        }
     }
     return mask;
 }

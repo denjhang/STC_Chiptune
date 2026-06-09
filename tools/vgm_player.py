@@ -35,6 +35,28 @@ except ImportError:
 
 SAMPLES_PER_SEC = 44100
 
+ACK_OK = 0xAA
+ACK_ERR = 0xFF
+
+def uart_send(ser, data, ack=True):
+    """发送带 XOR 校验的命令包
+    ack=True: 等待 ACK, 超时重发 (最多3次), 用于 FM/直接命令
+    ack=False: 不等 ACK, 下位机校验错则丢弃, 用于 VGM 流
+    """
+    chk = 0
+    for b in data:
+        chk ^= b
+    pkt = bytes(list(data) + [chk])
+    if not ack:
+        ser.write(pkt)
+        return True
+    for retry in range(3):
+        ser.write(pkt)
+        resp = ser.read(1)
+        if resp and resp[0] == ACK_OK:
+            return True
+    return False
+
 
 def load_vgm(filepath):
     with open(filepath, 'rb') as f:
@@ -401,37 +423,41 @@ FM_WAVE_NAMES = ['tri', 'clipsin', 'rect', 'sin', 'saw', 'abssin']
 
 def fm_send_note(ser, voice, note, duration_ms=300):
     """发送 FM Note On, 等待, Note Off (OPLL 分页模式)"""
-    ser.write(bytes([0x51, 0x10 | (voice & 0x0F), note & 0x7F]))
+    uart_send(ser, [0x51, 0x10 | (voice & 0x0F), note & 0x7F])
     time.sleep(duration_ms / 1000.0)
-    ser.write(bytes([0x51, 0x20 | (voice & 0x0F), 0]))
+    uart_send(ser, [0x51, 0x20 | (voice & 0x0F), 0])
     time.sleep(0.05)
 
 def fm_scale(ser):
     """FM 全音阶: 8 voice 轮流分配, 最多同时 3 音, 从 C1 到 C9"""
     print("\n  === FM Scale (C1-C9) ===")
+    # 设置快 release (reg 0x06/0x07 低4位=rel, 1=最快)
+    uart_send(ser, [0x51, 0x06, 0x0F])  # mod rel=15(最快)
+    uart_send(ser, [0x51, 0x07, 0x0F])  # car rel=15(最快)
+    time.sleep(0.05)
     notes = list(range(24, 109))  # MIDI 24(C1) to 108(C8)
-    notes.append(120)             # 加一个最高音 C9 测试
     vi = 0  # voice 轮转计数器
     active = []  # (voice, note)
-    hold = 3     # 最多同时几音
+    hold = 2     # 最多同时几音
     for note in notes:
         names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
         oct = note // 12 - 1
         nm = names[note % 12]
         print(f"  voice{vi % 8}: {nm}{oct} (MIDI {note})")
-        ser.write(bytes([0x51, 0x10 | (vi % 8), note & 0x7F]))
+        # 先关超出的音
+        while len(active) >= hold:
+            old_v = active.pop(0)
+            uart_send(ser, [0x51, 0x20 | old_v, 0])
+            time.sleep(0.05)
+        # 再开新音
+        uart_send(ser, [0x51, 0x10 | (vi % 8), note & 0x7F])
         active.append(vi % 8)
         vi += 1
         time.sleep(0.15)
-        # 关闭超出的音
-        while len(active) > hold:
-            old_v = active.pop(0)
-            ser.write(bytes([0x51, 0x20 | old_v, 0]))
-            time.sleep(0.02)
     # 关闭所有剩余音
     time.sleep(0.3)
     for v in active:
-        ser.write(bytes([0x51, 0x20 | v, 0]))
+        uart_send(ser, [0x51, 0x20 | v, 0])
     time.sleep(0.1)
     print("  FM Scale done.")
 
@@ -441,31 +467,31 @@ def fm_demo(ser):
 
     # C4+E4+G4 三音和弦
     print("  C4 E4 G4 chord ...")
-    ser.write(bytes([0x51, 0x10, 60]))
-    ser.write(bytes([0x51, 0x11, 64]))
-    ser.write(bytes([0x51, 0x12, 67]))
+    uart_send(ser, [0x51, 0x10, 60])
+    uart_send(ser, [0x51, 0x11, 64])
+    uart_send(ser, [0x51, 0x12, 67])
     time.sleep(1.0)
     for v in range(3):
-        ser.write(bytes([0x51, 0x20 | v, 0]))
+        uart_send(ser, [0x51, 0x20 | v, 0])
     time.sleep(0.1)
 
     # 波形演示 (改 carrier wave)
     print("  Wave sweep (carrier) ...")
     for wi, wname in enumerate(FM_WAVE_NAMES):
         print(f"    {wname}")
-        ser.write(bytes([0x51, 0x09, wi]))
-        ser.write(bytes([0x51, 0x10, 60]))
+        uart_send(ser, [0x51, 0x09, wi])
+        uart_send(ser, [0x51, 0x10, 60])
         time.sleep(0.5)
-        ser.write(bytes([0x51, 0x20, 0]))
+        uart_send(ser, [0x51, 0x20, 0])
         time.sleep(0.1)
 
     # 旋律
     print("  Melody ...")
     melody = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60]
     for note in melody:
-        ser.write(bytes([0x51, 0x10, note]))
+        uart_send(ser, [0x51, 0x10, note])
         time.sleep(0.2)
-    ser.write(bytes([0x51, 0x20, 0]))
+    uart_send(ser, [0x51, 0x20, 0])
     time.sleep(0.1)
 
     print("  FM Demo done.")
@@ -511,15 +537,15 @@ def main():
         try:
             if args.fm_note:
                 voice, note = args.fm_note
-                ser.write(bytes([0x51, 0x10 | (voice & 0x0F), note & 0x7F]))
+                uart_send(ser, [0x51, 0x10 | (voice & 0x0F), note & 0x7F])
                 print(f"FM Note On: voice={voice} note={note}")
             if args.fm_off is not None:
-                ser.write(bytes([0x51, 0x20 | (args.fm_off & 0x0F), 0]))
+                uart_send(ser, [0x51, 0x20 | (args.fm_off & 0x0F), 0])
                 print(f"FM Note Off: voice={args.fm_off}")
             if args.fm_wave:
                 voice, wave = args.fm_wave
-                ser.write(bytes([0x51, 0x09, wave & 0x07]))
-                ser.write(bytes([0x51, 0x08, wave & 0x07]))
+                uart_send(ser, [0x51, 0x09, wave & 0x07])
+                uart_send(ser, [0x51, 0x08, wave & 0x07])
                 print(f"FM Set Wave: voice={voice} wave={wave}")
             if args.fm_demo:
                 fm_demo(ser)
@@ -569,7 +595,7 @@ def main():
         print("\n  Stopped.")
     finally:
         # 复位 SCC 寄存器：静音所有通道
-        scc_reset = bytes([0xD2, 0x00, 0x03, 0x00])  # keyon = 0
+        scc_reset = bytes([0xD2, 0x00, 0x03, 0x00])
         ser.write(scc_reset)
         time.sleep(0.01)
         ser.close()
