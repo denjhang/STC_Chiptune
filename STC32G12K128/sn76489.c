@@ -96,7 +96,7 @@ void sn_wr(u8 dat) {
 }
 
 s16 sn_render(void) {
-    u8 i, incr;
+    u8 incr;
     s16 mix, out;
 
     sn_base_count += SN_BASE_INCR;
@@ -105,16 +105,34 @@ s16 sn_render(void) {
 
     mix = 0;
     if (incr > 0) {
-        for (i = 0; i < 3; i++) {
-            sn_count[i] += incr;
-            if (sn_period[i] > 0 && sn_count[i] >= sn_period[i]) {
-                sn_output[i] ^= 1;
-                sn_count[i] -= sn_period[i];
-            }
-            out = sn_output[i] ? sn_vol[i] : -sn_vol[i];
-            mix += out;
+        /* CH0 */
+        sn_count[0] += incr;
+        if (sn_period[0] > 0 && sn_count[0] >= sn_period[0]) {
+            sn_output[0] ^= 1;
+            sn_count[0] -= sn_period[0];
         }
+        out = sn_output[0] ? sn_vol[0] : -sn_vol[0];
+        mix += out;
 
+        /* CH1 */
+        sn_count[1] += incr;
+        if (sn_period[1] > 0 && sn_count[1] >= sn_period[1]) {
+            sn_output[1] ^= 1;
+            sn_count[1] -= sn_period[1];
+        }
+        out = sn_output[1] ? sn_vol[1] : -sn_vol[1];
+        mix += out;
+
+        /* CH2 */
+        sn_count[2] += incr;
+        if (sn_period[2] > 0 && sn_count[2] >= sn_period[2]) {
+            sn_output[2] ^= 1;
+            sn_count[2] -= sn_period[2];
+        }
+        out = sn_output[2] ? sn_vol[2] : -sn_vol[2];
+        mix += out;
+
+        /* Noise CH3 */
         sn_count[3] += incr;
         if (sn_period[3] > 0 && sn_count[3] >= sn_period[3]) {
             u8 fb;

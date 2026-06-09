@@ -37,7 +37,6 @@
 #include "gb.h"
 #include "nes.h"
 #include "saa1099.h"
-#include "ym2413.h"
 
 /* ========== 芯片活跃标志 ========== */
 bit scc_active;
@@ -46,7 +45,6 @@ bit sn_active;
 bit gb_active;
 bit nes_active;
 bit saa_active;
-bit ym_active;
 
 /* ========== 16kHz tick ========== */
 volatile u16 sample_tick;
@@ -60,7 +58,7 @@ u8  RX1_Buffer[UART1_BUF_LENGTH];
 u8  led_val = 0xFE;
 
 /* ========== 任务调度 ========== */
-#define TASK_DIVIDER    147
+#define TASK_DIVIDER    294
 static u16 task_div;
 
 /* ========== PWM1 P/P2.0 端口选择 ========== */
@@ -151,17 +149,6 @@ void process_uart(void) {
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_wr(d);
-
-        } else if (b == 0x51) {
-            /* YM2413: [0x51][reg][data] (VGM 标准) */
-            ym_active = 1;
-            if (TX1_Cnt == RX1_Cnt) break;
-            r = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
-            d = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            ym_wr(r, d);
 
         } else if (b == 0x52) {
             /* SN76489 变体: [0x52][variant] (自定义) */
@@ -288,7 +275,6 @@ static u8 scc_out = 128;
 static s16 gb_out = 0;
 static s16 nes_out = 0;
 static s16 saa_out = 0;
-static s16 ym_out = 0;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -313,20 +299,13 @@ void timer0_isr(void) interrupt 1 {
         saa_out = saa_render();
     }
 
-    /* YM2413 直接 17640Hz 渲染 (和 AY/SN 同频) */
-    if (ym_active) {
-        ym_out = ym_render();
-    }
-
     mix = 0;
-    if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 4;
-    if (ay_active) mix += ay_render() * 3 / 4;
+    if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8;
+    if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
     if (gb_active) mix += gb_out * 3 / 4;
     if (nes_active) mix += nes_out * 3 / 4;
     if (saa_active) mix += saa_out * 3 / 4;
-    if (ym_active) mix += ym_out * 3 / 4;
-
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -366,7 +345,6 @@ void main(void) {
     gb_init();
     nes_init();
     saa_init();
-    ym_init();
     test_start();
     led_tick = 0;
     timer0_init();
