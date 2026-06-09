@@ -10,7 +10,7 @@
  *   [0x50][data]            -> SN76489 (2 字节)
  *   [0x51][subcmd][...]     -> FM 合成 (自定义, 2-19 字节)
  *   [0xA0][reg][data]       -> AY8910 (3 字节)
- *   [0xB0][addr][data]       -> Gigatron fnumL/fnumH/wavX/wavA (3 字节)
+ *   [0xB0][addr][data][xor]  -> Gigatron (4 字节, XOR校验ACK)
  *   [0xB3][reg][data]       -> GB DMG (3 字节)
  *   [0xB4][reg][data]       -> NES APU (3 字节)
  *   [0xBD][addr][data]      -> SAA1099 (3 字节)
@@ -209,14 +209,19 @@ void process_uart(void) {
             /* GB DMG: 暂不启用 */
 
         } else if (b == 0xB0) {
-            /* Gigatron: [0xB0][addr][data] */
-            gt_active = 1;
+            /* Gigatron: [0xB0][addr][data][xor] 校验丢弃, 无ACK */
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            chk = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            calc = 0xB0 ^ r ^ d;
+            if (chk != calc) continue;
+            gt_active = 1;
             gt_wr(r, d);
 
         } else if (b == 0xB4) {

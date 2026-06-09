@@ -492,8 +492,9 @@ GT_REG_OFF   = 0x10  # ch0-3: +ch, note off
 
 
 def gt_send(ser, addr, data):
-    """发送 GT 寄存器写入 (VGM 裸发, 无校验)"""
-    ser.write(bytes([GT_CMD, addr, data]))
+    """发送 GT 寄存器写入 (XOR 校验, 不等 ACK)"""
+    chk = GT_CMD ^ addr ^ data
+    ser.write(bytes([GT_CMD, addr, data, chk]))
 
 
 def gt_note_off(ser, ch):
@@ -835,7 +836,8 @@ def main():
         time.sleep(0.1)
         ser.reset_input_buffer()
         try:
-            play_gigatron(ser, filepath, speed=args.speed, loop=args.loop, octave_shift=args.gt_shift)
+            gt_speed = args.speed if args.speed != 1.0 else 0.95
+            play_gigatron(ser, filepath, speed=gt_speed, loop=args.loop, octave_shift=args.gt_shift)
         except KeyboardInterrupt:
             print("\n  Stopped.")
         finally:

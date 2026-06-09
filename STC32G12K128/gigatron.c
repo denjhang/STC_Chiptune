@@ -12,7 +12,8 @@ static u8 gt_sound[256];
 /* 通道状态 */
 static struct {
     u16 osc;   /* 相位累加器 */
-    u16 key;   /* 频率步进 */
+    u16 key;   /* 原始 fnum */
+    u16 step;  /* 预计算步进 = key * 44 / 101 */
     u8  wavX;  /* 波形 XOR */
     s8  wavA;  /* 幅度偏移 */
 } gt_ch[GT_CHANS];
@@ -49,9 +50,10 @@ void gt_wr(u8 addr, u8 dat) {
         gt_ch[ch].key = (gt_ch[ch].key & 0xFF80) | (dat & 0x7F);
         if (gt_ch[ch].key) gt_active |= (1 << ch);
     } else if (addr < 0x08) {
-        /* ch0-3 fnumH: key = (key & 0x7F) | (dat << 7) */
+        /* ch0-3 fnumH: key = (key & 0x7F) | (dat << 7), 预计算 step */
         ch = addr - 4;
         gt_ch[ch].key = (gt_ch[ch].key & 0x7F) | ((u16)(dat & 0x7F) << 7);
+        gt_ch[ch].step = (u16)((u32)gt_ch[ch].key * 44 / 101);
         if (gt_ch[ch].key) {
             gt_ch[ch].osc = 0;
             gt_active |= (1 << ch);
@@ -66,6 +68,7 @@ void gt_wr(u8 addr, u8 dat) {
         /* 0x10-0x13: ch0-3 note off (key=0) */
         ch = addr - 0x10;
         gt_ch[ch].key = 0;
+        gt_ch[ch].step = 0;
         gt_active &= ~(1 << ch);
     } else {
         /* 0x14-0xFF: 波形表写入 */
@@ -81,7 +84,7 @@ s16 gt_render(void) {
     samp = 3;
     for (n = 0; n < GT_CHANS; n++) {
         if (!(gt_active & (1 << n))) continue;
-        gt_ch[n].osc += (u16)((u32)gt_ch[n].key * 44 / 101);
+        gt_ch[n].osc += gt_ch[n].step;
 
         idx = (u8)((gt_ch[n].osc >> 7) & 0xFC);
         idx ^= gt_ch[n].wavX;
