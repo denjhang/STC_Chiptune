@@ -406,6 +406,35 @@ def fm_send_note(ser, voice, note, duration_ms=300):
     ser.write(bytes([0x51, 0x20 | (voice & 0x0F), 0]))
     time.sleep(0.05)
 
+def fm_scale(ser):
+    """FM 全音阶: 8 voice 轮流分配, 最多同时 3 音, 从 C1 到 C9"""
+    print("\n  === FM Scale (C1-C9) ===")
+    notes = list(range(24, 109))  # MIDI 24(C1) to 108(C8)
+    notes.append(120)             # 加一个最高音 C9 测试
+    vi = 0  # voice 轮转计数器
+    active = []  # (voice, note)
+    hold = 3     # 最多同时几音
+    for note in notes:
+        names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+        oct = note // 12 - 1
+        nm = names[note % 12]
+        print(f"  voice{vi % 8}: {nm}{oct} (MIDI {note})")
+        ser.write(bytes([0x51, 0x10 | (vi % 8), note & 0x7F]))
+        active.append(vi % 8)
+        vi += 1
+        time.sleep(0.15)
+        # 关闭超出的音
+        while len(active) > hold:
+            old_v = active.pop(0)
+            ser.write(bytes([0x51, 0x20 | old_v, 0]))
+            time.sleep(0.02)
+    # 关闭所有剩余音
+    time.sleep(0.3)
+    for v in active:
+        ser.write(bytes([0x51, 0x20 | v, 0]))
+    time.sleep(0.1)
+    print("  FM Scale done.")
+
 def fm_demo(ser):
     """FM 演示: 和弦 + 音色切换 + 旋律"""
     print("\n  === FM Demo ===")
@@ -463,11 +492,13 @@ def main():
                         help='FM Set Carrier Wave: voice(0-3) wave(0-5)')
     parser.add_argument('--fm-demo', action='store_true',
                         help='FM demo melody')
+    parser.add_argument('--fm-scale', action='store_true',
+                        help='FM full scale test (C1-C9, 8 voices)')
     args = parser.parse_args()
     if args.vgm_dir: vgm_dir = args.vgm_dir
 
     # FM direct commands (no VGM needed)
-    if args.fm_note is not None or args.fm_off is not None or args.fm_wave is not None or args.fm_demo:
+    if args.fm_note is not None or args.fm_off is not None or args.fm_wave is not None or args.fm_demo or args.fm_scale:
         if not HAS_SERIAL:
             print("Error: pyserial required"); sys.exit(1)
         port = args.port or find_serial_port()
@@ -492,6 +523,8 @@ def main():
                 print(f"FM Set Wave: voice={voice} wave={wave}")
             if args.fm_demo:
                 fm_demo(ser)
+            if args.fm_scale:
+                fm_scale(ser)
         except Exception as e:
             print(f"Error: {e}")
         finally:

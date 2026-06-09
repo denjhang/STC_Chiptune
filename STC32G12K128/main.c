@@ -60,6 +60,7 @@ u8  RX1_Buffer[UART1_BUF_LENGTH];
 
 /* ========== LED ========== */
 u8  led_val = 0xFE;
+u8  led_dir = 0;
 
 /* ========== 任务调度 ========== */
 #define TASK_DIVIDER    294
@@ -215,7 +216,7 @@ void process_uart(void) {
 
 /* ========== 开机音: AY C4 E4 G4 和弦 ========== */
 #define BOOT_NOTE_TICKS 300
-#define LED_EVERY    8
+#define LED_EVERY    6
 
 static u16 test_cnt;
 static u8  led_tick;
@@ -242,6 +243,7 @@ void test_tick(void) {
     test_cnt++;
     if (test_cnt >= BOOT_NOTE_TICKS) {
         test_active = 0;
+        ay_active = 0;
         ay_wr(8, 0x00);
         ay_wr(9, 0x00);
         ay_wr(10, 0x00);
@@ -250,30 +252,36 @@ void test_tick(void) {
 
 static bit led_music_mode;
 static u16 led_silent_cnt;
-#define LED_SILENT_WAIT 180  /* 3s @ 60Hz */
+#define LED_SILENT_WAIT 180  /* 3s: 在 task tick (~60Hz) 里计数 */
 
 void led_tick_update(void) {
     u8 mask;
     led_tick++;
+    if (led_music_mode) {
+        led_silent_cnt++;
+        if (led_silent_cnt >= LED_SILENT_WAIT) {
+            led_music_mode = 0;
+        }
+    }
     if ((led_tick % LED_EVERY) == 0) {
         mask = 0;
-        if (fm_active) mask |= fm_channel_mask();          /* P0.0-4 */
-        if (ay_active) mask |= ay_channel_mask() << 3;   /* P0.3-7 */
-        if (sn_active) mask |= sn_channel_mask() << 4;   /* P0.4-7 */
+        if (fm_active) mask |= fm_channel_mask();
+        if (ay_active) mask |= ay_channel_mask() << 3;
+        if (sn_active) mask |= sn_channel_mask() << 4;
 
         if (mask) {
             P0 = ~mask;
             led_music_mode = 1;
             led_silent_cnt = 0;
-        } else if (led_music_mode) {
-            led_silent_cnt++;
-            if (led_silent_cnt >= LED_SILENT_WAIT) {
-                led_music_mode = 0;
-            }
-        }
-        if (!led_music_mode) {
+        } else if (!led_music_mode) {
             P0 = led_val;
-            led_val = _crol_(led_val, 1);
+            if (led_dir) {
+                led_val = _cror_(led_val, 1);
+                if (led_val == 0xFE) led_dir = 0;
+            } else {
+                led_val = _crol_(led_val, 1);
+                if (led_val == 0x7F) led_dir = 1;
+            }
         }
     }
 }
