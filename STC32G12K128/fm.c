@@ -202,33 +202,103 @@ static FmOp fm_op[FM_OPS];
 /* voice active: midino != 0 means playing */
 static u8 fm_midino[FM_VOICES];
 
+/* per-voice volume override (from reg 0x30-0x33, 0-15) */
+static u8 fm_voice_vol[FM_VOICES];
+
 /* envelope tick counter: round-robin, 1 operator per 8 ticks */
 static u8 fm_wait_cnt;
 
+/* 音色模板 (reg 0x00-0x09, 全局共用) */
+static struct {
+    u8 mod_mul, car_mul;
+    u8 mod_tl,  car_tl;
+    u8 mod_fb;  /* feedback, 低3位 */
+    u8 mod_atk, mod_dec;
+    u8 car_atk, car_dec;
+    u8 mod_sul, mod_rel;
+    u8 car_sul, car_rel;
+    u8 mod_wave, car_wave;
+} fm_tone;
+
+/* 将音色模板应用到指定 voice 的 ops */
+static void fm_apply_tone(u8 voice) {
+    u8 opi;
+    opi = voice * 2;
+    fm_op[opi].mul = fm_tone.mod_mul;
+    fm_op[opi].tl  = fm_tone.mod_tl;
+    fm_op[opi].fb  = fm_tone.mod_fb;
+    fm_op[opi].atk  = fm_env_cnt[fm_tone.mod_atk & 0x0F];
+    fm_op[opi].decy = fm_env_cnt[fm_tone.mod_dec & 0x0F];
+    fm_op[opi].sul  = (fm_tone.mod_sul == 15) ? 0 : (31 - fm_tone.mod_sul * 2);
+    fm_op[opi].sus  = fm_env_cnt[fm_tone.mod_rel & 0x0F];
+    fm_op[opi].rel  = fm_env_cnt[fm_tone.mod_rel & 0x0F];
+    fm_op[opi].wave_idx = fm_tone.mod_wave % 6;
+
+    opi = voice * 2 + 1;
+    fm_op[opi].mul = fm_tone.car_mul;
+    fm_op[opi].tl  = fm_tone.car_tl;
+    fm_op[opi].fb  = 0;
+    fm_op[opi].atk  = fm_env_cnt[fm_tone.car_atk & 0x0F];
+    fm_op[opi].decy = fm_env_cnt[fm_tone.car_dec & 0x0F];
+    fm_op[opi].sul  = (fm_tone.car_sul == 15) ? 0 : (31 - fm_tone.car_sul * 2);
+    fm_op[opi].sus  = fm_env_cnt[fm_tone.car_rel & 0x0F];
+    fm_op[opi].rel  = fm_env_cnt[fm_tone.car_rel & 0x0F];
+    fm_op[opi].wave_idx = fm_tone.car_wave % 6;
+}
+
 /* ========== 内部函数 ========== */
 
-/* 寄存器映射:
- * 0x00-0x08: voice 0-8 note on (data=MIDI note)
- * 0x10-0x18: voice 0-8 note off
- * 0x20-0x28: voice 0-8 wave select (data 0-5)
+/* 寄存器映射 (模仿 OPLL 分页结构):
+ * 0x00-0x09: 音色参数 (全局, 所有 channel 共用)
+ *   0x00: modulator MULTI (0-15)
+ *   0x01: carrier MULTI (0-15)
+ *   0x02: modulator TL (0-31, 调制深度)
+ *   0x03: carrier TL (高5位) + FEEDBACK (低3位)
+ *   0x04: modulator AR/DR (高4位=atk, 低4位=decy)
+ *   0x05: carrier AR/DR
+ *   0x06: modulator SL/RR (高4位=sul, 低4位=rel)
+ *   0x07: carrier SL/RR
+ *   0x08: modulator WAVE (低3位, 0-5)
+ *   0x09: carrier WAVE (低3位, 0-5)
+ * 0x10-0x13: channel 0-3 note on (data = MIDI note)
+ * 0x20-0x23: channel 0-3 note off
+ * 0x30-0x33: channel 0-3 volume override (0-15, 影响 carrier TL)
  */
 void fm_wr(u8 addr, u8 dat) {
     u8 voice, opi, note;
     u16 f;
 
-    voice = addr & 0x0F;
-    if (voice >= FM_VOICES) return;
+    switch (addr & 0xF0) {
+    case 0x00:
+        /* 音色参数 */
+        switch (addr & 0x0F) {
+        case 0x00: fm_tone.mod_mul = dat & 0x0F; break;
+        case 0x01: fm_tone.car_mul = dat & 0x0F; break;
+        case 0x02: fm_tone.mod_tl  = dat & 0x1F; break;
+        case 0x03: fm_tone.car_tl  = dat >> 3; fm_tone.mod_fb = dat & 0x07; break;
+        case 0x04: fm_tone.mod_atk = (dat >> 4) & 0x0F; fm_tone.mod_dec = dat & 0x0F; break;
+        case 0x05: fm_tone.car_atk = (dat >> 4) & 0x0F; fm_tone.car_dec = dat & 0x0F; break;
+        case 0x06: fm_tone.mod_sul = (dat >> 4) & 0x0F; fm_tone.mod_rel = dat & 0x0F; break;
+        case 0x07: fm_tone.car_sul = (dat >> 4) & 0x0F; fm_tone.car_rel = dat & 0x0F; break;
+        case 0x08: fm_tone.mod_wave = dat % 6; break;
+        case 0x09: fm_tone.car_wave = dat % 6; break;
+        }
+        break;
 
-    if (addr < 0x10) {
+    case 0x10:
         /* note on */
+        voice = addr & 0x0F;
+        if (voice >= FM_VOICES) return;
         note = dat;
         if (note < 24) note = 24;
         if (note > 115) note = 115;
         note -= 24;
-
         f = fm_note_freq[note];
 
-        /* OP1 modulator */
+        /* 先应用音色模板 */
+        fm_apply_tone(voice);
+
+        /* modulator */
         opi = voice * 2;
         fm_op[opi].sin_step = fm_op[opi].mul ?
             (u16)((u32)f * fm_op[opi].mul) : (f >> 1);
@@ -239,7 +309,7 @@ void fm_wr(u8 addr, u8 dat) {
         fm_op[opi].fb_val = 0;
         fm_op[opi].env_step = fm_op[opi].atk;
 
-        /* OP2 carrier */
+        /* carrier */
         opi = voice * 2 + 1;
         fm_op[opi].sin_step = fm_op[opi].mul ?
             (u16)((u32)f * fm_op[opi].mul) : (f >> 1);
@@ -250,10 +320,16 @@ void fm_wr(u8 addr, u8 dat) {
         fm_op[opi].fb_val = 0;
         fm_op[opi].env_step = fm_op[opi].atk;
 
-        fm_midino[voice] = note + 24;
+        /* 应用 per-voice volume */
+        fm_op[voice * 2 + 1].tl = fm_voice_vol[voice];
 
-    } else if (addr < 0x20) {
+        fm_midino[voice] = note + 24;
+        break;
+
+    case 0x20:
         /* note off */
+        voice = addr & 0x0F;
+        if (voice >= FM_VOICES) return;
         if (fm_midino[voice] == 0) return;
         opi = voice * 2;
         fm_op[opi].env_state = 4;
@@ -262,14 +338,14 @@ void fm_wr(u8 addr, u8 dat) {
         fm_op[opi].env_state = 4;
         fm_op[opi].env_step = fm_op[opi].rel;
         fm_midino[voice] = 0;
+        break;
 
-    } else if (addr < 0x30) {
-        /* wave select */
-        dat = dat % 6;
-        opi = voice * 2;
-        fm_op[opi].wave_idx = dat;
-        opi = voice * 2 + 1;
-        fm_op[opi].wave_idx = dat;
+    case 0x30:
+        /* per-voice volume override */
+        voice = addr & 0x0F;
+        if (voice >= FM_VOICES) return;
+        fm_voice_vol[voice] = dat & 0x1F;
+        break;
     }
 }
 
@@ -332,8 +408,18 @@ static void fm_env_tick(u8 opi) {
 
 void fm_init(void) {
     u8 i;
+    /* 音色模板默认值 */
+    fm_tone.mod_mul = 1;  fm_tone.car_mul = 1;
+    fm_tone.mod_tl  = 0;  fm_tone.car_tl  = 31;
+    fm_tone.mod_fb  = 0;
+    fm_tone.mod_atk = 15; fm_tone.mod_dec = 9;
+    fm_tone.car_atk = 15; fm_tone.car_dec = 9;
+    fm_tone.mod_sul = 9;  fm_tone.mod_rel = 5;
+    fm_tone.car_sul = 9;  fm_tone.car_rel = 5;
+    fm_tone.mod_wave = 0; fm_tone.car_wave = 3;
+
     for (i = 0; i < FM_OPS; i++) {
-        fm_op[i].wave_idx = 0;   /* tri default */
+        fm_op[i].wave_idx = 0;
         fm_op[i].atk  = fm_env_cnt[15];
         fm_op[i].decy = fm_env_cnt[9];
         fm_op[i].sul  = 31 - 9 * 2;
@@ -349,16 +435,21 @@ void fm_init(void) {
         fm_op[i].env_step = 0;
         fm_op[i].level = 0;
     }
-    /* OP1 (modulator): tl=0 (不直接输出), OP2 (carrier): tl=max */
     for (i = 0; i < FM_VOICES; i++) {
-        fm_op[i * 2].tl = 0;          /* modulator: 静音 */
-        fm_op[i * 2 + 1].tl = 31;    /* carrier: 最大音量 (tl inverted) */
+        fm_op[i * 2].tl = 0;
+        fm_op[i * 2 + 1].tl = 31;
         fm_midino[i] = 0;
-    }
-    for (i = 0; i < FM_VOICES; i++) {
-        fm_midino[i] = 0;
+        fm_voice_vol[i] = 31;
     }
     fm_wait_cnt = 0;
+}
+
+u8 fm_channel_mask(void) {
+    u8 mask = 0, i;
+    for (i = 0; i < FM_VOICES; i++) {
+        if (fm_op[i * 2 + 1].sin_step) mask |= (1 << i);
+    }
+    return mask;
 }
 
 /* FM 渲染 (每次 ISR 调用, 返回 s16 混合输出) */
@@ -378,6 +469,9 @@ s16 fm_render(void) {
 
     for (v = 0; v < FM_VOICES; v++) {
         opi = v * 2;
+
+        /* skip idle voice */
+        if (fm_op[opi].sin_step == 0) continue;
 
         /* ---- OP1 (modulator) ---- */
         pos = fm_op[opi].sin_pos;

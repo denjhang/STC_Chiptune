@@ -213,3 +213,11 @@ s16 ay_render(void) {
 
     return mix;
 }
+
+u8 ay_channel_mask(void) {
+    u8 mask = 0, i;
+    for (i = 0; i < AY_CHANS; i++) {
+        if (ay_volume[i] & 0x0F) mask |= (1 << i);
+    }
+    return mask;
+}

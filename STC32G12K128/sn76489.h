@@ -16,5 +16,6 @@ void sn_init(void);
 void sn_set_variant(u8 variant);
 void sn_wr(u8 dat);
 s16 sn_render(void);
+u8 sn_channel_mask(void);
 
 #endif

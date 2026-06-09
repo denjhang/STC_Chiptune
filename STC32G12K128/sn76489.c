@@ -155,3 +155,11 @@ s16 sn_render(void) {
     mix >>= 2;
     return mix;
 }
+
+u8 sn_channel_mask(void) {
+    u8 mask = 0, i;
+    for (i = 0; i < SN_CHANS; i++) {
+        if (sn_vol[i]) mask |= (1 << i);
+    }
+    return mask;
+}

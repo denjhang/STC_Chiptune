@@ -12,5 +12,6 @@
 void ay_init(void);
 void ay_wr(u8 reg, u8 val);
 s16 ay_render(void);
+u8 ay_channel_mask(void);
 
 #endif

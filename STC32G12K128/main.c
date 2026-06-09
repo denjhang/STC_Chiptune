@@ -16,10 +16,11 @@
  *   [0xD2][port][reg][data] -> SCC (4 字节)
  *   [0x52][variant]         -> SN76489 变体 (自定义, 2 字节)
  *
- * FM 寄存器 (0x51 后跟):
- *   [0x00-0x08][note]        -> Note On (voice 0-8, note 24-127)
- *   [0x10-0x18]             -> Note Off (voice 0-8)
- *   [0x20-0x28][wave]       -> Set Wave (0-5: tri,clipsin,rect,sin,saw,abssin)
+ * FM 寄存器 (0x51 后跟, OPLL 分页结构):
+ *   0x00-0x09: 音色参数 (全局共用)
+ *   [0x10-0x13][note]      -> Note On (voice 0-3)
+ *   [0x20-0x23]            -> Note Off (voice 0-3)
+ *   [0x30-0x33][vol]       -> Volume override (voice 0-3)
  */
 
 #pragma LARGE
@@ -39,19 +40,15 @@
 #include "scc.h"
 #include "ay8910.h"
 #include "sn76489.h"
-#include "gb.h"
-#include "nes.h"
-#include "saa1099.h"
 #include "fm.h"
+/* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
 bit scc_active;
 bit ay_active;
 bit sn_active;
-bit gb_active;
-bit nes_active;
-bit saa_active;
 bit fm_active;
+/* gb/nes/saa 暂不启用 */
 
 /* ========== 16kHz tick ========== */
 volatile u16 sample_tick;
@@ -187,38 +184,13 @@ void process_uart(void) {
             ay_wr(r, d);
 
         } else if (b == 0xB3) {
-            /* GB DMG: [0xB3][reg][data] (VGM 标准) */
-            gb_active = 1;
-            if (TX1_Cnt == RX1_Cnt) break;
-            r = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
-            d = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            gb_wr(r, d);
+            /* GB DMG: 暂不启用 */
 
         } else if (b == 0xB4) {
-            /* NES APU: [0xB4][reg][data] (VGM 标准) */
-            nes_active = 1;
-            if (TX1_Cnt == RX1_Cnt) break;
-            r = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
-            d = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            nes_wr(r, d);
+            /* NES APU: 暂不启用 */
 
         } else if (b == 0xBD) {
-            /* SAA1099: [0xBD][addr][data] (VGM 标准) */
-            saa_active = 1;
-            if (TX1_Cnt == RX1_Cnt) break;
-            r = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
-            d = RX1_Buffer[TX1_Cnt];
-            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            saa_write_addr(r);
-            saa_write_data(d);
+            /* SAA1099: 暂不启用 */
 
         } else if (b == 0xD2) {
             /* SCC: [0xD2][port][reg][data] (VGM 标准) */
@@ -276,23 +248,39 @@ void test_tick(void) {
     }
 }
 
+static bit led_music_mode;
+static u16 led_silent_cnt;
+#define LED_SILENT_WAIT 180  /* 3s @ 60Hz */
+
 void led_tick_update(void) {
+    u8 mask;
     led_tick++;
     if ((led_tick % LED_EVERY) == 0) {
-        P0 = led_val;
-        led_val = _crol_(led_val, 1);
+        mask = 0;
+        if (fm_active) mask |= fm_channel_mask();
+        if (ay_active) mask |= ay_channel_mask() << 4;
+        if (sn_active) mask |= (sn_channel_mask() ? 0x80 : 0);
+
+        if (mask) {
+            P0 = ~mask;
+            led_music_mode = 1;
+            led_silent_cnt = 0;
+        } else if (led_music_mode) {
+            led_silent_cnt++;
+            if (led_silent_cnt >= LED_SILENT_WAIT) {
+                led_music_mode = 0;
+            }
+        }
+        if (!led_music_mode) {
+            P0 = led_val;
+            led_val = _crol_(led_val, 1);
+        }
     }
 }
 
 /* ========== Timer0 ISR: 17640Hz ========== */
 static u8 scc_tick_div;
-static u8 gb_tick_div;
-static u8 nes_tick_div;
-static u8 saa_tick_div;
 static u8 scc_out = 128;
-static s16 gb_out = 0;
-static s16 nes_out = 0;
-static s16 saa_out = 0;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -302,29 +290,13 @@ void timer0_isr(void) interrupt 1 {
         scc_out = scc_render();
     }
 
-    if (gb_active && ++gb_tick_div >= 4) {
-        gb_tick_div = 0;
-        gb_out = gb_render();
-    }
-
-    if (nes_active && ++nes_tick_div >= 4) {
-        nes_tick_div = 0;
-        nes_out = nes_render();
-    }
-
-    if (saa_active && ++saa_tick_div >= 4) {
-        saa_tick_div = 0;
-        saa_out = saa_render();
-    }
+    /* gb/nes/saa 暂不启用 */
 
     mix = 0;
     if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8;
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
     if (fm_active) mix += fm_render() * 3 / 2;
-    if (gb_active) mix += gb_out * 3 / 4;
-    if (nes_active) mix += nes_out * 3 / 4;
-    if (saa_active) mix += saa_out * 3 / 4;
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -362,9 +334,7 @@ void main(void) {
     ay_init();
     sn_init();
     fm_init();
-    gb_init();
-    nes_init();
-    saa_init();
+    /* gb/nes/saa 暂不启用 */
     test_start();
     led_tick = 0;
     timer0_init();
