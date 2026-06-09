@@ -77,30 +77,33 @@ void scc_wr(u8 port, u8 dat) {
     }
 }
 
+#define SCC_MIX_CH(ch) do { \
+    if (scc_step_val[ch] > 0) { \
+        scc_cnt[ch] += scc_step_val[ch]; \
+        if (scc_key[ch]) { \
+            u8 _offs = (u8)(scc_cnt[ch] >> 16) & 0x1F; \
+            u8 _vol = scc_vol[ch]; \
+            u8 _b = scc_wav[ch][_offs]; \
+            s16 _tmp; \
+            if (_b >= 128) \
+                _tmp = -(((s16)(256 - (u16)_b) * (u16)_vol) >> 4); \
+            else \
+                _tmp = ((s16)(u16)_b * (u16)_vol) >> 4; \
+            mix += _tmp; \
+        } \
+    } \
+} while(0)
+
 u8 scc_render(void) {
     s16 mix;
-    u8 i;
-    u8 vol, offs, b;
-    s16 tmp;
 
     mix = 0;
-    for (i = 0; i < SCC_CHANS; i++) {
-        if (scc_step_val[i] > 0) {
-            scc_cnt[i] += scc_step_val[i];
-            if (scc_key[i]) {
-                /* RPFM: offs = (counter >> SCC_FREQ_BITS) & 0x1F */
-                offs = (u8)(scc_cnt[i] >> SCC_FREQ_BITS) & 0x1F;
-                vol = scc_vol[i];
-                b = scc_wav[i][offs];
-                /* 8-bit 波形转换为有符号，乘音量，右移 4 位 */
-                if (b >= 128)
-                    tmp = -(((s16)(256 - (u16)b) * (u16)vol) >> 4);
-                else
-                    tmp = ((s16)(u16)b * (u16)vol) >> 4;
-                mix += tmp;
-            }
-        }
-    }
+    SCC_MIX_CH(0);
+    SCC_MIX_CH(1);
+    SCC_MIX_CH(2);
+    SCC_MIX_CH(3);
+    SCC_MIX_CH(4);
+
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     return 128 + (u8)mix;
