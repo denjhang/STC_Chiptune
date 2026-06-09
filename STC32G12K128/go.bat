@@ -5,35 +5,35 @@ del /q *.OBJ 2>nul
 if not exist build mkdir build
 
 echo === Compile ay8910.c ===
-D:\Keil_v5\C251\BIN\C251.EXE ay8910.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE ay8910.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile scc.c ===
-D:\Keil_v5\C251\BIN\C251.EXE scc.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE scc.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile sn76489.c ===
-D:\Keil_v5\C251\BIN\C251.EXE sn76489.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE sn76489.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile gb.c ===
-D:\Keil_v5\C251\BIN\C251.EXE gb.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE gb.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile nes.c ===
-D:\Keil_v5\C251\BIN\C251.EXE nes.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE nes.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile saa1099.c ===
-D:\Keil_v5\C251\BIN\C251.EXE saa1099.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE saa1099.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile ym2413.c ===
-D:\Keil_v5\C251\BIN\C251.EXE ym2413.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE ym2413.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Compile main.c ===
-D:\Keil_v5\C251\BIN\C251.EXE main.c LARGE OPTIMIZE(8,SPEED)
+D:\Keil_v5\C251\BIN\C251.EXE main.c LARGE OPTIMIZE(8,SPEED) NOALIAS
 if %ERRORLEVEL% NEQ 0 goto :fail
 
 echo === Link ===
