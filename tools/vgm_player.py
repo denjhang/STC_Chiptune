@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-VGM Player for STC8H SCC Synth
+VGM Player for STC Chiptune Synth (STC8H / STC32G)
 
-Python 控制节拍: 解析 VGM, SCC/AY 命令直接发串口, wait 用 time.sleep()
-固件只做 SCC 写入, 不解析 wait
+Python 控制节拍: 解析 VGM, 芯片命令直接发串口, wait 用 time.sleep()
+固件只做芯片写入, 不解析 wait
+
+支持芯片: SCC, AY8910, SN76489, GB DMG, NES APU, SAA1099, YM2413
 
 Usage:
   python vgm_player.py --list
@@ -94,7 +96,7 @@ def parse_vgm_header(data):
 def scan_vgm_stats(data, hdr):
     pos = hdr['data_offset']
     end = min(hdr['eof'], len(data))
-    scc = ay = sn = gb = nes = wait = other = 0
+    scc = ay = sn = gb = nes = saa = ym = wait = other = 0
     total_wait_samples = 0
     while pos < end:
         b = data[pos]
@@ -102,8 +104,10 @@ def scan_vgm_stats(data, hdr):
         if b == 0xD2: scc += 1; pos += 4
         elif b == 0xA0: ay += 1; pos += 3
         elif b == 0x50: sn += 1; pos += 2
+        elif b == 0x51: ym += 1; pos += 3
         elif b == 0xB3: gb += 1; pos += 3
         elif b == 0xB4: nes += 1; pos += 3
+        elif b == 0xBD: saa += 1; pos += 3
         elif b == 0x61:
             if pos + 3 <= end:
                 total_wait_samples += struct.unpack_from('<H', data, pos+1)[0]
@@ -119,7 +123,8 @@ def scan_vgm_stats(data, hdr):
         else:
             other += 1; pos += 1
     duration = total_wait_samples / SAMPLES_PER_SEC
-    return {'scc': scc, 'ay': ay, 'sn': sn, 'gb': gb, 'nes': nes, 'wait': wait, 'other': other,
+    return {'scc': scc, 'ay': ay, 'sn': sn, 'gb': gb, 'nes': nes, 'saa': saa, 'ym': ym,
+            'wait': wait, 'other': other,
             'total_wait_samples': total_wait_samples, 'duration': duration}
 
 
@@ -143,6 +148,12 @@ def dump_vgm(data, hdr):
         elif b == 0xB4 and pos + 3 <= end:
             print(f"  NES  reg={data[pos+1]:02X} data={data[pos+2]:02X}")
             pos += 3
+        elif b == 0x51 and pos + 3 <= end:
+            print(f"  YM   reg={data[pos+1]:02X} data={data[pos+2]:02X}")
+            pos += 3
+        elif b == 0xBD and pos + 3 <= end:
+            print(f"  SAA  addr={data[pos+1]:02X} data={data[pos+2]:02X}")
+            pos += 3
         elif b == 0x61 and pos + 3 <= end:
             n = struct.unpack_from('<H', data, pos+1)[0]
             print(f"  WAIT {n} samples")
@@ -164,7 +175,8 @@ VGM_CMD_LEN[0x20] = 3
 for _i in range(0x30, 0x40): VGM_CMD_LEN[_i] = 4
 VGM_CMD_LEN[0x4E] = 4; VGM_CMD_LEN[0x4F] = 4
 VGM_CMD_LEN[0x50] = 2  # SN76489: 0x50 + 1 byte data
-VGM_CMD_LEN[0x51] = 2  # SN76489 variant select (custom)
+VGM_CMD_LEN[0x51] = 3  # YM2413: 0x51 + reg + data
+VGM_CMD_LEN[0x52] = 2  # SN76489 variant select (custom)
 VGM_CMD_LEN[0x61] = 3
 VGM_CMD_LEN[0x62] = 1; VGM_CMD_LEN[0x63] = 1; VGM_CMD_LEN[0x66] = 1
 for _i in range(0x70, 0x80): VGM_CMD_LEN[_i] = 1
@@ -194,13 +206,13 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     print(f"  GD3: {gd3_text}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz")
     print(f"  Data: {end - pos} bytes")
-    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} Wait:{stats['wait']}")
+    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} SAA:{stats['saa']} YM:{stats['ym']} Wait:{stats['wait']}")
     # SN76489 变体自动检测
     sn_var = hdr.get('sn_variant')
     sn_names = {0: 'SN76489(15bit)', 1: 'SegaVDP(16bit)', 2: 'SN76489A(17bit)'}
     if sn_var is not None:
         print(f"  SN variant: {sn_names.get(sn_var, '?')}")
-        ser.write(bytes([0x51, sn_var]))
+        ser.write(bytes([0x52, sn_var]))
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 
@@ -233,35 +245,47 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                     pos = end
                     break
 
-            elif b == 0xD2:
-                # SCC: [0xD2][port][reg][data]
-                if pos + 3 <= end:
-                    ser.write(data[pos-1:pos+3])
-                    pos += 3
-
-            elif b == 0xA0:
-                # AY: [0xA0][reg][data]
-                if pos + 2 <= end:
-                    ser.write(data[pos-1:pos+2])
-                    pos += 2
-
             elif b == 0x50:
-                # SN76489: [0x50][data]
+                # SN76489: [0x50][data] - 直接透传
                 if pos + 1 <= end:
                     ser.write(data[pos-1:pos+1])
                     pos += 1
 
+            elif b == 0x51:
+                # YM2413: [0x51][reg][data] - 直接透传
+                if pos + 2 <= end:
+                    ser.write(data[pos-1:pos+2])
+                    pos += 2
+
+            elif b == 0xA0:
+                # AY8910: [0xA0][reg][data] - 直接透传
+                if pos + 2 <= end:
+                    ser.write(data[pos-1:pos+2])
+                    pos += 2
+
             elif b == 0xB3:
-                # GB DMG: [0xB3][reg][data]
+                # GB DMG: [0xB3][reg][data] - 直接透传
                 if pos + 2 <= end:
                     ser.write(data[pos-1:pos+2])
                     pos += 2
 
             elif b == 0xB4:
-                # NES APU: [0xB4][reg][data]
+                # NES APU: [0xB4][reg][data] - 直接透传
                 if pos + 2 <= end:
                     ser.write(data[pos-1:pos+2])
                     pos += 2
+
+            elif b == 0xBD:
+                # SAA1099: [0xBD][addr][data] - 直接透传
+                if pos + 2 <= end:
+                    ser.write(data[pos-1:pos+2])
+                    pos += 2
+
+            elif b == 0xD2:
+                # SCC: [0xD2][port][reg][data] - 直接透传
+                if pos + 3 <= end:
+                    ser.write(data[pos-1:pos+3])
+                    pos += 3
 
             elif b == 0x61:
                 # Wait N samples
@@ -331,7 +355,7 @@ def list_songs(vgm_dir):
         name = os.path.basename(f); size = os.path.getsize(f)
         try:
             d = load_vgm(f); h = parse_vgm_header(d); s = scan_vgm_stats(d, h)
-            info = f"SCC:{s['scc']} PSG:{s['ay']} SN:{s['sn']} GB:{s['gb']} NES:{s['nes']}"
+            info = f"SCC:{s['scc']} PSG:{s['ay']} SN:{s['sn']} GB:{s['gb']} NES:{s['nes']} SAA:{s['saa']} YM:{s['ym']}"
             dur = f"{s['duration']:.1f}s"
         except Exception:
             info = "?"; dur = "?"
@@ -373,7 +397,7 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vgm_dir = os.path.join(script_dir, '..', 'vgm')
 
-    parser = argparse.ArgumentParser(description='VGM Player for STC8H SCC Synth')
+    parser = argparse.ArgumentParser(description='VGM Player for STC Chiptune Synth')
     parser.add_argument('song', nargs='?', help='Track number or name')
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--port', help='Serial port')

@@ -127,13 +127,13 @@ void UART1_int(void) interrupt 4 {
 
 /* ========== UART 命令协议 ========== */
 /*
- *   [0xD2][port][reg][data] → SCC (4 字节)
+ *   与 VGM 标准命令字节一致, Python 直接透传
+ *   [0x50][data]            → SN76489 (2 字节)
+ *   [0x52][variant]         → SN76489 变体选择 (自定义, 2 字节)
  *   [0xA0][reg][data]       → AY8910 (3 字节)
- *   [0x50][data]            → SN76489 写寄存器 (2 字节)
- *   [0x51][variant]         → SN76489 变体选择 (2 字节)
- *     variant: 0=SN76489(15bit), 1=SegaVDP(16bit), 2=SN76489A(17bit)
- *   [0xB3][reg][data]       → GB DMG 寄存器写入 (3 字节)
- *   [0xB4][reg][data]       → NES APU 寄存器写入 (3 字节)
+ *   [0xB3][reg][data]       → GB DMG (3 字节)
+ *   [0xB4][reg][data]       → NES APU (3 字节)
+ *   [0xD2][port][reg][data] → SCC (4 字节)
  *   其他: 忽略
  */
 
@@ -177,8 +177,8 @@ void process_uart(void) {
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_wr(d);
 
-        } else if (b == 0x51) {
-            /* SN76489 变体: [0x51][variant] */
+        } else if (b == 0x52) {
+            /* SN76489 变体: [0x52][variant] */
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
