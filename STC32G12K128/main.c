@@ -257,9 +257,9 @@ void led_tick_update(void) {
     led_tick++;
     if ((led_tick % LED_EVERY) == 0) {
         mask = 0;
-        if (fm_active) mask |= fm_channel_mask();
-        if (ay_active) mask |= ay_channel_mask() << 4;
-        if (sn_active) mask |= (sn_channel_mask() ? 0x80 : 0);
+        if (fm_active) mask |= fm_channel_mask();          /* P0.0-4 */
+        if (ay_active) mask |= ay_channel_mask() << 3;   /* P0.3-7 */
+        if (sn_active) mask |= sn_channel_mask() << 4;   /* P0.4-7 */
 
         if (mask) {
             P0 = ~mask;

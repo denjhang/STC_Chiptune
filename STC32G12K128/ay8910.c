@@ -219,5 +219,11 @@ u8 ay_channel_mask(void) {
     for (i = 0; i < AY_CHANS; i++) {
         if (ay_volume[i] & 0x0F) mask |= (1 << i);
     }
+    /* noise: bit7=0 means noise enabled */
+    if (!(ay_reg[7] & 0x20)) mask |= 0x08;
+    /* envelope: any channel using envelope mode */
+    for (i = 0; i < AY_CHANS; i++) {
+        if (ay_volume[i] & 0x10) { mask |= 0x10; break; }
+    }
     return mask;
 }

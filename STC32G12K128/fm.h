@@ -12,7 +12,7 @@
 
 #include "types.h"
 
-#define FM_VOICES   4
+#define FM_VOICES   6
 #define FM_OPS      (FM_VOICES * 2)
 #define FM_WAVELEN  64
 
