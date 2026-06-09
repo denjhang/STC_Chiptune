@@ -50,14 +50,10 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
-                /* SCC 步进计算: step = SCC_STEP_BASE / (freq+1) */
+                /* RPFM 步进: step = (1789772 << 17) / ((freq+1) * 8820) */
                 {
                     u32 f = (u32)scc_freq[chi] + 1;
-                    if (f < 9) {
-                        scc_step_val[chi] = 0;
-                    } else {
-                        scc_step_val[chi] = SCC_STEP_BASE / f;
-                    }
+                    scc_step_val[chi] = (u32)(SCC_DIVIDEND / (f * SCC_RATE));
                 }
             }
             break;

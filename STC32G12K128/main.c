@@ -28,7 +28,7 @@
 #define Baudrate1       115200L
 #define UART1_BUF_LENGTH 2048
 #define SAMPLE_RATE     17640
-#define SCC_RATE        4410
+#define SCC_RATE        17640
 
 /* ========== 仿真核心 ========== */
 #include "scc.h"
@@ -294,8 +294,7 @@ void timer0_isr(void) interrupt 1 {
     s16 mix;
     u8 out;
 
-    if (scc_active && ++scc_tick_div >= 2) {
-        scc_tick_div = 0;
+    if (scc_active) {
         scc_out = scc_render();
     }
 

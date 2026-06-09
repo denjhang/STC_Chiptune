@@ -8,10 +8,12 @@
 #define SCC_WAVELEN  32
 #define SCC_FREQ_BITS 16
 /* RPFM 公式: step = ((clock >> 1) << 17) / ((freq+1) * rate)
- * VGM SCC 时钟: 3579545 Hz (内部用 clock >> 1 = 1789772)
- * SCC 渲染率: 8820 Hz
- * SCC_STEP_BASE = (1789772 << 17) / 8820 = 26594592 */
-#define SCC_STEP_BASE 26594592UL
+ * VGM SCC 时钟: 3579545 Hz (clock >> 1 = 1789772)
+ * SCC 渲染率: 17640 Hz
+ * 被除数 = 1789772 << 17 = 234588995584 (超出 u32, 用 double) */
+#define SCC_CLK_HALF   1789772.0
+#define SCC_RATE        17640.0
+#define SCC_DIVIDEND    (SCC_CLK_HALF * 131072.0)  /* 234588995584.0 */
 
 void scc_init(void);
 void scc_wr(u8 port, u8 dat);
