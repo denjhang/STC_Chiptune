@@ -77,22 +77,42 @@ void gt_wr(u8 addr, u8 dat) {
 }
 
 s16 gt_render(void) {
-    u8 n, idx;
-    s16 samp;
-    s32 val;
+    u8 idx;
+    s16 samp, val;
 
     samp = 3;
-    for (n = 0; n < GT_CHANS; n++) {
-        if (!(gt_active & (1 << n))) continue;
-        gt_ch[n].osc += gt_ch[n].step;
 
-        idx = (u8)((gt_ch[n].osc >> 7) & 0xFC);
-        idx ^= gt_ch[n].wavX;
-
-        val = (s32)(u8)gt_sound[idx] + gt_ch[n].wavA;
-        if (val & 0x80) val = 63;
-        else val &= 0x3F;
-        samp += (s16)val;
+    /* ch0 */
+    if (gt_active & 0x01) {
+        gt_ch[0].osc += gt_ch[0].step;
+        idx = (u8)(gt_ch[0].osc >> 7) & 0xFC ^ gt_ch[0].wavX;
+        val = (s16)(u8)gt_sound[idx] + gt_ch[0].wavA;
+        if (val & 0x80) val = 63; else val &= 0x3F;
+        samp += val;
+    }
+    /* ch1 */
+    if (gt_active & 0x02) {
+        gt_ch[1].osc += gt_ch[1].step;
+        idx = (u8)(gt_ch[1].osc >> 7) & 0xFC ^ gt_ch[1].wavX;
+        val = (s16)(u8)gt_sound[idx] + gt_ch[1].wavA;
+        if (val & 0x80) val = 63; else val &= 0x3F;
+        samp += val;
+    }
+    /* ch2 */
+    if (gt_active & 0x04) {
+        gt_ch[2].osc += gt_ch[2].step;
+        idx = (u8)(gt_ch[2].osc >> 7) & 0xFC ^ gt_ch[2].wavX;
+        val = (s16)(u8)gt_sound[idx] + gt_ch[2].wavA;
+        if (val & 0x80) val = 63; else val &= 0x3F;
+        samp += val;
+    }
+    /* ch3 */
+    if (gt_active & 0x08) {
+        gt_ch[3].osc += gt_ch[3].step;
+        idx = (u8)(gt_ch[3].osc >> 7) & 0xFC ^ gt_ch[3].wavX;
+        val = (s16)(u8)gt_sound[idx] + gt_ch[3].wavA;
+        if (val & 0x80) val = 63; else val &= 0x3F;
+        samp += val;
     }
 
     return samp - 131;

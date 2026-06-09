@@ -632,7 +632,7 @@ def play_gigatron(ser, filepath, speed=1.0, loop=False, octave_shift=0.0):
 
     print(f"  Segments: {len(segments)}, Events: {len(timeline)}, Frames: {max_frame}")
     print(f"  Duration: {duration:.1f}s @60Hz")
-    print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
+    print(f"  Speed: {speed:.2f}x" + (" [LOOP]" if loop else ""))
     if octave_shift != 0.0:
         print(f"  Octave shift: {-octave_shift:+.1f} oct ({'down' if octave_shift > 0 else 'up'})")
     print()
@@ -836,7 +836,7 @@ def main():
         time.sleep(0.1)
         ser.reset_input_buffer()
         try:
-            gt_speed = args.speed if args.speed != 1.0 else 0.95
+            gt_speed = args.speed
             play_gigatron(ser, filepath, speed=gt_speed, loop=args.loop, octave_shift=args.gt_shift)
         except KeyboardInterrupt:
             print("\n  Stopped.")
