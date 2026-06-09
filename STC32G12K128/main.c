@@ -294,7 +294,7 @@ void timer0_isr(void) interrupt 1 {
     s16 mix;
     u8 out;
 
-    if (scc_active && ++scc_tick_div >= 4) {
+    if (scc_active && ++scc_tick_div >= 2) {
         scc_tick_div = 0;
         scc_out = scc_render();
     }

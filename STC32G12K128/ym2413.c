@@ -91,7 +91,8 @@ static YM_CHAN ym_ch[YM_CHANS];
 static u8  ym_regs[0x40];
 static u8  ym_rhythm;
 static u8  ym_user_patch[8];
-static u8  ym_env_rr;  /* envelope round-robin counter */
+static u8  ym_env_rr;
+static u32 ym_base_cnt;
 
 /* ========== ADSR 速率表 ========== */
 static const u8 ym_rate_table[16] = {
@@ -105,6 +106,7 @@ void ym_init(void) {
     memset(ym_regs, 0, sizeof(ym_regs));
     ym_rhythm = 0;
     ym_env_rr = 0;
+    ym_base_cnt = 0;
     memset(ym_user_patch, 0, sizeof(ym_user_patch));
 
     for (i = 0; i < YM_CHANS; i++) {
@@ -286,14 +288,19 @@ void ym_wr(u8 reg, u8 val) {
 s16 ym_render(void) {
     s16 mix;
     u8 ch, idx_m, idx_c;
+    u8 ticks;
     s8 mod_out;
     YM_CHAN *c;
+
+    ym_base_cnt += YM_BASE_INCR;
+    ticks = (u8)(ym_base_cnt >> YM_GETA_BITS);
+    ym_base_cnt &= (1UL << YM_GETA_BITS) - 1;
 
     mix = 0;
 
     /* 包络 round-robin: 每 tick 只处理一个通道的包络 */
     ch = ym_env_rr;
-    ym_env_rr = (ym_env_rr + 1) & 7;  /* 0..8 cycle, 9 channels */
+    ym_env_rr = (ym_env_rr + 1) & 7;
     if (ch < YM_CHANS) {
         c = &ym_ch[ch];
         if (c->env_state_m > 0 || c->key) {
@@ -314,15 +321,17 @@ s16 ym_render(void) {
         }
     }
 
-    /* 所有活跃通道: phase + waveform lookup */
+    /* 所有活跃通道: phase + waveform lookup (ticks 次循环) */
     for (ch = 0; ch < YM_CHANS; ch++) {
         c = &ym_ch[ch];
 
         if (c->env_state_c == 0 && c->env_state_m == 0) continue;
 
-        /* phase 累加 */
-        c->phase_m += c->step * (c->mul_m ? c->mul_m : 1);
-        c->phase_c += c->step;
+        /* phase 累加 (每 tick 跑 ticks 次) */
+        if (ticks) {
+            c->phase_m += c->step * (c->mul_m ? c->mul_m : 1) * ticks;
+            c->phase_c += c->step * ticks;
+        }
 
         /* OP1 (modulator): phase → conv_vol lookup */
         idx_m = (c->phase_m >> 10) & 0x3F;
@@ -340,13 +349,8 @@ s16 ym_render(void) {
         idx_c = (c->phase_c >> 10) & 0x3F;
         idx_c = (idx_c + mod_out) & 0x3F;
 
-        /* conv_vol[carrier_level][idx] gives sin*level/31 */
-        /* then apply channel volume: >> (4 - vol_bits) ≈ shift */
         {
             s8 carrier = ym_conv_vol[c->env_level_c][idx_c];
-            /* vol 0-15, scale: carrier * (15-vol) / 15 ≈ carrier >> shift */
-            /* use lookup: vol_shift[16] = {0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8} */
-            /* simpler: (carrier * (16-vol)) >> 4 — one multiply, but small */
             mix += (s16)carrier * (16 - c->vol) >> 2;
         }
     }

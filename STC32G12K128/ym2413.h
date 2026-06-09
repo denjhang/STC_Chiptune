@@ -12,8 +12,8 @@
 #define YM_WAVELEN  64
 #define YM_GETA_BITS 24
 /* YM2413 clock = 3579545 Hz, internal = clock/72 = 49716 Hz
- * base_incr = 3579545 * 2^24 / 72 / 17640 = 83583 */
-#define YM_BASE_INCR 83583UL
+ * base_incr = 49716 * 2^24 / 17640 = 47284265 */
+#define YM_BASE_INCR 47284265UL
 
 void ym_init(void);
 void ym_wr(u8 reg, u8 val);

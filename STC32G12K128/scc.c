@@ -1,4 +1,5 @@
-/* scc.c - SCC (K051649) 仿真核心 (STC32G C251 版) */
+/* scc.c - SCC (K051649) 仿真核心 (STC32G C251 版)
+ * 参考 RPFM emu/scc.c 优化版 */
 #include "STC32G.H"
 #include "scc.h"
 
@@ -49,6 +50,7 @@ void scc_wr(u8 port, u8 dat) {
                     hi = scc_freq[chi] & 0x0F00;
                     scc_freq[chi] = hi | dat;
                 }
+                /* SCC 步进计算: step = SCC_STEP_BASE / (freq+1) */
                 {
                     u32 f = (u32)scc_freq[chi] + 1;
                     if (f < 9) {
@@ -90,9 +92,11 @@ u8 scc_render(void) {
         if (scc_step_val[i] > 0) {
             scc_cnt[i] += scc_step_val[i];
             if (scc_key[i]) {
+                /* RPFM: offs = (counter >> SCC_FREQ_BITS) & 0x1F */
                 offs = (u8)(scc_cnt[i] >> SCC_FREQ_BITS) & 0x1F;
                 vol = scc_vol[i];
                 b = scc_wav[i][offs];
+                /* 8-bit 波形转换为有符号，乘音量，右移 4 位 */
                 if (b >= 128)
                     tmp = -(((s16)(256 - (u16)b) * (u16)vol) >> 4);
                 else
