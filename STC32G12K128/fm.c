@@ -310,51 +310,53 @@ static void fm_env_tick(u8 opi) {
 
     cnt = fm_op[opi].env_cnt;
     step = fm_op[opi].env_step;
-    if (cnt < step) {
-        cnt = 250;
-        lvl = fm_op[opi].level;
-
-        switch (fm_op[opi].env_state) {
-        case 1: /* attack */
-            lvl++;
-            if (lvl >= 31) {
-                fm_op[opi].env_state = 2; /* decay */
-                fm_op[opi].env_step = fm_op[opi].decy;
-            }
-            fm_op[opi].level = lvl;
-            break;
-
-        case 2: /* decay */
-            if (lvl > 0) lvl--;
-            fm_op[opi].level = lvl;
-            sul_val = fm_op[opi].sul;
-            if (lvl == sul_val) {
-                fm_op[opi].env_state = 3; /* sustain */
-                fm_op[opi].env_step = fm_op[opi].sus;
-            }
-            break;
-
-        case 3: /* sustain */
-            if (lvl > 0) lvl--;
-            fm_op[opi].level = lvl;
-            if (lvl == 0) {
-                fm_op[opi].sin_step = 0; /* silence */
-            }
-            break;
-
-        case 4: /* release */
-            if (lvl > 0) lvl--;
-            fm_op[opi].level = lvl;
-            if (lvl == 0) {
-                fm_op[opi].sin_step = 0;
-            }
-            break;
-
-        default:
-            break;
-        }
+    if (cnt >= step) {
+        fm_op[opi].env_cnt = cnt - step;
+        return;
     }
-    fm_op[opi].env_cnt = cnt - step;
+
+    fm_op[opi].env_cnt = 250;
+    lvl = fm_op[opi].level;
+
+    switch (fm_op[opi].env_state) {
+    case 1: /* attack */
+        lvl++;
+        if (lvl >= 31) {
+            fm_op[opi].env_state = 2; /* decay */
+            fm_op[opi].env_step = fm_op[opi].decy;
+        }
+        fm_op[opi].level = lvl;
+        break;
+
+    case 2: /* decay */
+        if (lvl > 0) lvl--;
+        fm_op[opi].level = lvl;
+        sul_val = fm_op[opi].sul;
+        if (lvl == sul_val) {
+            fm_op[opi].env_state = 3; /* sustain */
+            fm_op[opi].env_step = fm_op[opi].sus;
+        }
+        break;
+
+    case 3: /* sustain */
+        if (lvl > 0) lvl--;
+        fm_op[opi].level = lvl;
+        if (lvl == 0) {
+            fm_op[opi].sin_step = 0; /* silence */
+        }
+        break;
+
+    case 4: /* release */
+        if (lvl > 0) lvl--;
+        fm_op[opi].level = lvl;
+        if (lvl == 0) {
+            fm_op[opi].sin_step = 0;
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* ========== 公开函数 ========== */
