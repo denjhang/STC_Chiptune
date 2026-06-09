@@ -492,7 +492,7 @@ GT_REG_OFF   = 0x10  # ch0-3: +ch, note off
 
 
 def gt_send(ser, addr, data):
-    """发送 GT 寄存器写入 (XOR 校验, 不等 ACK)"""
+    """发送 GT 寄存器写入 (XOR 校验, 单发)"""
     chk = GT_CMD ^ addr ^ data
     ser.write(bytes([GT_CMD, addr, data, chk]))
 
@@ -884,9 +884,21 @@ def main():
     except KeyboardInterrupt:
         print("\n  Stopped.")
     finally:
-        # 复位 SCC 寄存器：静音所有通道
-        scc_reset = bytes([0xD2, 0x00, 0x03, 0x00])
-        ser.write(scc_reset)
+        # 全局静音: FM 16 voice off
+        for v in range(16):
+            uart_send(ser, [0x51, 0x20 | v, 0], ack=False)
+        # AY8910: ch0-2 volume = 0
+        for reg in (8, 9, 10):
+            ser.write(bytes([0xA0, reg, 0x00]))
+        # SN76489: 4 ch silence
+        for d in (0x9F, 0xBF, 0xDF, 0xFF):
+            ser.write(bytes([0x50, d]))
+        # SCC: 静音
+        ser.write(bytes([0xD2, 0x00, 0x03, 0x00]))
+        # GT: 4 ch note off
+        for ch in range(4):
+            addr = 0x10 + ch
+            ser.write(bytes([0xB0, addr, 0, 0xB0 ^ addr]))
         time.sleep(0.01)
         ser.close()
 

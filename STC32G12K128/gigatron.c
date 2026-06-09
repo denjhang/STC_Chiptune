@@ -19,7 +19,7 @@ static struct {
 } gt_ch[GT_CHANS];
 
 /* 活跃标志 (key != 0) */
-static u8 gt_active;
+static u8 gt_voice_active;
 
 void gt_init(void) {
     u8 i;
@@ -38,7 +38,7 @@ void gt_init(void) {
         gt_ch[i].wavX = 0;
         gt_ch[i].wavA = 0;
     }
-    gt_active = 0;
+    gt_voice_active = 0;
 }
 
 void gt_wr(u8 addr, u8 dat) {
@@ -48,7 +48,7 @@ void gt_wr(u8 addr, u8 dat) {
         /* ch0-3 fnumL: key = (key & 0xFF80) | (dat & 0x7F) */
         ch = addr;
         gt_ch[ch].key = (gt_ch[ch].key & 0xFF80) | (dat & 0x7F);
-        if (gt_ch[ch].key) gt_active |= (1 << ch);
+        if (gt_ch[ch].key) gt_voice_active |= (1 << ch);
     } else if (addr < 0x08) {
         /* ch0-3 fnumH: key = (key & 0x7F) | (dat << 7), 预计算 step */
         ch = addr - 4;
@@ -56,7 +56,7 @@ void gt_wr(u8 addr, u8 dat) {
         gt_ch[ch].step = (u16)((u32)gt_ch[ch].key * 44 / 101);
         if (gt_ch[ch].key) {
             gt_ch[ch].osc = 0;
-            gt_active |= (1 << ch);
+            gt_voice_active |= (1 << ch);
         }
     } else if (addr < 0x0C) {
         /* ch0-3 wavX */
@@ -69,7 +69,7 @@ void gt_wr(u8 addr, u8 dat) {
         ch = addr - 0x10;
         gt_ch[ch].key = 0;
         gt_ch[ch].step = 0;
-        gt_active &= ~(1 << ch);
+        gt_voice_active &= ~(1 << ch);
     } else {
         /* 0x14-0xFF: 波形表写入 */
         gt_sound[addr] = dat;
@@ -83,7 +83,7 @@ s16 gt_render(void) {
     samp = 3;
 
     /* ch0 */
-    if (gt_active & 0x01) {
+    if (gt_voice_active & 0x01) {
         gt_ch[0].osc += gt_ch[0].step;
         idx = (u8)(gt_ch[0].osc >> 7) & 0xFC ^ gt_ch[0].wavX;
         val = (s16)(u8)gt_sound[idx] + gt_ch[0].wavA;
@@ -91,7 +91,7 @@ s16 gt_render(void) {
         samp += val;
     }
     /* ch1 */
-    if (gt_active & 0x02) {
+    if (gt_voice_active & 0x02) {
         gt_ch[1].osc += gt_ch[1].step;
         idx = (u8)(gt_ch[1].osc >> 7) & 0xFC ^ gt_ch[1].wavX;
         val = (s16)(u8)gt_sound[idx] + gt_ch[1].wavA;
@@ -99,7 +99,7 @@ s16 gt_render(void) {
         samp += val;
     }
     /* ch2 */
-    if (gt_active & 0x04) {
+    if (gt_voice_active & 0x04) {
         gt_ch[2].osc += gt_ch[2].step;
         idx = (u8)(gt_ch[2].osc >> 7) & 0xFC ^ gt_ch[2].wavX;
         val = (s16)(u8)gt_sound[idx] + gt_ch[2].wavA;
@@ -107,7 +107,7 @@ s16 gt_render(void) {
         samp += val;
     }
     /* ch3 */
-    if (gt_active & 0x08) {
+    if (gt_voice_active & 0x08) {
         gt_ch[3].osc += gt_ch[3].step;
         idx = (u8)(gt_ch[3].osc >> 7) & 0xFC ^ gt_ch[3].wavX;
         val = (s16)(u8)gt_sound[idx] + gt_ch[3].wavA;
@@ -119,5 +119,5 @@ s16 gt_render(void) {
 }
 
 u8 gt_channel_mask(void) {
-    return gt_active;
+    return gt_voice_active;
 }
