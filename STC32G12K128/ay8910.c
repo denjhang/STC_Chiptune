@@ -106,7 +106,7 @@ void ay_wr(u8 reg, u8 val) {
 }
 
 s16 ay_render(void) {
-    u8 i, incr, noise;
+    u8 incr, noise;
     u16 freq;
     u16 ch_out;
     s16 mix;
@@ -156,28 +156,60 @@ s16 ay_render(void) {
     noise = ay_noise_seed & 1;
 
     mix = 0;
-    for (i = 0; i < AY_CHANS; i++) {
-        if (incr > 0) {
-            freq = ((u16)ay_freq_hi[i] << 8) | ay_freq_lo[i];
-            ay_count[i] += incr;
-            if (freq > 0 && ay_count[i] >= freq) {
-                ay_edge[i] = !ay_edge[i];
-                if (freq >= incr)
-                    ay_count[i] -= freq;
-                else
-                    ay_count[i] = 0;
-            }
-        }
 
-        ch_out = 0;
-        if ((ay_tmask[i] || ay_edge[i]) && (ay_nmask[i] || noise)) {
-            vol_idx = ay_volume[i] & 0x0F;
-            if (ay_volume[i] & 0x10)
-                vol_idx = ay_env_step ^ ay_env_attack;
-            vol_val = ay_voltbl[vol_idx];
-            ch_out = (u16)vol_val << 4;
+    /* CH0 */
+    if (incr > 0) {
+        freq = ((u16)ay_freq_hi[0] << 8) | ay_freq_lo[0];
+        ay_count[0] += incr;
+        if (freq > 0 && ay_count[0] >= freq) {
+            ay_edge[0] = !ay_edge[0];
+            if (freq >= incr) ay_count[0] -= freq; else ay_count[0] = 0;
         }
-        mix += (s16)((u16)ch_out >> 4) - 8;
     }
+    ch_out = 0;
+    if ((ay_tmask[0] || ay_edge[0]) && (ay_nmask[0] || noise)) {
+        vol_idx = ay_volume[0] & 0x0F;
+        if (ay_volume[0] & 0x10) vol_idx = ay_env_step ^ ay_env_attack;
+        vol_val = ay_voltbl[vol_idx];
+        ch_out = (u16)vol_val << 4;
+    }
+    mix += (s16)((u16)ch_out >> 4) - 8;
+
+    /* CH1 */
+    if (incr > 0) {
+        freq = ((u16)ay_freq_hi[1] << 8) | ay_freq_lo[1];
+        ay_count[1] += incr;
+        if (freq > 0 && ay_count[1] >= freq) {
+            ay_edge[1] = !ay_edge[1];
+            if (freq >= incr) ay_count[1] -= freq; else ay_count[1] = 0;
+        }
+    }
+    ch_out = 0;
+    if ((ay_tmask[1] || ay_edge[1]) && (ay_nmask[1] || noise)) {
+        vol_idx = ay_volume[1] & 0x0F;
+        if (ay_volume[1] & 0x10) vol_idx = ay_env_step ^ ay_env_attack;
+        vol_val = ay_voltbl[vol_idx];
+        ch_out = (u16)vol_val << 4;
+    }
+    mix += (s16)((u16)ch_out >> 4) - 8;
+
+    /* CH2 */
+    if (incr > 0) {
+        freq = ((u16)ay_freq_hi[2] << 8) | ay_freq_lo[2];
+        ay_count[2] += incr;
+        if (freq > 0 && ay_count[2] >= freq) {
+            ay_edge[2] = !ay_edge[2];
+            if (freq >= incr) ay_count[2] -= freq; else ay_count[2] = 0;
+        }
+    }
+    ch_out = 0;
+    if ((ay_tmask[2] || ay_edge[2]) && (ay_nmask[2] || noise)) {
+        vol_idx = ay_volume[2] & 0x0F;
+        if (ay_volume[2] & 0x10) vol_idx = ay_env_step ^ ay_env_attack;
+        vol_val = ay_voltbl[vol_idx];
+        ch_out = (u16)vol_val << 4;
+    }
+    mix += (s16)((u16)ch_out >> 4) - 8;
+
     return mix;
 }
