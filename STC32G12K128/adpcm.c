@@ -73,32 +73,31 @@ static const s16 code adpcm_step_inc[8] = {
 /* ========== ROM 地址表 ========== */
 static const u16 code drum_start[6] = {
     0x0000,  /* BD */
-    0x01C0,  /* SD */
-    0x0440,  /* HH */
-    0x1B80,  /* TC */
-    0x1D00,  /* TM */
-    0x1F80   /* RS */
+    0x01AB,  /* SD */
+    0x040D,  /* TC */
+    0x0F20,  /* HH */
+    0x108E,  /* TM */
+    0x12F0   /* RS */
 };
 
-/* 每鼓每次 tick 解码几个 sample (跳采样)
- * SPT=1: 全速, 17640Hz. SPT=2: 半速 8820Hz. SPT=4: 4410Hz */
-static const u8 code drum_spt[6] = {
-    1,  /* BD */
-    2,  /* SD */
-    8,  /* HH: 最长, 跳采样缩短 */
-    1,  /* TC */
-    1,  /* TM */
-    1,  /* RS */
-};
-
-/* 每鼓的 nibble 数 (ROM 段长度 × 2) */
+/* 每鼓的 nibble 数 */
 static const u16 code drum_len[6] = {
-    896,     /* BD: 448B × 2 */
-    1408,    /* SD: 704B × 2 */
-    12288,   /* HH: 6144B × 2 */
-    2048,    /* TC: 1024B × 2 */
-    1248,    /* TM: 624B × 2 */
-    1024     /* RS: 512B × 2 */
+    854,     /* BD */
+    1219,    /* SD */
+    5670,    /* TC */
+    732,     /* HH */
+    1219,    /* TM */
+    244      /* RS */
+};
+
+/* 分频: 1=每 tick 解码 (17640Hz), 2=每 2 tick 解码 (8820Hz) */
+static const u8 code drum_div[6] = {
+    1,  /* BD */
+    1,  /* SD */
+    2,  /* TC */
+    1,  /* HH */
+    2,  /* TM */
+    2   /* RS */
 };
 
 /* 通道状态 */
@@ -109,7 +108,8 @@ static struct {
     s16 acc;       /* 12-bit accumulator (sign extended) */
     s16 adpcm_step;/* ADPCM step index (0..768) */
     u8  vol;
-    u8  spt;       /* samples per tick (skip sampling) */
+    u8  div;       /* tick divider (1 or 2) */
+    u8  div_cnt;   /* divider counter */
     u8  active;
 } pcm_ch[PCM_CHANS];
 
@@ -191,7 +191,8 @@ void pcm_wr(u8 addr, u8 dat) {
         pcm_ch[ch].acc = 0;
         pcm_ch[ch].adpcm_step = 0;
         pcm_ch[ch].cache = 0;
-        pcm_ch[ch].spt = drum_spt[drum];
+        pcm_ch[ch].div = drum_div[drum];
+        pcm_ch[ch].div_cnt = 0;
         pcm_ch[ch].active = 1;
         pcm_active_mask |= (1 << ch);
 
@@ -207,16 +208,15 @@ void pcm_wr(u8 addr, u8 dat) {
 }
 
 s16 pcm_render(void) {
-    u8 ch, n, spt;
-    s16 total = 0, s;
+    u8 ch;
+    s16 total = 0;
 
     for (ch = 0; ch < PCM_CHANS; ch++) {
         if (!pcm_ch[ch].active) continue;
-        spt = pcm_ch[ch].spt;
-        for (n = 0; n < spt; n++) {
-            s = pcm_decode_sample(ch);
-            if (!pcm_ch[ch].active) break;
-            total += s;
+        pcm_ch[ch].div_cnt++;
+        if (pcm_ch[ch].div_cnt >= pcm_ch[ch].div) {
+            pcm_ch[ch].div_cnt = 0;
+            total += pcm_decode_sample(ch);
         }
     }
 
