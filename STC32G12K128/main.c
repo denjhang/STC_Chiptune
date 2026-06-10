@@ -51,6 +51,7 @@
 #include "fm.h"
 #include "gigatron.h"
 #include "wt.h"
+#include "adpcm.h"
 /* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
@@ -60,6 +61,7 @@ bit sn_active;
 bit fm_active;
 bit gt_active;
 bit wt_active;
+bit pcm_active;
 /* gb/nes/saa 暂不启用 */
 
 /* ========== 16kHz tick ========== */
@@ -246,8 +248,13 @@ void process_uart(void) {
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             calc = 0xC0 ^ r ^ d;
             if (chk != calc) { uart_send_ack(ACK_ERR); continue; }
-            wt_active = 1;
-            wt_wr(r, d);
+            if (r >= 0x15 && r <= 0x26) {
+                pcm_active = 1;
+                pcm_wr(r, d);
+            } else {
+                wt_active = 1;
+                wt_wr(r, d);
+            }
             uart_send_ack(ACK_OK);
 
         } else if (b == 0xB4) {
@@ -330,7 +337,8 @@ void led_tick_update(void) {
         mask = 0;
         if (fm_active) mask |= fm_channel_mask();
         if (gt_active) mask |= gt_channel_mask();
-        if (wt_active) mask |= wt_channel_mask();
+        if (wt_active) mask |= wt_channel_mask() & 0x0F;
+        if (pcm_active) mask |= pcm_channel_mask() << 5;
         if (ay_active) mask |= ay_channel_mask() << 3;
         if (sn_active) mask |= sn_channel_mask() << 4;
 
@@ -387,6 +395,10 @@ void timer0_isr(void) interrupt 1 {
     if (fm_active) mix += fm_render() * 3 / 2;
     if (gt_active) mix += gt_out * 3 / 2;
     if (wt_active) mix += wt_out * 3 / 2;
+    if (pcm_active) {
+        mix += pcm_render() * 3 / 2;
+        if (!pcm_channel_mask()) pcm_active = 0;
+    }
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -426,6 +438,7 @@ void main(void) {
     fm_init();
     gt_init();
     wt_init();
+    pcm_init();
     /* gb/nes/saa 暂不启用 */
     test_start();
     led_tick = 0;
