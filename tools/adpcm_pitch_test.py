@@ -46,42 +46,47 @@ def play(ser, ch, drum, step_val, label, dur=0.8):
 
 def main():
     import sys
-    drum_idx = int(sys.argv[1]) if len(sys.argv) > 1 else -1
 
     ser = serial.Serial(PORT, BAUD, timeout=0.1)
     time.sleep(0.1)
     ser.reset_input_buffer()
 
     base_step = 0x0100
-    dur = 0.4  # 快速
+    scale = [0, 2, 4, 5, 7, 9, 11]
 
-    if drum_idx >= 0:
-        drums = [drum_idx]
-    else:
-        drums = range(6)
+    for drum in range(6):
+        print(f"=== {NAMES[drum]} ===")
 
-    for drum_idx in drums:
-        print(f"=== {NAMES[drum_idx]} ===")
-        for midi in [24, 36, 48, 60, 72, 84, 96, 108]:
-            note_name = f'C{(midi - 12) // 12}'
-            ratio = 2 ** ((midi - 60) / 12.0)
-            step = int(base_step * ratio)
-            step = max(1, min(step, 0xFFFF))
+        # 所有鼓: 6 通道轮转 0.025s
+        ch_idx = 0
+        for octave in range(1, 8):
+            base_midi = 12 * octave + 12
+            for semi in scale:
+                midi = base_midi + semi
+                if midi > 108: break
+                note_names = {0:'C', 2:'D', 4:'E', 5:'F', 7:'G', 9:'A', 11:'B'}
+                nn = f"{note_names.get(semi, '?')}{octave}"
 
-            note_off(ser, 0)
-            time.sleep(0.02)
-            set_vol(ser, 0, 31)
-            set_step16(ser, 0, step)
-            time.sleep(0.01)
-            note_on(ser, 0, drum_idx)
-            time.sleep(dur)
-            note_off(ser, 0)
-            time.sleep(0.05)
-            tag = 'interp' if step < 0x100 else 'direct'
-            print(f"  {note_name} step=0x{step:04X} [{tag}]")
+                ratio = 2 ** ((midi - 60) / 12.0)
+                step = int(base_step * ratio)
+                step = max(1, min(step, 0xFFFF))
+
+                ch = ch_idx % 6
+                set_vol(ser, ch, 31)
+                set_step16(ser, ch, step)
+                note_on(ser, ch, drum)
+                ch_idx += 1
+                time.sleep(0.025)
+
+                tag = 'interp' if step < 0x100 else 'direct'
+                print(f"  ch{ch} {nn} step=0x{step:04X} [{tag}]")
+        time.sleep(0.5)
+        for c in range(6):
+            note_off(ser, c)
 
     print("\n完成")
-    note_off(ser, 0)
+    for c in range(6):
+        note_off(ser, c)
     ser.close()
 
 if __name__ == "__main__":
