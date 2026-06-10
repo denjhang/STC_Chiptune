@@ -490,26 +490,30 @@ def wt_set_release(ser, rel_val):
     """WT set release: 0-15"""
     wt_send(ser, 0x12, rel_val)
 
-def wt_scale(ser):
-    """WT 全音阶: 4 通道轮替, 每八度切换波形, 中等 release"""
-    print("\n  === WT Scale (C2-C7) ===")
+def wt_scale(ser, wave_idx=None):
+    """WT 全音阶: 4 通道轮替, 指定或轮替波形, 中等 release"""
+    wave_name = WT_WAVE_NAMES[wave_idx] if wave_idx is not None else "auto-cycle"
+    print(f"\n  === WT Scale (C1-C8, {wave_name}) ===")
     # 设置中等 release (7)
     wt_set_release(ser, 7)
     time.sleep(0.05)
 
-    start_note = 36  # C2
-    end_note = 96    # C7
+    start_note = 24  # C1
+    end_note = 108   # C8
 
     ch = 0
-    wave = 0
+    wave = wave_idx if wave_idx is not None else 0
+
+    if wave_idx is not None:
+        wt_set_wave(ser, wave_idx)
+        time.sleep(0.05)
 
     for note in range(start_note, end_note + 1):
-        # 每 12 音 (一个八度) 切换波形
-        if note > start_note and (note - start_note) % 12 == 0:
+        # 每 12 音 (一个八度) 切换波形 (仅当未指定时)
+        if wave_idx is None and note > start_note and (note - start_note) % 12 == 0:
             wave = (wave + 1) % 6
             wt_set_wave(ser, wave)
             print(f"  --- 切换波形: {WT_WAVE_NAMES[wave]} ---")
-
         names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
         oct = note // 12 - 1
         nm = names[note % 12]
@@ -834,7 +838,9 @@ def main():
     parser.add_argument('--fm-scale', action='store_true',
                         help='FM full scale test (C1-C9, 8 voices)')
     parser.add_argument('--wt-scale', action='store_true',
-                        help='WT full scale test (C2-C7, 4 channels, waveform per octave)')
+                        help='WT full scale test (C1-C8, 4 channels)')
+    parser.add_argument('--wt-wave', type=int, metavar='WAVE',
+                        help='WT waveform (0-5): tri=0, sin=1, saw=2, pulse=3, clipsin=4, abssin=5')
     parser.add_argument('--gt', type=int, metavar='N',
                         help='Play Gigatron .gbas.c track number')
     parser.add_argument('--gt-dir', default=None,
@@ -875,7 +881,7 @@ def main():
             if args.fm_scale:
                 fm_scale(ser)
             if args.wt_scale:
-                wt_scale(ser)
+                wt_scale(ser, args.wt_wave)
         except Exception as e:
             print(f"Error: {e}")
         finally:
