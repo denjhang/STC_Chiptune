@@ -423,8 +423,20 @@ def resolve_song(selector, vgm_dir):
 # FM 波形名称
 FM_WAVE_NAMES = ['tri', 'clipsin', 'rect', 'sin', 'saw', 'abssin']
 
-# WT 波形名称
-WT_WAVE_NAMES = ['tri', 'sin', 'saw', 'pulse', 'clipsin', 'abssin']
+# WT 波形名称 (按类型排列: 方波/sine类/其他)
+# 寄存器 0x13 data = type<<4 | index
+WT_WAVES = {
+    (0,0): 'sq12',   (0,1): 'sq25',   (0,2): 'pulse50', (0,3): 'sq75',
+    (1,0): 'sin',    (1,1): 'clipsin', (1,2): 'abssin',  (1,3): 'halfsin',
+    (1,4): 'qsin',   (1,5): 'altsin', (1,6): 'althalfsin', (1,7): 'tri',
+    (2,0): 'saw',    (2,1): 'gb_dmg',
+}
+# 扁平列表 (按 wave table 索引 0-13)
+WT_WAVE_NAMES = ['sq12', 'sq25', 'pulse50', 'sq75', 'sin', 'clipsin',
+                 'abssin', 'halfsin', 'qsin', 'altsin', 'althalfsin', 'tri',
+                 'saw', 'gb_dmg']
+# wave table 索引 -> 寄存器 data (type<<4|index)
+WT_WAVE_REG = [0x00,0x01,0x02,0x03, 0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17, 0x20,0x21]
 
 def fm_send_note(ser, voice, note, duration_ms=300):
     """发送 FM Note On, 等待, Note Off (OPLL 分页模式)"""
@@ -483,7 +495,7 @@ def wt_note_off(ser, ch):
     wt_send(ser, 0x04 | ch, 0)
 
 def wt_set_wave(ser, wave_idx):
-    """WT set wave: 0-5"""
+    """WT set wave: wave table 索引 0-13"""
     wt_send(ser, 0x13, wave_idx)
 
 def wt_set_release(ser, rel_val):
@@ -511,7 +523,7 @@ def wt_scale(ser, wave_idx=None):
     for note in range(start_note, end_note + 1):
         # 每 12 音 (一个八度) 切换波形 (仅当未指定时)
         if wave_idx is None and note > start_note and (note - start_note) % 12 == 0:
-            wave = (wave + 1) % 6
+            wave = (wave + 1) % len(WT_WAVE_NAMES)
             wt_set_wave(ser, wave)
             print(f"  --- 切换波形: {WT_WAVE_NAMES[wave]} ---")
         names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -840,7 +852,7 @@ def main():
     parser.add_argument('--wt-scale', action='store_true',
                         help='WT full scale test (C1-C8, 4 channels)')
     parser.add_argument('--wt-wave', type=int, metavar='WAVE',
-                        help='WT waveform (0-5): tri=0, sin=1, saw=2, pulse=3, clipsin=4, abssin=5')
+                        help='WT waveform index (0-13): sq12/sq25/pulse50/sq75/sin/clipsin/abssin/halfsin/qsin/altsin/althalfsin/tri/saw/gb_dmg')
     parser.add_argument('--gt', type=int, metavar='N',
                         help='Play Gigatron .gbas.c track number')
     parser.add_argument('--gt-dir', default=None,
