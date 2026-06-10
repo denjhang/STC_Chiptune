@@ -249,7 +249,7 @@ void process_uart(void) {
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             calc = 0xC0 ^ r ^ d;
             if (chk != calc) { uart_send_ack(ACK_ERR); continue; }
-            if (r >= 0x15 && r <= 0x26) {
+            if (r >= 0x15 && r <= 0x32) {
                 pcm_active = 1;
                 pcm_wr(r, d);
             } else {

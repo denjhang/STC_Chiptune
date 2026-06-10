@@ -90,14 +90,14 @@ static const u16 code drum_len[6] = {
     244      /* RS */
 };
 
-/* 分频: 1=每 tick 解码 (17640Hz), 2=每 2 tick 解码 (8820Hz) */
-static const u8 code drum_div[6] = {
-    1,  /* BD */
-    1,  /* SD */
-    2,  /* TC */
-    1,  /* HH */
-    2,  /* TM */
-    2   /* RS */
+/* 预设步长 (8.8 fixed point): 0x100=原速, 0x080=半速 */
+static const u16 code drum_step[6] = {
+    0x0100,  /* BD: 原速 17640Hz */
+    0x0100,  /* SD: 原速 17640Hz */
+    0x0080,  /* TC: 半速 8820Hz */
+    0x0100,  /* HH: 原速 17640Hz */
+    0x0080,  /* TM: 半速 8820Hz */
+    0x0080   /* RS: 半速 8820Hz */
 };
 
 /* 通道状态 */
@@ -108,18 +108,20 @@ static struct {
     s16 acc;       /* 12-bit accumulator (sign extended) */
     s16 adpcm_step;/* ADPCM step index (0..768) */
     u8  vol;
-    u8  div;       /* tick divider (1 or 2) */
-    u8  div_cnt;   /* divider counter */
+    u16 step;      /* 8.8 fixed point 步长 */
+    u16 now_step;  /* 累加器 */
+    s16 s_prev;    /* 上一个解码采样 (插值用) */
+    s16 s_cur;     /* 当前解码采样 (插值用) */
     u8  active;
 } pcm_ch[PCM_CHANS];
 
 static u8 pcm_active_mask;
 
-/* ========== 解码一个 sample ========== */
+/* ========== 解码一个 sample (返回 acc, 不带音量) ========== */
 static s16 pcm_decode_sample(u8 ch) {
     u8 nib;
     u16 rom_idx, step;
-    s16 delta, out;
+    s16 delta;
 
     if (!pcm_ch[ch].active) return 0;
 
@@ -158,9 +160,7 @@ static s16 pcm_decode_sample(u8 ch) {
     if (pcm_ch[ch].adpcm_step < 0) pcm_ch[ch].adpcm_step = 0;
     if (pcm_ch[ch].adpcm_step > 768) pcm_ch[ch].adpcm_step = 768;
 
-    out = (s16)((long)pcm_ch[ch].acc * pcm_ch[ch].vol >> 10);
-
-    return out;
+    return pcm_ch[ch].acc;
 }
 
 /* ========== 公开函数 ========== */
@@ -174,6 +174,10 @@ void pcm_init(void) {
         pcm_ch[i].acc = 0;
         pcm_ch[i].adpcm_step = 0;
         pcm_ch[i].vol = 31;
+        pcm_ch[i].step = drum_step[i];
+        pcm_ch[i].now_step = 0;
+        pcm_ch[i].s_prev = 0;
+        pcm_ch[i].s_cur = 0;
         pcm_ch[i].active = 0;
     }
     pcm_active_mask = 0;
@@ -191,10 +195,12 @@ void pcm_wr(u8 addr, u8 dat) {
         pcm_ch[ch].acc = 0;
         pcm_ch[ch].adpcm_step = 0;
         pcm_ch[ch].cache = 0;
-        pcm_ch[ch].div = drum_div[drum];
-        pcm_ch[ch].div_cnt = 0;
+        pcm_ch[ch].now_step = 0;
+        pcm_ch[ch].s_prev = 0;
+        pcm_ch[ch].s_cur = 0;
         pcm_ch[ch].active = 1;
         pcm_active_mask |= (1 << ch);
+        /* 不重置 step, 保留 set_step 设的值 */
 
     } else if (addr >= 0x1B && addr <= 0x20) {
         ch = addr - 0x1B;
@@ -204,20 +210,42 @@ void pcm_wr(u8 addr, u8 dat) {
     } else if (addr >= 0x21 && addr <= 0x26) {
         ch = addr - 0x21;
         pcm_ch[ch].vol = dat & 0x1F;
+    } else if (addr >= 0x27 && addr <= 0x2C) {
+        /* step 高字节: step = (dat << 8) | low_byte */
+        ch = addr - 0x27;
+        pcm_ch[ch].step = ((u16)dat << 8) | (pcm_ch[ch].step & 0x00FF);
+    } else if (addr >= 0x2D && addr <= 0x32) {
+        /* step 低字节: step = (high_byte << 8) | dat */
+        ch = addr - 0x2D;
+        pcm_ch[ch].step = (pcm_ch[ch].step & 0xFF00) | (u16)dat;
     }
 }
 
 s16 pcm_render(void) {
     u8 ch;
+    u8 step_cnt;
     s16 total = 0;
+    s16 out, frac;
 
     for (ch = 0; ch < PCM_CHANS; ch++) {
         if (!pcm_ch[ch].active) continue;
-        pcm_ch[ch].div_cnt++;
-        if (pcm_ch[ch].div_cnt >= pcm_ch[ch].div) {
-            pcm_ch[ch].div_cnt = 0;
-            total += pcm_decode_sample(ch);
+        pcm_ch[ch].now_step += pcm_ch[ch].step;
+        if (pcm_ch[ch].now_step >= 0x0100) {
+            step_cnt = pcm_ch[ch].now_step >> 8;
+            pcm_ch[ch].now_step &= 0x00FF;
+            do {
+                pcm_ch[ch].s_prev = pcm_ch[ch].s_cur;
+                pcm_ch[ch].s_cur = pcm_decode_sample(ch);
+            } while (--step_cnt);
         }
+        /* 线性插值 (ymdeltat.c ElSemi style), 仅 step < 0x100 时有效 */
+        frac = pcm_ch[ch].now_step;
+        if (frac > 0 && pcm_ch[ch].step < 0x0100) {
+            out = pcm_ch[ch].s_prev + (pcm_ch[ch].s_cur - pcm_ch[ch].s_prev) * frac / 256;
+        } else {
+            out = pcm_ch[ch].s_cur;
+        }
+        total += (s16)((long)out * pcm_ch[ch].vol >> 10);
     }
 
     return total;
