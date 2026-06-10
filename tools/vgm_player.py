@@ -520,12 +520,12 @@ def wt_scale(ser):
         time.sleep(0.15)
 
     print("  等待所有音符结束...")
-    time.sleep(2.0)
+    time.sleep(3.0)
 
-    # 关闭所有通道
+    # 确保关闭所有通道
     for c in range(4):
         wt_note_off(ser, c)
-    time.sleep(0.1)
+    time.sleep(0.5)
     print("  WT Scale done.")
 
 

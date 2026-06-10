@@ -358,5 +358,11 @@ s16 wt_render(void) {
 }
 
 u8 wt_channel_mask(void) {
-    return wt_voice_active;
+    u8 mask = 0, i;
+    for (i = 0; i < WT_CHANS; i++) {
+        if (wt_ch[i].step) {
+            mask |= (1 << i);
+        }
+    }
+    return mask;
 }
