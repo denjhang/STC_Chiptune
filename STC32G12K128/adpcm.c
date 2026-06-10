@@ -224,5 +224,9 @@ s16 pcm_render(void) {
 }
 
 u8 pcm_channel_mask(void) {
-    return pcm_active_mask;
+    u8 mask = 0, i;
+    for (i = 0; i < PCM_CHANS; i++) {
+        if (pcm_ch[i].active) mask |= (1 << i);
+    }
+    return mask;
 }

@@ -18,13 +18,13 @@ def pcm_send(ser, addr, data):
     return resp and resp[0] == 0xAA
 
 def note_on(ser, ch, drum):
-    pcm_send(ser, 0x15 | ch, drum)
+    pcm_send(ser, 0x15 + ch, drum)
 
 def note_off(ser, ch):
-    pcm_send(ser, 0x1B | ch, 0)
+    pcm_send(ser, 0x1B + ch, 0)
 
 def set_vol(ser, ch, vol):
-    pcm_send(ser, 0x21 | ch, vol)
+    pcm_send(ser, 0x21 + ch, vol)
 
 def tick(delay):
     time.sleep(delay)

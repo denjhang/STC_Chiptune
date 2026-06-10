@@ -162,6 +162,7 @@ void UART1_int(void) interrupt 4 {
 #define ACK_ERR  0xFF
 
 static void uart_send_ack(u8 ack) {
+    while (B_TX1_Busy);
     SBUF = ack;
     B_TX1_Busy = 1;
 }
@@ -236,7 +237,7 @@ void process_uart(void) {
             gt_wr(r, d);
 
         } else if (b == 0xC0) {
-            /* WT: [0xC0][addr][data][xor] 校验+ACK */
+            /* WT/PCM: [0xC0][addr][data][xor] 校验+ACK */
             if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -286,7 +287,7 @@ void process_uart(void) {
 
 /* ========== 开机音: AY C4 E4 G4 和弦 ========== */
 #define BOOT_NOTE_TICKS 300
-#define LED_EVERY    6
+#define LED_EVERY    1
 
 static u16 test_cnt;
 static u8  led_tick;
@@ -322,7 +323,7 @@ void test_tick(void) {
 
 static bit led_music_mode;
 static u16 led_silent_cnt;
-#define LED_SILENT_WAIT 180  /* 3s: 在 task tick (~60Hz) 里计数 */
+#define LED_SILENT_WAIT 180
 
 void led_tick_update(void) {
     u8 mask;
@@ -338,7 +339,7 @@ void led_tick_update(void) {
         if (fm_active) mask |= fm_channel_mask();
         if (gt_active) mask |= gt_channel_mask();
         if (wt_active) mask |= wt_channel_mask() & 0x0F;
-        if (pcm_active) mask |= pcm_channel_mask() << 5;
+        if (pcm_active) mask |= pcm_channel_mask() << 2;
         if (ay_active) mask |= ay_channel_mask() << 3;
         if (sn_active) mask |= sn_channel_mask() << 4;
 
