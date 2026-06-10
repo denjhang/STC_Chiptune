@@ -117,9 +117,9 @@ static u8 pcm_active_mask;
 
 /* ========== 解码一个 sample ========== */
 static s16 pcm_decode_sample(u8 ch) {
-    u8 nib, rom_idx;
+    u8 nib;
+    u16 rom_idx, step;
     s16 delta, out;
-    u16 ns, step;
 
     if (!pcm_ch[ch].active) return 0;
 
@@ -158,7 +158,7 @@ static s16 pcm_decode_sample(u8 ch) {
     if (pcm_ch[ch].adpcm_step < 0) pcm_ch[ch].adpcm_step = 0;
     if (pcm_ch[ch].adpcm_step > 768) pcm_ch[ch].adpcm_step = 768;
 
-    out = pcm_ch[ch].acc * (s16)(pcm_ch[ch].vol + 1) >> 10;
+    out = (s16)((long)pcm_ch[ch].acc * pcm_ch[ch].vol >> 10);
 
     return out;
 }

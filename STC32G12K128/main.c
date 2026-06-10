@@ -38,7 +38,7 @@
 #include <intrins.h>
 #include "types.h"
 
-#define MAIN_Fosc       35000000L
+#define MAIN_Fosc       38000000L
 #define Baudrate1       115200L
 #define UART1_BUF_LENGTH 2048
 #define SAMPLE_RATE     17640
