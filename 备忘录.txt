@@ -1,0 +1,9 @@
+
+051355012928
+
+
+cd /d/working/vscode-projects/STC_Chiptune && python tools/adpcm_led_test.py
+
+
+
+cd "D:/working/vscode-projects/STC_Chiptune/STC32G12K128" && rm -f *.OBJ ; D:/Keil_v5/C251/BIN/C251.exe ay8910.c "LARGE" "OPTIMIZE(8,SPEED)" "NOALIAS" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe scc.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe sn76489.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe gigatron.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe fm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe wt.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe adpcm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/l251.exe ay8910.OBJ,scc.OBJ,sn76489.OBJ,gigatron.OBJ,fm.OBJ,wt.OBJ,adpcm.OBJ,main.OBJ TO build/MAIN 2>&1 ; D:/Keil_v5/C251/BIN/OH251.exe build/MAIN HEXFILE\(build/MAIN.hex\) 2>&1 ; echo "BUILD DONE"
