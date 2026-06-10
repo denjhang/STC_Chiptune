@@ -16,6 +16,7 @@ Usage:
   python vgm_player.py --fm-note 0 60          # FM voice 0, MIDI C4
   python vgm_player.py --fm-off 0              # FM voice 0 off
   python vgm_player.py --fm-demo               # FM demo melody
+  python vgm_player.py --wt-scale              # WT full scale test
 """
 
 import argparse
@@ -422,6 +423,9 @@ def resolve_song(selector, vgm_dir):
 # FM 波形名称
 FM_WAVE_NAMES = ['tri', 'clipsin', 'rect', 'sin', 'saw', 'abssin']
 
+# WT 波形名称
+WT_WAVE_NAMES = ['tri', 'sin', 'saw', 'pulse', 'clipsin', 'abssin']
+
 def fm_send_note(ser, voice, note, duration_ms=300):
     """发送 FM Note On, 等待, Note Off (OPLL 分页模式)"""
     uart_send(ser, [0x51, 0x10 | (voice & 0x0F), note & 0x7F])
@@ -461,6 +465,68 @@ def fm_scale(ser):
         uart_send(ser, [0x51, 0x20 | v, 0])
     time.sleep(0.1)
     print("  FM Scale done.")
+
+
+# ========== WT Wavetable Player ==========
+
+def wt_send(ser, addr, data):
+    """发送 WT 命令 [0xC0][addr][data][xor] 等待 ACK"""
+    chk = 0xC0 ^ addr ^ data
+    uart_send(ser, [0xC0, addr, data, chk], ack=True)
+
+def wt_note_on(ser, ch, note):
+    """WT note on: ch 0-3, note 24-127"""
+    wt_send(ser, 0x00 | ch, note)
+
+def wt_note_off(ser, ch):
+    """WT note off: ch 0-3"""
+    wt_send(ser, 0x04 | ch, 0)
+
+def wt_set_wave(ser, wave_idx):
+    """WT set wave: 0-5"""
+    wt_send(ser, 0x13, wave_idx)
+
+def wt_set_release(ser, rel_val):
+    """WT set release: 0-15"""
+    wt_send(ser, 0x12, rel_val)
+
+def wt_scale(ser):
+    """WT 全音阶: 4 通道轮替, 每八度切换波形, 中等 release"""
+    print("\n  === WT Scale (C2-C7) ===")
+    # 设置中等 release (7)
+    wt_set_release(ser, 7)
+    time.sleep(0.05)
+
+    start_note = 36  # C2
+    end_note = 96    # C7
+
+    ch = 0
+    wave = 0
+
+    for note in range(start_note, end_note + 1):
+        # 每 12 音 (一个八度) 切换波形
+        if note > start_note and (note - start_note) % 12 == 0:
+            wave = (wave + 1) % 6
+            wt_set_wave(ser, wave)
+            print(f"  --- 切换波形: {WT_WAVE_NAMES[wave]} ---")
+
+        names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+        oct = note // 12 - 1
+        nm = names[note % 12]
+        print(f"  ch{ch} {nm}{oct} (MIDI {note})")
+
+        wt_note_on(ser, ch, note)
+        ch = (ch + 1) % 4
+        time.sleep(0.15)
+
+    print("  等待所有音符结束...")
+    time.sleep(2.0)
+
+    # 关闭所有通道
+    for c in range(4):
+        wt_note_off(ser, c)
+    time.sleep(0.1)
+    print("  WT Scale done.")
 
 
 # ========== Gigatron .gbas.c Player ==========
@@ -767,6 +833,8 @@ def main():
                         help='FM demo melody')
     parser.add_argument('--fm-scale', action='store_true',
                         help='FM full scale test (C1-C9, 8 voices)')
+    parser.add_argument('--wt-scale', action='store_true',
+                        help='WT full scale test (C2-C7, 4 channels, waveform per octave)')
     parser.add_argument('--gt', type=int, metavar='N',
                         help='Play Gigatron .gbas.c track number')
     parser.add_argument('--gt-dir', default=None,
@@ -779,7 +847,7 @@ def main():
     if args.vgm_dir: vgm_dir = args.vgm_dir
 
     # FM direct commands (no VGM needed)
-    if args.fm_note is not None or args.fm_off is not None or args.fm_wave is not None or args.fm_demo or args.fm_scale:
+    if args.fm_note is not None or args.fm_off is not None or args.fm_wave is not None or args.fm_demo or args.fm_scale or args.wt_scale:
         if not HAS_SERIAL:
             print("Error: pyserial required"); sys.exit(1)
         port = args.port or find_serial_port()
@@ -806,6 +874,8 @@ def main():
                 fm_demo(ser)
             if args.fm_scale:
                 fm_scale(ser)
+            if args.wt_scale:
+                wt_scale(ser)
         except Exception as e:
             print(f"Error: {e}")
         finally:

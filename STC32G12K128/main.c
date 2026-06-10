@@ -10,7 +10,14 @@
  *   [0x50][data]            -> SN76489 (2 字节)
  *   [0x51][subcmd][...]     -> FM 合成 (自定义, 2-19 字节)
  *   [0xA0][reg][data]       -> AY8910 (3 字节)
- *   [0xB0][addr][data][xor]  -> Gigatron (4 字节, XOR校验ACK)
+ *   [0xB0][addr][data][xor]  -> Gigatron (4 字节, XOR校验)
+ *   [0xC0][addr][data][xor]  -> WT Wavetable (4 字节, XOR校验ACK)
+ *   0xC0 寄存器:
+ *     0x00-0x03: ch0-3 note on (MIDI note)
+ *     0x04-0x07: ch0-3 note off
+ *     0x08-0x0B: ch0-3 volume (0-31)
+ *     0x10-0x12: ADSR
+ *     0x13: wave select (0-5)
  *   [0xB3][reg][data]       -> GB DMG (3 字节)
  *   [0xB4][reg][data]       -> NES APU (3 字节)
  *   [0xBD][addr][data]      -> SAA1099 (3 字节)
@@ -43,6 +50,7 @@
 #include "sn76489.h"
 #include "fm.h"
 #include "gigatron.h"
+#include "wt.h"
 /* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
@@ -51,6 +59,7 @@ bit ay_active;
 bit sn_active;
 bit fm_active;
 bit gt_active;
+bit wt_active;
 /* gb/nes/saa 暂不启用 */
 
 /* ========== 16kHz tick ========== */
@@ -224,6 +233,23 @@ void process_uart(void) {
             gt_active = 1;
             gt_wr(r, d);
 
+        } else if (b == 0xC0) {
+            /* WT: [0xC0][addr][data][xor] 校验+ACK */
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            chk = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            calc = 0xC0 ^ r ^ d;
+            if (chk != calc) { uart_send_ack(ACK_ERR); continue; }
+            wt_active = 1;
+            wt_wr(r, d);
+            uart_send_ack(ACK_OK);
+
         } else if (b == 0xB4) {
             /* NES APU: 暂不启用 */
 
@@ -304,6 +330,7 @@ void led_tick_update(void) {
         mask = 0;
         if (fm_active) mask |= fm_channel_mask();
         if (gt_active) mask |= gt_channel_mask();
+        if (wt_active) mask |= wt_channel_mask();
         if (ay_active) mask |= ay_channel_mask() << 3;
         if (sn_active) mask |= sn_channel_mask() << 4;
 
@@ -329,6 +356,7 @@ static u8 scc_tick_div;
 static u8 scc_out = 128;
 static u8 gt_tick_div;
 static s16 gt_out;
+static s16 wt_out;
 
 void timer0_isr(void) interrupt 1 {
     s16 mix;
@@ -345,6 +373,11 @@ void timer0_isr(void) interrupt 1 {
         }
     }
 
+    if (wt_active) {
+        wt_out = wt_render();
+        if (!wt_channel_mask()) wt_active = 0;
+    }
+
     /* gb/nes/saa 暂不启用 */
 
     mix = 0;
@@ -353,6 +386,7 @@ void timer0_isr(void) interrupt 1 {
     if (sn_active) mix += sn_render() * 3 / 4;
     if (fm_active) mix += fm_render() * 3 / 2;
     if (gt_active) mix += gt_out * 3 / 2;
+    if (wt_active) mix += wt_out * 3 / 2;
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -391,6 +425,7 @@ void main(void) {
     sn_init();
     fm_init();
     gt_init();
+    wt_init();
     /* gb/nes/saa 暂不启用 */
     test_start();
     led_tick = 0;

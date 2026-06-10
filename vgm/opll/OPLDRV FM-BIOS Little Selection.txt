@@ -1,0 +1,60 @@
+***********************************************
+* VGM music package                           *
+* http://vgmrips.net/                         *
+***********************************************
+Game name:           OPLDRV FM-BIOS Little Selection
+System:              MSX2+
+Music hardware:      MSX-Music (YM2413)
+
+Music author:        naruto                     
+Game developer:      naruto
+Game publisher:      naruto
+Game release date:   2001-03-12
+
+Package created by:  denjhang
+Package version:     1.00
+
+Song list, in approximate game order:
+Song list:                          Total  Loop
+01 [Patch Slide Test] 00            1:40   1:40
+02 [Patch Slide Test] 01            0:29   0:29
+03 [Patch Slide Test] 02            0:36   0:36
+04 [Patch Slide Test] 03            0:26   0:26
+05 [FV2] BGM1                       0:45   0:45
+06 [FV2] BGM2                       1:25   1:25
+07 [FV2] BGM3                       1:20   1:20
+
+Total Length                        6:40  13:20
+
+Notes:
+I bought this set of tracks from bandcamp for $5, 
+and the free accessory has a disk that allows me 
+to play the music on the real MSX. But in fact, 
+the first four songs can be downloaded for free 
+on the closed Hello! KSS♪ website.
+https://web.archive.org/web/20011220043211/
+suzuka.cool.ne.jp/hellokss/
+
+These tracks do not use the YM2413's 
+user tone registers, but instead use 
+the YM2413's 15 preset tones. 
+The special thing is that naruto uses the technique 
+of dynamic switching of timbres, which makes the 
+YM2413's own timbres have a different combination.
+
+This set of tracks sounds intimate and enjoyable, 
+much better than the mediocre music found 
+in many MSX games. 
+In fact, there are not many musicians 
+who really understand YM2413 composition, 
+and I think naruto is one of them.
+
+Track names and order are derived 
+from https://naruto2413.bandcamp.com
+/album/opldrv-fm-bios-little-selection
+
+This pack was made using Openmsx 0.17.
+
+Package history:
+1.00 2023-01-31 denjhang: initial release.
+
