@@ -137,6 +137,58 @@ BRR 解码器需要集成到 MCU firmware, 与现有 ADPCM 解码器并列:
 - ADPCM 通道: 鼓声 (无 loop) + SF2 旋律乐器 (snapshot 回绕)
 - BRR 通道: XI 旋律乐器 (filter=0, 无缝 loop)
 
+## ADPCM 方案最终结论 (2026-06-11)
+
+### 为什么 ADPCM 不适合旋律乐器
+
+经过完整调试，确认 ADPCM (YM2608 Type-A) 存在根本性缺陷，不适合做旋律乐器:
+
+1. **变频破坏循环**: ADPCM 是有状态编解码器 (acc + step_idx), 变频改变每 tick 解码的 nibble 数,
+   loop 回绕时机改变, 编码器 snapshot (acc/step) 对不上新位置, 接缝处产生咔哒。
+   原速播放 + snapshot 回绕可以无缝, 但变频后无法保证。
+
+2. **decode 太慢, ISR 超时**: ADPCM 每样本需要 ROM 读取 + JEDI 表查表 + acc/step 更新,
+   STC32G 38MHz 下 ISR 时间有限, step > 0x0400 (4x速) 时 step_cnt=4, 每 tick 解码 4 次,
+   再高就死机 (C5+ 确认)。限 4x 的话变频范围极窄。
+
+3. **orig_pitch 偏低**: SNES/GBA 音色库的采样 orig_pitch 普遍在 26-73 (E1-C#5),
+   变频上限 4x 只能升 2 八度, 从 E2 也只能到 E4, 覆盖不到 C5+。
+   要覆盖高音区必须选 orig_pitch 接近 C4(60) 的采样, 但这些在 SNES/GBA 库里几乎没有。
+
+4. **ADSR 实现受限**: attack 阶段 level 从 0 逐级涨到 31, 每次 +1 产生量化台阶,
+   表现为起音破音。最终只能砍掉 attack, 用 DSR (直接 sustain + release)。
+
+5. **env_state 路径切换破音**: 0x15 note_on 时 env_state=0 (满增益), 0x33 启动 ADSR 时
+   切到 env_state=3 (ADSR 增益), 两条路径增益差 33 倍导致瞬间跳变。
+   修复: 0x15 直接设 env_state=3。
+
+### ADPCM 的正确用途
+
+- **鼓声/打击乐**: 短促 one-shot, 不循环, 不变频, 省空间效果好
+- **一次性音效**: 同理
+
+### 旋律乐器必须用 BRR
+
+- BRR (SNES SPC700) 是无状态压缩: 每 block 9 字节独立编解码
+- filter=0 时 loop 只跳地址, 变频不影响接缝
+- XI 乐器包是标准格式, 自带音区 (C4-C5 附近), 好解析
+- 4-bit 量化音质粗糙, 但 chip-tune 风格可接受
+
+### 变频性能总结
+
+| 方案 | 原速循环 | 变频+循环 | 变频上限 | 适用 |
+|------|---------|-----------|---------|------|
+| ADPCM snapshot | 无缝 | 破坏 | 4x (ISR死机) | 鼓声 |
+| BRR filter=0 | 无缝 | 无缝 | 无限制 | 旋律 |
+
+### DSR 包络实现
+
+最终方案: 无 attack, note_on 直接 level=31 进入 sustain, note_off 进 release 渐减到 0。
+- pcm_render 每 4 tick 调 pcm_env_tick
+- env_state: 0=无ADSR(鼓声), 2=decay, 3=sustain, 4=release
+- SF2 通道 note_on 时直接 env_state=3, 避免 0x15/0x33 间增益跳变
+- note_off (0x1B) 触发 release 而不是直接关通道
+
 ## Bug 修复记录
 
 ### ADPCM loop_addr 基址偏移 (2026-06-11)
@@ -161,10 +213,12 @@ Python 编码器用公式 `JEDI[step//16][nib]` 构建 JEDI 表, MCU 解码器�
 SF2 note_on 路径 (0x15 + 0x33) 未设置 `pcm_pending_ch`, 导致 0x33 的 midi note 命令被跳过, step 保持 0。
 修复: SF2 路径末尾加 `pcm_pending_ch = ch`。
 
-### 当前状态 (5 乐器)
+### 当前状态 (5 乐器, 历史遗留)
 
-- Piano, SlapBass, Guitar, Oboe: 完美
-- Harp: 偶然破音 (palindrome ADPCM 状态跳变 4117, 可用 ADSR 掩盖)
+- Piano, SlapBass, Guitar, Oboe: 原速循环 + DSR 包络正常
+- Harp: 偶然破音 (palindrome ADPCM 状态跳变 4117)
+- 变频: Python 端 0x27/0x2D 写 step, 上限 0x0400 (4x), 但变频后 loop 接缝会破
+- **结论: ADPCM 旋律乐器已到极限, 后续旋律用 BRR/XI 方案**
 
 ## 移除记录 (ADPCM 方案无法救回)
 
