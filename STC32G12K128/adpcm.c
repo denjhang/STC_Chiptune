@@ -310,6 +310,7 @@ void pcm_wr(u8 addr, u8 dat) {
             pcm_ch[ch].is_sf2 = 0;
             pcm_ch[ch].addr = drum_start[drum] << 1;
             pcm_ch[ch].end_addr = pcm_ch[ch].addr + drum_len[drum];
+            pcm_ch[ch].step = drum_step[drum];
             pcm_ch[ch].acc = 0;
             pcm_ch[ch].adpcm_step = 0;
             pcm_ch[ch].cache = 0;
@@ -420,6 +421,7 @@ s16 pcm_render(void) {
             out >>= 5;
             total += (s16)((long)out * vol * pcm_ch[ch].level >> 10);
         } else {
+            out >>= 5;
             total += (s16)((long)out * vol >> 5);
         }
     }

@@ -3,7 +3,7 @@
  * Keil C251, 35MHz IRC
  *
  * PWMA PWM1 -> P2.0: 8-bit DAC 载波
- * Timer0 ISR: 17640Hz, AY+SN 每 tick, SCC/GB/NES/SAA 每 4 tick (4410Hz)
+ * Timer0 ISR: 17640Hz, AY+SN 每 tick, WT 每 4 tick (4410Hz)
  * Timer1:     UART1 波特率 115200
  *
  * 协议: 与 VGM 标准命令字节一致, Python 直接透传
@@ -42,10 +42,8 @@
 #define Baudrate1       115200L
 #define UART1_BUF_LENGTH 2048
 #define SAMPLE_RATE     17640
-#define SCC_RATE        17640
 
 /* ========== 仿真核心 ========== */
-#include "scc.h"
 #include "ay8910.h"
 #include "sn76489.h"
 #include "fm.h"
@@ -55,7 +53,7 @@
 /* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
-bit scc_active;
+/* bit scc_active; */  /* SCC 已剔除 */
 bit ay_active;
 bit sn_active;
 bit fm_active;
@@ -265,7 +263,7 @@ void process_uart(void) {
             /* SAA1099: 暂不启用 */
 
         } else if (b == 0xD2) {
-            /* SCC: [0xD2][port][reg][data] */
+            /* SCC: 已剔除, 跳过 3 字节 */
             if (TX1_Cnt == RX1_Cnt) break;
             p = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
@@ -275,9 +273,9 @@ void process_uart(void) {
             if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            scc_active = 1;
-            scc_wr((p & 0x7F) << 1, r);
-            scc_wr(((p & 0x7F) << 1) | 1, d);
+            /* scc_active = 1; */
+            /* scc_wr((p & 0x7F) << 1, r); */
+            /* scc_wr(((p & 0x7F) << 1) | 1, d); */
 
         } else {
             /* 忽略未知命令 */
@@ -371,9 +369,7 @@ void timer0_isr(void) interrupt 1 {
     s16 mix;
     u8 out;
 
-    if (scc_active) {
-        scc_out = scc_render();
-    }
+    /* if (scc_active) { scc_out = scc_render(); } */  /* SCC 已剔除 */
 
     if (gt_active) {
         if (++gt_tick_div >= 2) {
@@ -390,7 +386,7 @@ void timer0_isr(void) interrupt 1 {
     /* gb/nes/saa 暂不启用 */
 
     mix = 0;
-    if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8;
+    /* if (scc_active) mix += ((s16)((u16)scc_out - 128)) * 3 / 8; */  /* SCC 已剔除 */
     if (ay_active) mix += ay_render() * 3 / 2;
     if (sn_active) mix += sn_render() * 3 / 4;
     if (fm_active) mix += fm_render() * 3 / 2;
@@ -433,7 +429,7 @@ void main(void) {
 
     pwma_dac_init();
     UART1_config();
-    scc_init();
+    /* scc_init(); */  /* SCC 已剔除 */
     ay_init();
     sn_init();
     fm_init();
