@@ -58,7 +58,7 @@ Multi-source chiptune synthesizer on STC32G12K128. Receives commands via UART, o
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| MCU | STC32G12K128 | 1T C251 arch, 128K Flash, 10K SRAM + 8K XRAM |
+| MCU | STC32G12K128 | 32-bit 1T 8051 core, C251 compatible, 128KB Flash, 4KB SRAM + 8KB XRAM |
 | System Clock | 38 MHz | IRC internal RC (Fosc=38000000) |
 | DAC Output | P2.0 (PWMA PWM1) | 8-bit PWM DAC, carrier 148kHz, see below |
 | Sample Rate | 17640 Hz | Timer0 ISR |
@@ -593,7 +593,7 @@ python tools/gen_scc_table.py                 # SCC step lookup table generation
 
 | Tool | Version/Path | Description |
 |------|-------------|-------------|
-| Compiler | `D:/Keil_v5/C251/BIN/C251.exe` | Keil C251 (not C51), STC32G is C251 architecture |
+| Compiler | `D:/Keil_v5/C251/BIN/C251.exe` | Keil C251 (not C51), STC32G C251 compatible |
 | Linker | `D:/Keil_v5/C251/BIN/L251.exe` | C251 linker (not BL51) |
 | HEX convert | `D:/Keil_v5/C251/BIN/OH251.exe` | Outputs Intel HEX |
 | Flashing | STC-ISP | Manual flash (serial P3.4/P3.5) |
@@ -719,7 +719,7 @@ See git history.
 
 ### 7.2 Phase 7: Migrate to STC32G12K128
 
-STC32G C251, 38MHz, 128K Flash, 10K SRAM + 8K XRAM.
+STC32G C251, 38MHz, 128KB Flash, 4KB SRAM + 8KB XRAM.
 - Ported all sound sources to C251
 - Added FM (custom 2-Op) 16 voice synthesis
 - Added Gigatron 4ch TTL waveform
@@ -750,7 +750,7 @@ STC32G C251, 38MHz, 128K Flash, 10K SRAM + 8K XRAM.
 
 ## 8. Reference Projects & Porting Notes
 
-All sound source cores are ported from open-source projects, deeply simplified and adapted for STC32G12K128 (C251, 38MHz, 10K SRAM, 8K XRAM).
+All sound source cores are ported from open-source projects, deeply simplified and adapted for STC32G12K128 (C251, 38MHz, 4KB SRAM, 8KB XRAM).
 
 ### 8.1 AY8910 — Reference: libvgm (Open Source, BSD-3-Clause)
 

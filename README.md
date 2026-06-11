@@ -57,7 +57,7 @@ STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| MCU | STC32G12K128 | 1T 251 架构, 128K Flash, 10K SRAM + 8K XRAM |
+| MCU | STC32G12K128 | 32位 1T 8051 内核, 兼容 C251 指令集, 128KB Flash, 4KB SRAM + 8KB XRAM |
 | 系统时钟 | 38 MHz | IRC 内部 RC (Fosc=38000000) |
 | DAC 输出 | P2.0 (PWMA PWM1) | 8-bit PWM DAC, 载波 148kHz, 详见下方 |
 | 采样率 | 17640 Hz | Timer0 ISR |
@@ -591,7 +591,7 @@ python tools/gen_scc_table.py                 # SCC 步进查表生成 (STC8H �
 
 | 工具 | 版本/路径 | 说明 |
 |------|---------|------|
-| 编译器 | `D:/Keil_v5/C251/BIN/C251.exe` | Keil C251 (非 C51), STC32G 是 C251 架构 |
+| 编译器 | `D:/Keil_v5/C251/BIN/C251.exe` | Keil C251 (非 C51), STC32G 兼容 C251 指令集 |
 | 链接器 | `D:/Keil_v5/C251/BIN/L251.exe` | C251 链接器 (非 BL51) |
 | HEX 转换 | `D:/Keil_v5/C251/BIN/OH251.exe` | 输出 Intel HEX |
 | 烧录 | STC-ISP | 手动烧录 (串口 P3.4/P3.5) |
@@ -717,7 +717,7 @@ STC_Chiptune/
 
 ### 7.2 Phase 7: 迁移 STC32G12K128
 
-STC32G C251, 38MHz, 128K Flash, 10K SRAM + 8K XRAM。
+STC32G C251, 38MHz, 128KB Flash, 4KB SRAM + 8KB XRAM。
 - 移植全部音源到 C251
 - 新增 FM (自定义 2-Op) 16 voice 合成
 - 新增 Gigatron 4ch TTL 波形
@@ -748,7 +748,7 @@ STC32G C251, 38MHz, 128K Flash, 10K SRAM + 8K XRAM。
 
 ## 8. 参考项目与移植说明
 
-本项目音源核心均移植自开源项目, 针对 STC32G12K128 (C251, 38MHz, 10K SRAM, 8K XRAM) 做了深度精简和适配。
+本项目音源核心均移植自开源项目, 针对 STC32G12K128 (C251, 38MHz, 4KB SRAM, 8KB XRAM) 做了深度精简和适配。
 
 ### 8.1 AY8910 — 参考 libvgm (开源, BSD-3-Clause)
 
