@@ -134,8 +134,27 @@ loop 回绕时 p1/p2 重置为 0 会导致 block 间跳变产生咔哒。
 ### 待集成
 
 BRR 解码器需要集成到 MCU firmware, 与现有 ADPCM 解码器并列:
-- ADPCM 通道: 鼓声 (无 loop) + SF2 旋律乐器 (snapshot 回绕)
-- BRR 通道: XI 旋律乐器 (filter=0, 无缝 loop)
+- ADPCM 通道: 鼓声 (变频 one-shot, 无 loop) + SF2 旋律乐器 (原速循环, DSR包络)
+- BRR 通道: XI 旋律乐器 (filter=0, 无缝 loop, 变频)
+
+### 当前合成器架构 (2026-06-11)
+
+SCC 已剔除, WT 音源完善后不再需要:
+- AY8910: 3 方波 + 噪声 (VGM)
+- SN76489: 4 方波 + 噪声 (VGM)
+- FM (OPLL): 9 ch FM 合成 (VGM + 直接)
+- Gigatron: Gigatron 曲目播放
+- WT: 4 ch wavetable 合成 (13 种波形)
+- ADPCM: 6 ch 鼓声 (变频 one-shot) + 5 ch SF2 旋律 (原速循环 + DSR)
+
+### 鼓声变频 + 音量修正 (2026-06-11)
+
+- 鼓声变频通过 0x27/0x2D 写 step, Python 端计算
+- `adpcm_pitch_test.py`: C1~C7 大调音阶扫频
+- ADSR 加入后鼓声增益过大 (env_state=0 路径 out 不右移, 峰值 19828 vs SF2 的 59)
+- 修复: 鼓声路径也加 out >>= 5, 增益一致
+- note_on 不能重置 step, 否则 Python 写的变频 step 被覆盖
+- step 初始值由 pcm_init 设 drum_step[], Python 变频时先 set_step 再 note_on
 
 ## ADPCM 方案最终结论 (2026-06-11)
 
