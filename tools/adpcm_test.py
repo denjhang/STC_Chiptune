@@ -9,6 +9,7 @@ BAUD = 115200
 
 DRUM_NAMES = ['BD', 'SD', 'TC', 'HH', 'TM', 'RS']
 BD, SD, TC, HH, TM, RS = 0, 1, 2, 3, 4, 5
+DRUM_STEP = [0x0100, 0x0100, 0x0080, 0x0100, 0x0080, 0x0080]
 
 def pcm_send(ser, addr, data):
     chk = 0xC0 ^ addr ^ data
@@ -17,7 +18,12 @@ def pcm_send(ser, addr, data):
     resp = ser.read(1)
     return resp and resp[0] == 0xAA
 
+def set_step(ser, ch, step):
+    pcm_send(ser, 0x27 + ch, (step >> 8) & 0xFF)
+    pcm_send(ser, 0x2D + ch, step & 0xFF)
+
 def note_on(ser, ch, drum):
+    set_step(ser, ch, DRUM_STEP[drum])
     pcm_send(ser, 0x15 + ch, drum)
 
 def note_off(ser, ch):

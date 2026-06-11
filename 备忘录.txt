@@ -1,4 +1,49 @@
 
+VGM AY 播放 — tools/vgm_player.py
+
+
+python tools/vgm_player.py --list --vgm-dir vgm/ay8910     # 列出曲目
+python tools/vgm_player.py 10 --vgm-dir vgm/ay8910 --baud 115200
+VGM SN76489 播放 — tools/vgm_player.py
+
+
+python tools/vgm_player.py --list --vgm-dir vgm/sn76489    # 列出曲目
+python tools/vgm_player.py 16 --vgm-dir vgm/sn76489 --baud 115200
+VGM FM(OPLL) 播放 — tools/vgm_player.py
+
+
+python tools/vgm_player.py --list --vgm-dir vgm/opll       # 列出曲目
+python tools/vgm_player.py <编号> --vgm-dir vgm/opll --baud 115200
+FM 直接测试 — tools/vgm_player.py
+
+
+python tools/vgm_player.py --fm-note 0 60 --baud 115200   # FM ch0 C4
+python tools/vgm_player.py --fm-scale --baud 115200       # FM 扫频 C1-C9
+WT 直接测试 — tools/vgm_player.py
+
+
+python tools/vgm_player.py --wt-scale --baud 115200       # WT 扫频 C1-C8
+ADPCM 鼓声 — tools/adpcm_test.py
+
+python tools/adpcm_pitch_test.py
+
+
+python tools/adpcm_test.py
+ADPCM 旋律 — tools/sf2_test.py
+
+
+python tools/sf2_test.py                                  # 5乐器依次原音
+python tools/sf2_test.py piano 60                         # 钢琴 C4
+python tools/sf2_test.py all 60                           # 所有乐器 C4
+python tools/sf2_test.py chord                            # 和弦
+ADPCM 变频扫频 — tools/sf2_sweep.py
+
+
+python tools/sf2_sweep.py                                 # 所有乐器
+python tools/sf2_sweep.py piano                           # 钢琴
+
+
+
 
 cd d:/working/vscode-projects/STC_Chiptune && python tools/sf2_test.py
 
