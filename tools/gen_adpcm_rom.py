@@ -15,14 +15,11 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'STC32G
 INSTRUMENTS = [
     ('01_piano.wav',      'snes_unofficial', 35, 'Piano'),
     ('02_slapbass.wav',   'snes_unofficial', 34, 'SlapBass'),
-    ('03_shakuhachi.wav', 'microgm',         211, 'Shakuhachi'),
-    ('04_oboe.wav',       'snes_unofficial', 102, 'Oboe'),
     ('05_trumpet.wav',    'snes_unofficial', 45, 'Trumpet'),
-    ('06_blow.wav',       'microgm',         207, 'Blow'),
     ('07_oboe2.wav',      'snes_unofficial', 69, 'Oboe2'),
-    ('08_strings.wav',    'snes_unofficial', 50, 'Strings'),
-    ('09_harp.wav',       'snes_unofficial', 90, 'Harp'),
     ('10_guitar.wav',     'snes_unofficial', 91, 'Guitar'),
+    ('fixed/04_oboe_fixed.wav',  None, None, 'Oboe',     2425, 2852),
+    ('fixed/09_harp_fixed.wav',  None, None, 'Harp',     3374, 6372),
 ]
 
 # jedi_table: 公式计算 (和 adpcm_preprocess.py 鼓声编码一致)
@@ -51,7 +48,6 @@ STEP_INC = [-16, -16, -16, -16, 32, 80, 112, 144]
 
 def adpcm_encode(pcm_samples, snapshot_nibble=-1):
     nibbles = []; acc = 0; step_idx = 0
-    snap = None
     for i, s in enumerate(pcm_samples):
         if s > 2047: s = 2047
         if s < -2048: s = -2048
@@ -71,13 +67,30 @@ def adpcm_encode(pcm_samples, snapshot_nibble=-1):
         if step_idx < 0: step_idx = 0
         if step_idx > 768: step_idx = 768
         nibbles.append(best_nib)
-        if i == snapshot_nibble:
-            snap = (acc & 0xFFF, step_idx)
     result = bytearray()
     for i in range(0, len(nibbles), 2):
         hi = nibbles[i]; lo = nibbles[i + 1] if i + 1 < len(nibbles) else 0
         result.append((hi << 4) | lo)
-    return bytes(result), len(nibbles), snap
+    rom = bytes(result)
+    # 用硬编码表解码到 snapshot_nibble 处, 记录解码器状态
+    snap = None
+    if snapshot_nibble >= 0:
+        jedi_flat = []
+        for row in JEDI:
+            jedi_flat.extend(row)
+        dacc = 0; dstep = 0
+        for i in range(min(snapshot_nibble + 1, len(nibbles))):
+            byte_val = rom[i >> 1]
+            nib = (byte_val >> 4) & 0x0F if not (i & 1) else byte_val & 0x0F
+            d = jedi_flat[dstep + nib]
+            dacc += d; dacc &= 0xFFF
+            if dacc & 0x800: dacc |= ~0xFFF
+            dstep += STEP_INC[nib & 7]
+            if dstep < 0: dstep = 0
+            if dstep > 768: dstep = 768
+            if i == snapshot_nibble:
+                snap = (dacc & 0xFFF, dstep)
+    return rom, len(nibbles), snap
 
 
 def load_metadata(sf2_source, sf2_id):
@@ -95,11 +108,21 @@ def main():
     entries = []
     total_nib = 0
 
-    for wav_name, sf2_src, sf2_id, display_name in INSTRUMENTS:
-        meta = load_metadata(sf2_src, sf2_id)
-        orig_pitch = meta['orig_pitch']
-        loop_s = meta['loop_start']
-        loop_e = meta['loop_end']
+    for entry in INSTRUMENTS:
+        if len(entry) == 6:
+            # Fixed WAV: (wav_name, None, None, display, loop_s, loop_e)
+            wav_name, sf2_src, sf2_id, display_name, loop_s, loop_e = entry
+            is_fixed = True
+            orig_pitch = 28 if 'oboe' in wav_name.lower() else 73  # hardcoded
+        else:
+            wav_name, sf2_src, sf2_id, display_name = entry
+            is_fixed = False
+
+        if not is_fixed:
+            meta = load_metadata(sf2_src, sf2_id)
+            orig_pitch = meta['orig_pitch']
+            loop_s = meta['loop_start']
+            loop_e = meta['loop_end']
 
         wav_path = os.path.join(WAV_DIR, wav_name)
         with wave.open(wav_path, 'r') as w:

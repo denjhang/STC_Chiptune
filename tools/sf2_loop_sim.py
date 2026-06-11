@@ -57,7 +57,6 @@ def adpcm_encode(pcm, snap_nibble=-1):
     nibbles = []
     acc = 0
     step_idx = 0
-    snap = None
     for i, s in enumerate(pcm):
         if s > 2047: s = 2047
         if s < -2048: s = -2048
@@ -80,13 +79,27 @@ def adpcm_encode(pcm, snap_nibble=-1):
         if step_idx < 0: step_idx = 0
         if step_idx > 768: step_idx = 768
         nibbles.append(best)
-        if i == snap_nibble:
-            snap = (acc & 0xFFF, step_idx)
     rom = bytearray()
     for i in range(0, len(nibbles), 2):
         hi = nibbles[i]
         lo = nibbles[i + 1] if i + 1 < len(nibbles) else 0
         rom.append((hi << 4) | lo)
+    rom = bytes(rom)
+    # 用硬编码表解码到 snap_nibble 处记录状态
+    snap = None
+    if snap_nibble >= 0:
+        dacc = 0; dstep = 0
+        for i in range(min(snap_nibble + 1, len(nibbles))):
+            byte_val = rom[i >> 1]
+            nib = (byte_val >> 4) & 0x0F if not (i & 1) else byte_val & 0x0F
+            d = JEDI_FLAT[dstep + nib]
+            dacc += d; dacc &= 0xFFF
+            if dacc & 0x800: dacc |= ~0xFFF
+            dstep += STEP_INC[nib & 7]
+            if dstep < 0: dstep = 0
+            if dstep > 768: dstep = 768
+            if i == snap_nibble:
+                snap = (dacc & 0xFFF, dstep)
     return rom, len(nibbles), snap
 
 

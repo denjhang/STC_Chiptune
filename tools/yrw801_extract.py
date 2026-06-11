@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """YRW801 (OPL4 Wave ROM) 解析 + 试听 WAV 生成
-从 2MB ROM 提取乐器元数据 + PCM 波形, 生成可听 WAV
+
+严格按照 ymf278b.c (libvgm) 实现:
+  bits = (buf[0] & 0xC0) >> 6         0=8bit, 1=12bit, 2=16bit
+  startaddr = buf[2] | (buf[1]<<8) | ((buf[0] & 0x3F) << 16)  22-bit
+  loopaddr = buf[4] | (buf[3] << 8)   16-bit
+  endaddr  = buf[6] | (buf[5] << 8)   16-bit 2's complement
+
+渲染: 严格按照 ymf278b_pcm_update:
+  pos (u16) + stepptr (u16) 分离
+  stepptr += step; if stepptr >= 0x10000: pos = nextPos(pos, stepptr>>16); stepptr &= 0xFFFF
+  sample = (getSample(pos) * (0x10000-stepptr) + getSample(nextPos(pos,1)) * stepptr) >> 16
 
 用法:
     python yrw801_extract.py                          # 列出所有乐器
     python yrw801_extract.py --wav 0 1 2 3 4 5        # 生成指定乐器 C4 试听
     python yrw801_extract.py --wav-all                 # 生成全部 175 个乐器试听
     python yrw801_extract.py --wav-range 0 127        # 生成旋律乐器 0-127
-    python yrw801_extract.py --export 0 1 2 3          # 导出精选乐器为 WAV (原始采样率)
+    python yrw801_extract.py --export 0 1 2 3          # 导出精选乐器原始波形 WAV
 """
 
 import struct, os, sys, wave
@@ -15,8 +25,6 @@ import struct, os, sys, wave
 ROM_PATH = 'D:/working/vscode-projects/Reference_Project/vgm_libs/libvgm-master/emu/cores/yrw801.rom'
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yrw801_out')
 
-# GM 乐器名 (128 melody + 47 percussion)
-# YRW801 顺序: 0-127 旋律 (GM), 128-175 打击乐
 GM_NAMES = [
     "Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano", "Honky-tonk Piano",
     "Electric Piano 1", "Electric Piano 2", "Harpsichord", "Clavinet",
@@ -67,26 +75,58 @@ PERC_NAMES = [
 ]
 
 
+def get_sample(rom, bits, startaddr, pos):
+    """ymf278b_getSample, bit-exact
+
+    返回 INT16 (-32768..32767).
+    C 中 sample 是 INT16, 高位自然带符号.
+    Python 中需要手动 sign-extend: val >= 0x8000 则 val -= 0x10000
+    """
+    if bits == 0:
+        v = rom[startaddr + pos] << 8
+    elif bits == 1:
+        addr = startaddr + ((pos >> 1) * 3)
+        if pos & 1:
+            v = (rom[addr + 2] << 8) | (rom[addr + 1] & 0xF0)
+        else:
+            v = (rom[addr] << 8) | ((rom[addr + 1] & 0x0F) << 4)
+    elif bits == 2:
+        addr = startaddr + (pos * 2)
+        v = (rom[addr] << 8) | rom[addr + 1]
+    else:
+        return 0
+    return v - 0x10000 if v >= 0x8000 else v
+
+
+def next_pos(pos, step, endaddr, loopaddr):
+    """ymf278b_nextPos, bit-exact
+
+    pos += step
+    if ((u32)pos + endaddr >= 0x10000): pos = pos + endaddr + loopaddr
+    """
+    pos = (pos + step) & 0xFFFF
+    if (pos + endaddr) & 0xFFFF == 0 or (pos + endaddr) >= 0x10000:
+        pos = (pos + endaddr + loopaddr) & 0xFFFF
+    return pos
+
+
 def parse_rom(rom_data):
     """解析 YRW801 ROM, 返回乐器列表"""
     instruments = []
-    # YRW801: 128 melody + 47 percussion = 175 标准乐器
-    # 元数据表从地址 0 开始, 每 12 字节一条
-    # 但 ROM 可能包含额外的采样条目 (start 地址可能回绕)
-    # 所以我们扫描所有合法条目, 最多 512
+    MAX_INST = 175
     n_inst = 0
-    for idx in range(0, min(len(rom_data) - 12, 512 * 12), 12):
+    for idx in range(0, min(len(rom_data) - 12, MAX_INST * 12), 12):
         b = rom_data[idx:idx+12]
-        start_raw = (b[0] << 16) | (b[1] << 8) | b[2]
-        raw_start = start_raw & 0x1FFFFF
-        end_raw = (b[5] << 8) | b[6]
-        end = 0x10000 - end_raw
-        loop = (b[3] << 8) | b[4]
-        # 基本合法性: end > 0, end <= 0x10000, start 在 ROM 范围内
-        if end <= 0 or end > 0x10000:
+        bits = (b[0] & 0xC0) >> 6
+        startaddr = b[2] | (b[1] << 8) | ((b[0] & 0x3F) << 16)
+        loopaddr = (b[4] << 8) | b[3]
+        endaddr = (b[6] << 8) | b[5]
+
+        if bits > 2:
             break
-        if raw_start + end > len(rom_data) + 4096:  # 允许一点溢出
+        if startaddr >= len(rom_data):
             break
+
         n_inst += 1
 
     meta_end = n_inst * 12
@@ -94,47 +134,25 @@ def parse_rom(rom_data):
 
     for idx in range(0, meta_end, 12):
         b = rom_data[idx:idx+12]
-        start_raw = (b[0] << 16) | (b[1] << 8) | b[2]
-        fmt = (start_raw >> 21) & 0x03
-        start = start_raw & 0x1FFFFF
-        loop = (b[3] << 8) | b[4]
-        end_val = (b[5] << 8) | b[6]
-        end = 0x10000 - end_val
-        lfo_vib = b[7]
+        bits = (b[0] & 0xC0) >> 6
+        startaddr = b[2] | (b[1] << 8) | ((b[0] & 0x3F) << 16)
+        loopaddr = (b[4] << 8) | b[3]
+        endaddr = (b[6] << 8) | b[5]
         attack_reg = (b[8] >> 4) & 0xf
         decay1_reg = b[8] & 0xf
         decay2_reg = b[9] & 0xf
         decay_level = (b[9] >> 4) & 0xf
         release_reg = b[10] & 0xf
         key_rate_scale = (b[10] >> 4) & 0xf
+        lfo_vib = b[7]
         lfo_amp = b[11] & 0xf
 
-        # 提取 PCM 数据
-        has_loop = loop < end and end > 0
-        n_samples = end
-
-        pcm = []
-        if fmt & 0x04:  # 12-bit linear (参考 multipcm.c)
-            if start + (n_samples + 1) // 2 * 3 <= len(rom_data):
-                for j in range(n_samples):
-                    adr = start + (j >> 1) * 3
-                    if (j & 1) == 0:
-                        w = (rom_data[adr] << 8) | ((rom_data[adr + 1] & 0x0F) << 4)
-                    else:
-                        w = (rom_data[adr + 2] << 8) | (rom_data[adr + 1] & 0xF0)
-                    pcm.append(w if w < 0x8000 else w - 0x10000)
-            else:
-                pcm = [0]
-                n_samples = 0
+        if endaddr == 0:
+            n_samples = min(0x10000, (len(rom_data) - startaddr) // (3 if bits == 1 else (2 if bits == 2 else 1)))
+            has_loop = False
         else:
-            # 8-bit linear
-            if start + n_samples <= len(rom_data):
-                for j in range(n_samples):
-                    val = rom_data[start + j]
-                    pcm.append((val - 128) << 8)
-            else:
-                pcm = [0]
-                n_samples = 0
+            n_samples = (0x10000 - endaddr) & 0xFFFF
+            has_loop = loopaddr < n_samples
 
         inst_id = idx // 12
         if inst_id < 128:
@@ -146,12 +164,12 @@ def parse_rom(rom_data):
         inst = {
             'id': inst_id,
             'name': name,
-            'start': start,
-            'loop': loop,
-            'end': end,
+            'bits': bits,
+            'startaddr': startaddr,
+            'loopaddr': loopaddr,
+            'endaddr': endaddr,
             'n_samples': n_samples,
             'has_loop': has_loop,
-            'format': fmt,
             'attack': attack_reg,
             'decay1': decay1_reg,
             'decay2': decay2_reg,
@@ -160,79 +178,90 @@ def parse_rom(rom_data):
             'key_rate_scale': key_rate_scale,
             'lfo_vib': lfo_vib,
             'lfo_amp': lfo_amp,
-            'pcm': pcm,
         }
         instruments.append(inst)
 
     return instruments
 
 
-def resample(pcm, src_n, dst_n):
-    """简单线性插值降采样"""
-    if src_n == 0 or dst_n == 0:
-        return []
-    ratio = src_n / dst_n
-    out = []
-    for j in range(dst_n):
-        pos = j * ratio
-        i = int(pos)
-        f = pos - i
-        if i + 1 < src_n:
-            val = pcm[i] * (1 - f) + pcm[i + 1] * f
-        else:
-            val = pcm[min(i, src_n - 1)]
-        out.append(int(val))
-    return out
+def render_voice(rom, inst, dur, rate, midi_note=60, orig_pitch=60):
+    """严格按照 ymf278b_pcm_update 渲染
 
+    ROM 采样率 = 22050Hz, YMF278B 以 44100Hz 输出, 内部 2x 上采样插值
+    calcStep(0, 0) = 0x8000 -> 每 2 个输出 sample 前进 1 个 PCM sample
 
-def render_voice(pcm, loop_s, loop_e, has_loop, dur, rate, midi_note=60, orig_pitch=60):
-    """渲染一个 voice: pitch + loop + envelope"""
+    pos (u16), stepptr (u16) 分离
+    每帧: stepptr += step (u16.16 fixed-point)
+          if stepptr >= 0x10000: pos = nextPos(pos, stepptr>>16); stepptr &= 0xFFFF
+    sample = (getSample(pos) * (0x10000-stepptr) + getSample(nextPos(pos,1)) * stepptr) >> 16
+
+    顺序: 先取样本 (插值), 再步进 (ymf278b_pcm_update line 818-856)
+    """
+    bits = inst['bits']
+    startaddr = inst['startaddr']
+    loopaddr = inst['loopaddr']
+    endaddr = inst['endaddr']
+    has_loop = inst['has_loop']
+
     semi = midi_note - orig_pitch
-    pitch_ratio = 2.0 ** (semi / 12.0)
+    # calcStep(OCT=0, FN=0) = 0x8000; 每半音 step *= 2^(1/12)
+    step = int(0x8000 * (2.0 ** (semi / 12.0)))
+    step = max(1, min(0xFFFFFF, step))
+
     n_frames = int(dur * rate)
     out = []
 
-    pos = 0.0
-    note_off_time = dur * 0.7
+    pos = 0
+    stepptr = 0
+    note_off_time = dur * 0.8
 
     for i in range(n_frames):
         t = i / rate
-        # loop wrap
-        if has_loop and loop_e > loop_s and pos >= loop_e:
-            loop_len = loop_e - loop_s
-            pos = loop_s + (pos - loop_s) % loop_len
 
-        idx = int(pos)
-        frac = pos - idx
-        if idx < 0 or idx >= len(pcm):
-            break
+        # 先取样本 (插值) — ymf278b_pcm_update line 818-819
+        s0 = get_sample(rom, bits, startaddr, pos)
+        next_p = next_pos(pos, 1, endaddr, loopaddr)
+        s1 = get_sample(rom, bits, startaddr, next_p)
+        sample = (s0 * (0x10000 - stepptr) + s1 * stepptr) >> 16
 
-        next_idx = idx + 1
-        if has_loop and next_idx >= loop_e:
-            next_idx = loop_s
-        elif next_idx >= len(pcm):
-            next_idx = idx
+        # 再步进 — ymf278b_pcm_update line 851-856
+        stepptr += step
+        while stepptr >= 0x10000:
+            pos = next_pos(pos, stepptr >> 16, endaddr, loopaddr)
+            stepptr &= 0xFFFF
 
-        s = pcm[idx] * (1 - frac) + pcm[next_idx] * frac
-        pos += pitch_ratio
-
-        # envelope
-        if t < 0.01:
-            e = t / 0.01
-        elif t < 0.15:
-            e = 1.0 - 0.3 * ((t - 0.01) / 0.14)
+        # 自然 envelope: 快 attack, 柔和 sustain, 慢 release
+        if t < 0.005:
+            e = t / 0.005
+        elif t < 0.05:
+            e = 1.0 - 0.1 * ((t - 0.005) / 0.045)
         elif t < note_off_time:
-            e = 0.7
+            e = 0.9
         else:
-            e = max(0, 0.7 * (1.0 - (t - note_off_time) / (dur - note_off_time)))
+            rel = (t - note_off_time) / (dur - note_off_time)
+            e = max(0, 0.9 * (1.0 - rel * rel))
 
-        out.append(max(-32768, min(32767, int(s * e))))
+        out.append(max(-32768, min(32767, int(sample * e))))
 
     return out
 
 
+def export_raw_pcm(rom, inst, rate):
+    """导出原始 PCM (attack + loop), 16-bit signed WAV"""
+    bits = inst['bits']
+    startaddr = inst['startaddr']
+    loopaddr = inst['loopaddr']
+    endaddr = inst['endaddr']
+    n_samples = inst['n_samples']
+
+    pcm = []
+    for j in range(n_samples):
+        s = get_sample(rom, bits, startaddr, j)
+        pcm.append(s if s < 0x8000 else s - 0x10000)
+    return pcm
+
+
 def main():
-    # 加载 ROM
     print(f"加载 YRW801 ROM: {ROM_PATH}")
     with open(ROM_PATH, 'rb') as f:
         rom_data = f.read()
@@ -240,10 +269,8 @@ def main():
 
     instruments = parse_rom(rom_data)
 
-    # 列出所有乐器
     print(f"\n=== YRW801 乐器列表 ({len(instruments)} 个) ===\n")
 
-    # 解析命令行参数
     args = sys.argv[1:]
     do_wav = '--wav' in args
     do_wav_all = '--wav-all' in args
@@ -261,18 +288,16 @@ def main():
 
     for inst in instruments:
         pid = inst['id']
-        fmt_str = "8bit" if inst['format'] == 0 else "12bit" if inst['format'] == 2 else f"?{inst['format']}"
-        loop_tag = f" loop={inst['loop']}->{inst['end']}" if inst['has_loop'] else " ONESHOT"
+        bits_str = ["8bit", "12bit", "16bit", "???"][inst['bits']]
+        loop_tag = f" loop={inst['loopaddr']} end=0x{inst['endaddr']:04x}" if inst['has_loop'] else " ONESHOT"
         kb = inst['n_samples'] / 1024.0
 
-        # 只对 melody 显示详细信息
         if pid < 128:
-            print(f"  {pid:3d}: {inst['name']:25s} {fmt_str:4s} {inst['n_samples']:6d}s ({kb:5.1f}KB){loop_tag} atk={inst['attack']} d1={inst['decay1']} d2={inst['decay2']} sl={inst['decay_level']} rel={inst['release']}")
+            print(f"  {pid:3d}: {inst['name']:25s} {bits_str:4s} {inst['n_samples']:6d}s ({kb:5.1f}KB){loop_tag} sa=0x{inst['startaddr']:06x} atk={inst['attack']} d1={inst['decay1']} d2={inst['decay2']} sl={inst['decay_level']} rel={inst['release']}")
         else:
-            print(f"  {pid:3d}: {inst['name']:25s} {fmt_str:4s} {inst['n_samples']:6d}s ({kb:5.1f}KB){loop_tag}")
+            print(f"  {pid:3d}: {inst['name']:25s} {bits_str:4s} {inst['n_samples']:6d}s ({kb:5.1f}KB){loop_tag}")
 
-    # 生成 WAV
-    rate = 44100  # YRW801 原始采样率
+    rate = 44100
     dur = 3.0
 
     def gen_wav(inst, subdir='wav'):
@@ -283,15 +308,8 @@ def main():
         out_dir = os.path.join(OUT_DIR, subdir)
         os.makedirs(out_dir, exist_ok=True)
 
-        pcm = inst['pcm']
-        loop_s = inst['loop']
-        loop_e = inst['end']
-        has_loop = inst['has_loop']
-
-        # orig_pitch: GM 音色通常以 60 (C4) 为基准
         orig_pitch = 60
-
-        out_samples = render_voice(pcm, loop_s, loop_e, has_loop, dur, rate, 60, orig_pitch)
+        out_samples = render_voice(rom_data, inst, dur, rate, 60, orig_pitch)
 
         cn = inst['name'].replace(' ', '_').replace('(', '').replace(')', '')
         wav_path = os.path.join(out_dir, f"{inst['id']:03d}_{cn}_C4.wav")
@@ -332,18 +350,18 @@ def main():
                     continue
                 out_dir = os.path.join(OUT_DIR, 'export')
                 os.makedirs(out_dir, exist_ok=True)
+                pcm = export_raw_pcm(rom_data, inst, rate)
                 cn = inst['name'].replace(' ', '_').replace('(', '').replace(')', '')
                 wav_path = os.path.join(out_dir, f"{idx:03d}_{cn}.wav")
                 with wave.open(wav_path, 'w') as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(rate)
-                    wf.writeframes(struct.pack(f'<{len(inst["pcm"])}h', *inst['pcm']))
-                kb = len(inst['pcm']) * 2 / 1024.0
+                    wf.writeframes(struct.pack(f'<{len(pcm)}h', *pcm))
+                kb = len(pcm) * 2 / 1024.0
                 print(f"    -> {wav_path} ({kb:.1f}KB)")
 
     else:
-        # 无参数, 只列表
         print(f"\n提示:")
         print(f"  python yrw801_extract.py --wav 0 1 2 3      # 生成试听")
         print(f"  python yrw801_extract.py --wav-all          # 生成全部")

@@ -290,8 +290,8 @@ void pcm_wr(u8 addr, u8 dat) {
             pcm_ch[ch].inst_idx = inst;
             pcm_ch[ch].addr = sf2_start[inst];
             pcm_ch[ch].end_addr = sf2_start[inst] + sf2_nib_count[inst];
-            pcm_ch[ch].loop_addr = sf2_loop_start[inst];
-            pcm_ch[ch].loop_end = sf2_loop_end[inst];
+            pcm_ch[ch].loop_addr = sf2_start[inst] + sf2_loop_start[inst];
+            pcm_ch[ch].loop_end = sf2_start[inst] + sf2_loop_end[inst];
             pcm_ch[ch].acc = 0;
             pcm_ch[ch].adpcm_step = 0;
             pcm_ch[ch].cache = 0;
@@ -461,7 +461,7 @@ s16 pcm_render(void) {
         }
         frac = pcm_ch[ch].now_step;
         if (frac > 0 && pcm_ch[ch].step < 0x0100) {
-            out = pcm_ch[ch].s_prev + (pcm_ch[ch].s_cur - pcm_ch[ch].s_prev) * frac / 256;
+            out = pcm_ch[ch].s_prev + (s16)(((long)(pcm_ch[ch].s_cur - pcm_ch[ch].s_prev) * (long)frac) >> 8);
         } else {
             out = pcm_ch[ch].s_cur;
         }

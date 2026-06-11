@@ -69,3 +69,119 @@
 | | **合计** | | **183514** | **358.5KB** | **91.9KB** | |
 
 去重去掉 8 个: GT_9(Oboe), SF_29/MMX_10/SOM_18/Strings(Strings), FF4_4(Harp), FF3_15/SM_54(Voice)
+
+## 实际集成 (7个, ADPCM ~12KB)
+
+从精选中筛选，原始 loop 接缝有问题的乐器通过 palindrome 构造救回。
+
+| # | 乐器 | 来源 | 采样数 | orig_pitch | loop 方式 |
+|---|------|------|--------|------------|-----------|
+| 1 | Piano | snes_unofficial #35 | 2328 | 40 | 原始 (完美) |
+| 2 | SlapBass | snes_unofficial #34 | 3669 | 26 | 原始 (完美) |
+| 3 | Trumpet | snes_unofficial #45 | 4198 | 52 | 原始 (完美) |
+| 4 | Oboe2 (GT_9) | snes_unofficial #69 | 5468 | 21 | 原始 (完美) |
+| 5 | Guitar | snes_unofficial #91 | 7444 | 40 | 原始 (完美) |
+| 6 | Oboe (SOM_8) | snes_unofficial #102 | 4021 | 28 | Palindrome (救回) |
+| 7 | Harp (SM_136) | snes_unofficial #90 | 7373 | 73 | Palindrome (救回) |
+
+## BRR 方案: 无状态编解码, 完美循环
+
+ADPCM 有状态 (acc + step), loop 需要精确的状态闭合, 难以保证。
+BRR (SNES SPC700) 是无状态压缩: 每 block 独立编解码, loop 只跳地址。
+
+### BRR 格式 (参考 GME Spc_Dsp.cpp)
+
+- 每 block 9 字节: 1 header + 8 data = 16 nibbles (16 samples)
+- Header: [7:4]=scale (0-12), [3:2]=filter (0-3), [1]=loop, [0]=end
+- 每 nibble = 4-bit signed (-8..7)
+- Decode (GME bit-exact):
+  ```
+  shifts[0..15] right: 13,12,12,12,12,12,12,12,12,12,12,12,12,16,16,16
+  shifts[16..31] left:  0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,11,11,11
+  s = ((int16)nybbles >> right_shift) << left_shift  // uint16 截断
+  // filter (header & 0x0C), p2 = prev2 >> 1
+  // 0x4: s += p1>>1 + (-p1)>>5
+  // 0x8: s += p1 - p2 + p2>>4 + (p1*-3)>>6
+  // 0xC: s += p1 - p2 + (p1*-13)>>7 + (p2*3)>>4
+  CLAMP16(s); s *= 2;
+  ```
+- Encode: `nib = sample >> (left_shift + 1)`, clamp -8..7
+
+### filter=0 vs filter=2
+
+| filter | 说明 | loop 无缝 | 音质 |
+|--------|------|-----------|------|
+| 0 | 无滤波, 真正无状态 | 完美 (seam=0) | 粗糙 (4-bit 量化噪声明显) |
+| 2 | IIR 滤波, 有 p1/p2 状态 | 有咔哒 (状态跳变) | 较好 |
+
+**filter=0 是唯一能保证无缝的方案**, 因为 filter=1/2/3 都依赖前两个样本的输出状态,
+loop 回绕时 p1/p2 重置为 0 会导致 block 间跳变产生咔哒。
+
+### Blow/Shakuhachi BRR 验证结果
+
+两个乐器都能找到大量 seam=0 配置, attack 段最长可达 80ms:
+
+| 乐器 | 最佳 attack | loop 长度 | filter | seam | RMS |
+|------|-----------|---------|--------|------|-----|
+| Blow | 80ms | 81ms | 0 | 0 | 22499 |
+| Shakuhachi | 62ms | 61ms | 0 | 0 | 18902 |
+
+### BRR 局限
+
+- 4-bit 量化: round-trip max_err ~35000, rms ~15000 (16-bit scale)
+- 音质粗糙, 但 chip-tune 风格可接受
+- 动态范围: scale=12 时 decode peak = 7 * 4096 * 2 = 28672 (不是 32767)
+
+### 待集成
+
+BRR 解码器需要集成到 MCU firmware, 与现有 ADPCM 解码器并列:
+- ADPCM 通道: 鼓声 (无 loop) + SF2 旋律乐器 (snapshot 回绕)
+- BRR 通道: XI 旋律乐器 (filter=0, 无缝 loop)
+
+## Bug 修复记录
+
+### ADPCM loop_addr 基址偏移 (2026-06-11)
+
+`sf2_rom.h` 中 `sf2_loop_start/loop_end` 是采样内部 nibble 偏移, 但 MCU 的 `addr` 是全局 nibble 地址。
+Piano 的 `sf2_start=0` 碰巧没问题, Oboe/Harp 的 `sf2_start` 很大导致 loop 立刻触发回绕到错误 ROM 区域。
+修复: `loop_addr = sf2_start[inst] + sf2_loop_start[inst]`
+
+### ADPCM 插值溢出 (2026-06-11)
+
+`s_prev - s_cur` (s16 差值最大 ~4094) 乘以 frac (u8) 溢出 s16。
+修复: `(long)(s_cur - s_prev) * (long)frac >> 8`
+
+### 当前状态 (7 乐器)
+
+- Piano, SlapBass, Trumpet, Oboe2, Guitar: 完美
+- Oboe(3), Harp(7): 仍有轻微破音 (palindrome 构造的 ADPCM 状态闭合不完美)
+
+## 移除记录 (ADPCM 方案无法救回)
+
+| 乐器 | 来源 | 问题 |
+|------|------|------|
+| Blow 1 | microgm #207 | palindrome delta=127, 有咔哒 → 改用 BRR 方案 |
+| Shakuhachi 3 | microgm #211 | palindrome delta=339, 有咔哒 → 改用 BRR 方案 |
+
+## 发现: ADPCM 编码器 bug
+
+Python 编码器用 `JEDI[step//16][nib]` 索引, MCU 解码器用 `JEDI_FLAT[step+nib]`。
+两种索引方式在 step 不是 16 的倍数时给出不同值, 导致编码器和解码器状态不一致。
+修复: 编码器改用 `JEDI_FLAT[step+nib]`。
+详见 `tools/brr_test.py`。
+
+## Loop 修复方法: Palindrome 构造
+
+原始 SF2 的 loop_start/loop_end 处 PCM 幅值和斜率不匹配时，ADPCM 编码器在接缝处产生可闻咔哒。
+snapshot 回绕只能修复漂移（每次循环误差累积），不能修复接缝处的初始跳变。
+
+**Palindrome 方案** (参考 Polyphone):
+1. 在采样中段找变化最小的连续段（差分绝对值之和最小）
+2. 构造 palindrome: 正向段 + 反向段 (fwd + reverse(fwd[:-1]))
+3. PCM 层面天然无缝: 反向结束值 = 正向起始值
+4. ADPCM 层面: 编码器路径连续，palindrome 接缝处状态跳变小
+
+**局限**: ADPCM 有状态编解码器，PCM 完美不代表 ADPCM 完美。
+crossfade 可以改善 PCM 连续性但会改变编码路径。
+Oboe/Harp 的 ADPCM 状态差足够小（delta=0/127）人耳不可闻；
+Blow/Shakuhachi 差值过大（127/339）仍有可闻咔哒。

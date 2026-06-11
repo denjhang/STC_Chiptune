@@ -17,14 +17,11 @@ BAUD = 115200
 INSTRUMENTS = [
     (0, 'Piano'),
     (1, 'SlapBass'),
-    (2, 'Shakuhachi'),
-    (3, 'Oboe'),
-    (4, 'Trumpet'),
-    (5, 'Blow'),
-    (6, 'Oboe2'),
-    (7, 'Strings'),
-    (8, 'Harp'),
-    (9, 'Guitar'),
+    (2, 'Trumpet'),
+    (3, 'Oboe2'),
+    (4, 'Guitar'),
+    (5, 'Oboe'),
+    (6, 'Harp'),
 ]
 
 # ADSR 参数 (hi nibble = index into env_cnt table, lo nibble = index)
@@ -39,16 +36,13 @@ INSTRUMENTS = [
 
 ADSR_TEMPLATES = {
     #         atk  dec  sul  sus  rel
-    'Piano':     (7,  6,  10,  10,   7),   # 中速起音, 中等衰减, 明显延音
-    'SlapBass':  (2,  9,  14,  14,   4),   # 快起快衰, 短促
-    'Shakuhachi':(3,  4,   7,   7,   9),   # 中快起, 适度延音
-    'Oboe':      (3,  5,   7,   7,   7),   # 双簧管: 中速
-    'Trumpet':   (4,  6,   5,   6,   7),   # 小号: 偏慢起音, 持续
-    'Blow':      (2,  4,   7,   7,   9),   # 吹管: 中快
-    'Oboe2':     (3,  5,   7,   7,   7),   # 双簧管2
-    'Strings':   (9,  7,   3,   5,   9),   # 弦乐: 慢起音, 长延音
-    'Harp':      (2,  6,   7,   7,   6),   # 竖琴: 快起, 清脆
-    'Guitar':    (2,  5,   7,   7,   6),   # 吉他: 快起, 中等
+    'Piano':     (7,  6,  10,  10,   7),
+    'SlapBass':  (2,  9,  14,  14,   4),
+    'Trumpet':   (4,  6,   5,   6,   7),
+    'Oboe2':     (3,  5,   7,   7,   7),
+    'Guitar':    (2,  5,   7,   7,   6),
+    'Oboe':      (3,  5,   7,   7,   7),
+    'Harp':      (2,  6,   7,   7,   6),
 }
 
 DEFAULT_ADSR = (5, 6, 8, 8, 7)  # 默认: 中等
@@ -123,18 +117,18 @@ def main():
 
     if 'chord' in args:
         # 和弦: piano(0) + strings(7) + harp(8)
-        print("\n和弦测试: Piano + Strings + Harp @ C4")
+        print("\n和弦测试: Piano + Trumpet + Harp @ C4")
         set_adsr(ser, ADSR_TEMPLATES['Piano'])
         set_volume(ser, 0, 20)
         set_volume(ser, 1, 22)
         set_volume(ser, 2, 18)
         note_on_sf2(ser, 0, 0, 48)   # piano C3
         time.sleep(0.05)
-        set_adsr(ser, ADSR_TEMPLATES['Strings'])
-        note_on_sf2(ser, 1, 7, 60)   # strings C4
+        set_adsr(ser, ADSR_TEMPLATES['Trumpet'])
+        note_on_sf2(ser, 1, 2, 60)   # trumpet C4
         time.sleep(0.05)
         set_adsr(ser, ADSR_TEMPLATES['Harp'])
-        note_on_sf2(ser, 2, 8, 72)   # harp C5
+        note_on_sf2(ser, 2, 6, 72)   # harp C5
         time.sleep(4.0)
         note_off(ser, 0)
         note_off(ser, 1)
