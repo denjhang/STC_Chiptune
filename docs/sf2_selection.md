@@ -70,19 +70,18 @@
 
 去重去掉 8 个: GT_9(Oboe), SF_29/MMX_10/SOM_18/Strings(Strings), FF4_4(Harp), FF3_15/SM_54(Voice)
 
-## 实际集成 (7个, ADPCM ~12KB)
+## 实际集成 (5个, ADPCM ~11.7KB)
 
 从精选中筛选，原始 loop 接缝有问题的乐器通过 palindrome 构造救回。
+Trumpet loop 太短 (12ms) ADPCM 状态无法闭合, Oboe2 与 Oboe 重复, 均删除。
 
 | # | 乐器 | 来源 | 采样数 | orig_pitch | loop 方式 |
 |---|------|------|--------|------------|-----------|
-| 1 | Piano | snes_unofficial #35 | 2328 | 40 | 原始 (完美) |
-| 2 | SlapBass | snes_unofficial #34 | 3669 | 26 | 原始 (完美) |
-| 3 | Trumpet | snes_unofficial #45 | 4198 | 52 | 原始 (完美) |
-| 4 | Oboe2 (GT_9) | snes_unofficial #69 | 5468 | 21 | 原始 (完美) |
-| 5 | Guitar | snes_unofficial #91 | 7444 | 40 | 原始 (完美) |
-| 6 | Oboe (SOM_8) | snes_unofficial #102 | 4021 | 28 | Palindrome (救回) |
-| 7 | Harp (SM_136) | snes_unofficial #90 | 7373 | 73 | Palindrome (救回) |
+| 0 | Piano | snes_unofficial #35 | 2328 | 40 | 原始 (完美) |
+| 1 | SlapBass | snes_unofficial #34 | 3669 | 26 | 原始 (完美) |
+| 2 | Guitar | snes_unofficial #91 | 7444 | 40 | 原始 (完美) |
+| 3 | Oboe (SOM_8) | snes_unofficial #102 | 4021 | 28 | Palindrome (救回) |
+| 4 | Harp (SM_136) | snes_unofficial #90 | 7373 | 73 | Palindrome (偶然破音) |
 
 ## BRR 方案: 无状态编解码, 完美循环
 
@@ -151,15 +150,28 @@ Piano 的 `sf2_start=0` 碰巧没问题, Oboe/Harp 的 `sf2_start` 很大导致 
 `s_prev - s_cur` (s16 差值最大 ~4094) 乘以 frac (u8) 溢出 s16。
 修复: `(long)(s_cur - s_prev) * (long)frac >> 8`
 
-### 当前状态 (7 乐器)
+### JEDI 表不一致 (2026-06-11)
 
-- Piano, SlapBass, Trumpet, Oboe2, Guitar: 完美
-- Oboe(3), Harp(7): 仍有轻微破音 (palindrome 构造的 ADPCM 状态闭合不完美)
+Python 编码器用公式 `JEDI[step//16][nib]` 构建 JEDI 表, MCU 解码器用硬编码 `jedi_table[step+nib]`。
+两种索引方式在 step 不是 16 倍数时值不同 (如 step=0 nib=2: Python=-10, MCU=+10)。
+修复: gen_adpcm_rom.py 和 sf2_loop_sim.py 改用硬编码 JEDI_FLAT[784], 与 MCU jedi_table 完全一致。
+
+### SF2 变频未生效 (2026-06-11)
+
+SF2 note_on 路径 (0x15 + 0x33) 未设置 `pcm_pending_ch`, 导致 0x33 的 midi note 命令被跳过, step 保持 0。
+修复: SF2 路径末尾加 `pcm_pending_ch = ch`。
+
+### 当前状态 (5 乐器)
+
+- Piano, SlapBass, Guitar, Oboe: 完美
+- Harp: 偶然破音 (palindrome ADPCM 状态跳变 4117, 可用 ADSR 掩盖)
 
 ## 移除记录 (ADPCM 方案无法救回)
 
 | 乐器 | 来源 | 问题 |
 |------|------|------|
+| Trumpet (YC_33) | snes_unofficial #45 | loop 太短 (12ms/214采样), ADPCM 状态无法闭合 → 删除 |
+| Oboe2 (GT_9) | snes_unofficial #69 | 与 Oboe 重复 → 删除 |
 | Blow 1 | microgm #207 | palindrome delta=127, 有咔哒 → 改用 BRR 方案 |
 | Shakuhachi 3 | microgm #211 | palindrome delta=339, 有咔哒 → 改用 BRR 方案 |
 

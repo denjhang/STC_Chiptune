@@ -1,5 +1,27 @@
 
+
+cd d:/working/vscode-projects/STC_Chiptune && python tools/sf2_test.py
+
+
+
+
+
 051355012928
+
+
+
+Bash Find XM/XI loader in openmpt
+IN
+find "D:/working/vscode-projects/Reference_Project/vgm_libs/modizer-master/libs/libopenmpt/openmpt-trunk/soundlib" -name "Load_xm*" -o -name "Load_xt*" -o -name "*XI*" -o -name "*SampleFormat*"
+
+OUT
+D:/working/vscode-projects/Reference_Project/vgm_libs/modizer-master/libs/libopenmpt/openmpt-trunk/soundlib/Load_xm.cpp
+D:/working/vscode-projects/Reference_Project/vgm_libs/modizer-master/libs/libopenmpt/openmpt-trunk/soundlib/Load_xmf.cpp
+D:/working/vscode-projects/Reference_Project/vgm_libs/modizer-master/libs/libopenmpt/openmpt-trunk/soundlib/SampleFormatBRR.cpp
+
+
+
+
 
 
 cd /d/working/vscode-projects/STC_Chiptune && python tools/adpcm_led_test.py

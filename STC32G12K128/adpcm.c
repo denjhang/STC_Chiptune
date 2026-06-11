@@ -302,6 +302,7 @@ void pcm_wr(u8 addr, u8 dat) {
             pcm_ch[ch].env_state = 0;
             pcm_ch[ch].level = 31;
             pcm_active_mask |= (1 << ch);
+            pcm_pending_ch = ch;
 
         } else {
             /* 鼓声 */
