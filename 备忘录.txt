@@ -23,9 +23,15 @@ WT 直接测试 — tools/vgm_player.py
 
 
 python tools/vgm_player.py --wt-scale --baud 115200       # WT 扫频 C1-C8
+
+python tools/wt_scale_test.py 
+
 ADPCM 鼓声 — tools/adpcm_test.py
 
 python tools/adpcm_pitch_test.py
+
+
+python tools/adpcm_drumkit_pro.py
 
 
 python tools/adpcm_test.py
