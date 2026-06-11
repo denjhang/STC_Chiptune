@@ -299,7 +299,7 @@ void pcm_wr(u8 addr, u8 dat) {
             pcm_ch[ch].s_prev = 0;
             pcm_ch[ch].s_cur = 0;
             pcm_ch[ch].active = 1;
-            pcm_ch[ch].env_state = 0;
+            pcm_ch[ch].env_state = 3;  /* SF2 直接 sustain, 等 0x33 调参数 */
             pcm_ch[ch].level = 31;
             pcm_active_mask |= (1 << ch);
             pcm_pending_ch = ch;
@@ -323,82 +323,19 @@ void pcm_wr(u8 addr, u8 dat) {
         }
 
     } else if (addr == 0x33) {
-        /* SF2 midi note: 计算 pitch step, 启动 ADSR */
+        /* SF2 midi note: step 已由 0x27/0x2D 写入, 这里只启动 ADSR */
         if (pcm_pending_ch < PCM_CHANS) {
             ch = pcm_pending_ch;
             {
-                u8 orig_pitch = sf2_orig_pitch[pcm_ch[ch].inst_idx];
-                s16 semi;
-                long freq_ratio;
-
-                /* semi = midi_note - orig_pitch */
-                semi = (s16)dat - (s16)orig_pitch;
-
-                /* step = 0x0100 * 2^(semi/12) */
-                /* 用查表近似: step 表在 wt.c wt_note_freq[]
-                   但这里直接计算: base=0x0100, 乘以半音比例 */
-                if (semi >= 0) {
-                    freq_ratio = 256L << (semi / 12);
-                    /* 细调: 2^(semi%12 / 12) 线性近似 */
-                    {
-                        u8 r = semi % 12;
-                        /* 2^(r/12) 近似: r=0->256, r=1->271, r=2->287, ...
-                           使用简单的移位+加法 */
-                        u16 approx;
-                        if (r == 0) approx = 256;
-                        else if (r == 1) approx = 271;
-                        else if (r == 2) approx = 287;
-                        else if (r == 3) approx = 304;
-                        else if (r == 4) approx = 322;
-                        else if (r == 5) approx = 341;
-                        else if (r == 6) approx = 362;
-                        else if (r == 7) approx = 383;
-                        else if (r == 8) approx = 406;
-                        else if (r == 9) approx = 430;
-                        else if (r == 10) approx = 455;
-                        else if (r == 11) approx = 482;
-                        else approx = 256;
-                        freq_ratio = (long)approx << (semi / 12);
-                    }
-                } else {
-                    freq_ratio = 256L;
-                    /* 负半音: 右移 */
-                    {
-                        u8 r = (-semi) % 12;
-                        u8 oct = (-semi) / 12;
-                        u16 approx;
-                        if (r == 0) approx = 256;
-                        else if (r == 1) approx = 242;
-                        else if (r == 2) approx = 228;
-                        else if (r == 3) approx = 216;
-                        else if (r == 4) approx = 203;
-                        else if (r == 5) approx = 192;
-                        else if (r == 6) approx = 181;
-                        else if (r == 7) approx = 171;
-                        else if (r == 8) approx = 161;
-                        else if (r == 9) approx = 152;
-                        else if (r == 10) approx = 144;
-                        else if (r == 11) approx = 136;
-                        else approx = 256;
-                        freq_ratio = (long)approx >> oct;
-                    }
-                }
-
-                if (freq_ratio < 0x0020) freq_ratio = 0x0020;
-                if (freq_ratio > 0xFFFF) freq_ratio = 0xFFFF;
-
-                pcm_ch[ch].step = (u16)freq_ratio;
-
-                /* 应用 ADSR */
-                pcm_ch[ch].atk  = pcm_tone.atk;
+                /* 应用 DSR: level=31 不缩放, 保持采样原始音量 */
                 pcm_ch[ch].decy = pcm_tone.decy;
                 pcm_ch[ch].sul  = pcm_tone.sul;
                 pcm_ch[ch].sus  = pcm_tone.sus;
                 pcm_ch[ch].rel  = pcm_tone.rel;
-                pcm_ch[ch].env_state = 1;
+                pcm_ch[ch].env_state = 3;  /* 直接 sustain */
                 pcm_ch[ch].env_cnt = 250;
-                pcm_ch[ch].level = 0;
-                pcm_ch[ch].env_step = pcm_ch[ch].atk;
+                pcm_ch[ch].level = 31;
+                pcm_ch[ch].env_step = pcm_ch[ch].sus;
 
                 pcm_ch[ch].active = 1;
                 pcm_active_mask |= (1 << ch);
@@ -409,8 +346,13 @@ void pcm_wr(u8 addr, u8 dat) {
     } else if (addr >= 0x1B && addr <= 0x20) {
         ch = addr - 0x1B;
         {
-            pcm_ch[ch].active = 0;
-            pcm_active_mask &= ~(1 << ch);
+            if (pcm_ch[ch].env_state) {
+                pcm_ch[ch].env_state = 4;  /* release */
+                pcm_ch[ch].env_step = pcm_ch[ch].rel;
+            } else {
+                pcm_ch[ch].active = 0;
+                pcm_active_mask &= ~(1 << ch);
+            }
         }
 
     } else if (addr >= 0x21 && addr <= 0x26) {
@@ -444,13 +386,19 @@ s16 pcm_render(void) {
     u8 ch, step_cnt;
     s16 total = 0;
     s16 out, frac;
-    u8 lvl, vol;
+    u8 vol;
 
     pcm_wait_cnt++;
     pcm_wait_cnt &= 0x03;
 
     for (ch = 0; ch < PCM_CHANS; ch++) {
         if (!pcm_ch[ch].active) continue;
+
+        /* ADSR: 每 4 tick 更新一次包络 */
+        if (pcm_ch[ch].env_state && (pcm_wait_cnt == 0)) {
+            pcm_env_tick(ch);
+        }
+
         pcm_ch[ch].now_step += pcm_ch[ch].step;
         if (pcm_ch[ch].now_step >= 0x0100) {
             step_cnt = pcm_ch[ch].now_step >> 8;
@@ -467,15 +415,12 @@ s16 pcm_render(void) {
             out = pcm_ch[ch].s_cur;
         }
 
-        {
-            if (pcm_ch[ch].is_sf2) {
-                vol = pcm_ch[ch].vol;
-                out >>= 5;
-                total += (s16)((long)out * vol >> 5);
-            } else {
-                vol = pcm_ch[ch].vol;
-                total += (s16)((long)out * vol >> 5);
-            }
+        vol = pcm_ch[ch].vol;
+        if (pcm_ch[ch].env_state) {
+            out >>= 5;
+            total += (s16)((long)out * vol * pcm_ch[ch].level >> 10);
+        } else {
+            total += (s16)((long)out * vol >> 5);
         }
     }
 

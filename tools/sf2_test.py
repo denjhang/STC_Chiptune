@@ -3,12 +3,12 @@
 
 用法:
     python tools/sf2_test.py              # 依次播放 5 个乐器 (原音高)
-    python tools/sf2_test.py piano 60     # 指定乐器+音高
+    python tools/sf2_test.py piano 60     # 指定乐器+音高 (变频)
     python tools/sf2_test.py all 60       # 所有乐器同时播放 C4
-    python tools/sf2_test.py chord         # 和弦测试
+    python tools/sf2_test.py chord       # 和弦测试
 """
 
-import serial, sys, time
+import math, serial, sys, time
 
 PORT = 'COM12'
 BAUD = 115200
@@ -25,11 +25,11 @@ INSTRUMENTS = [
 
 ADSR_TEMPLATES = {
     #         atk  dec  sul  sus  rel
-    'Piano':     (7,  6,  10,  10,   7),
+    'Piano':     (3,  4,   8,   5,   4),
     'SlapBass':  (2,  9,  14,  14,   4),
-    'Guitar':    (2,  5,   7,   7,   6),
-    'Oboe':      (3,  5,   7,   7,   7),
-    'Harp':      (2,  6,   7,   7,   6),
+    'Guitar':    (2,  5,   7,  7,   6),
+    'Oboe':      (3,  5,  7,  7,   7),
+    'Harp':      (2,  6,  7,  7,   6),
 }
 
 DEFAULT_ADSR = (5, 6, 8, 8, 7)
@@ -52,9 +52,19 @@ def set_adsr(ser, template):
     time.sleep(0.001)
 
 
-def note_on_sf2(ser, ch, inst_idx, midi_note):
+def set_step(ser, ch, step):
+    """通过 0x27/0x2D 直接写 step 高低字节"""
+    step = int(step)
+    step = max(0x0020, min(step, 0x0200))  # 最高2x速
+    send_cmd(ser, 0x27 + ch, (step >> 8) & 0xFF)
+    send_cmd(ser, 0x2D + ch, step & 0xFF)
+
+
+def note_on_sf2(ser, ch, inst_idx, midi_note, orig_pitch):
+    semi = midi_note - orig_pitch
+    step = int(round(0x0100 * (2.0 ** (semi / 12.0))))
     send_cmd(ser, 0x15 + ch, 16 + inst_idx)
-    time.sleep(0.001)
+    set_step(ser, ch, step)
     send_cmd(ser, 0x33, midi_note)
 
 
@@ -66,14 +76,16 @@ def set_volume(ser, ch, vol):
     send_cmd(ser, 0x21 + ch, vol & 0x1F)
 
 
-def play_instrument(ser, inst_idx, name, midi_note, duration=2.0):
+def play_instrument(ser, inst_idx, name, midi_note, orig_pitch, duration=2.0):
     adsr = ADSR_TEMPLATES.get(name, DEFAULT_ADSR)
-    print(f"  {name} (inst={inst_idx}, note={midi_note}, ADSR={adsr})")
+    semi = midi_note - orig_pitch
+    step = int(round(0x0100 * (2.0 ** (semi / 12.0))))
+    print(f"  {name} (inst={inst_idx}, note={midi_note}, semi={semi:+d}, step=0x{step:04X})")
 
     set_adsr(ser, adsr)
     set_volume(ser, 0, 28)
 
-    note_on_sf2(ser, 0, inst_idx, midi_note)
+    note_on_sf2(ser, 0, inst_idx, midi_note, orig_pitch)
     time.sleep(duration)
 
     note_off(ser, 0)
@@ -94,15 +106,15 @@ def main():
         print("\n和弦测试: Piano + Guitar + Harp")
         set_adsr(ser, ADSR_TEMPLATES['Piano'])
         set_volume(ser, 0, 20)
-        note_on_sf2(ser, 0, 0, 40)
+        note_on_sf2(ser, 0, 0, 40, 40)
         time.sleep(0.05)
         set_adsr(ser, ADSR_TEMPLATES['Guitar'])
         set_volume(ser, 1, 22)
-        note_on_sf2(ser, 1, 2, 60)
+        note_on_sf2(ser, 1, 2, 60, 40)
         time.sleep(0.05)
         set_adsr(ser, ADSR_TEMPLATES['Harp'])
         set_volume(ser, 2, 18)
-        note_on_sf2(ser, 2, 4, 72)
+        note_on_sf2(ser, 2, 4, 72, 73)
         time.sleep(4.0)
         note_off(ser, 0)
         note_off(ser, 1)
@@ -117,7 +129,7 @@ def main():
                 continue
             adsr = ADSR_TEMPLATES.get(name, DEFAULT_ADSR)
             set_volume(ser, i, 20)
-            note_on_sf2(ser, i, idx, 60)
+            note_on_sf2(ser, i, idx, 60, op)
             time.sleep(0.05)
         time.sleep(4.0)
         for i in range(len(INSTRUMENTS)):
@@ -136,7 +148,7 @@ def main():
                 if midi_note is None:
                     midi_note = op
                 print(f"\n播放 {iname} @ MIDI {midi_note}")
-                play_instrument(ser, idx, iname, midi_note)
+                play_instrument(ser, idx, iname, midi_note, op)
                 found = True
                 break
         if not found:
@@ -146,7 +158,7 @@ def main():
     else:
         print("\n依次播放 5 个乐器 (原音高)\n")
         for idx, name, op in INSTRUMENTS:
-            play_instrument(ser, idx, name, op, duration=2.5)
+            play_instrument(ser, idx, name, op, op, duration=2.5)
 
     print("\nDone!")
     ser.close()
