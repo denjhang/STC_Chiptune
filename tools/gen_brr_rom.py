@@ -23,21 +23,22 @@ RIGHT_SHIFT = [13,12,12,12,12,12,12,12,12,12,12,12,13,16,16,16]
 LEFT_SHIFT  = [ 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,11,11,11]
 
 # 14 个精选乐器 (排除 Acoustic Grand Piano)
+# 格式: (xi_filename, short_name, sample_idx)
 PICKS = [
-    ('04_Electric_Piano_1_L0.xi',  'ElecPiano'),
-    ('28_Violin.xi',               'Violin'),
-    ('30_Strings.xi',              'Strings'),
-    ('2E_Harp.xi',                 'Harp'),
-    ('15_Accordion_L0.xi',         'Accordion'),
-    ('13_Church_Organ.xi',         'Organ'),
-    ('23_Fretless_Bass.xi',        'Fretless'),
-    ('1A_Jazz_Guitar.xi',          'JazzGtr'),
-    ('1E_Distortion_Guitar.xi',    'DistGtr'),
-    ('08_Celesta.xi',              'Celesta'),
-    ('49_Flute.xi',                'Flute'),
-    ('4A_Recorder.xi',             'Recorder'),
-    ('44_Oboe.xi',                 'Oboe'),
-    ('47_Clarinet.xi',             'Clarinet'),
+    ('01_Bright_Acoustic_Piano.xi','AcPiano', 2),   # 原 ElecPiano 换成 Bright Acoustic s2
+    ('28_Violin.xi',               'Violin',  0),
+    ('30_Strings.xi',              'Strings', 0),
+    ('2E_Harp.xi',                 'Harp',    0),
+    ('15_Accordion_L0.xi',         'Accordion', 0),
+    ('13_Church_Organ.xi',         'Organ',   0),
+    ('23_Fretless_Bass.xi',        'Fretless',0),
+    ('1A_Jazz_Guitar.xi',          'JazzGtr', 0),
+    ('1E_Distortion_Guitar.xi',    'DistGtr', 0),
+    ('08_Celesta.xi',              'Celesta', 0),
+    ('49_Flute.xi',                'Flute',   0),
+    ('4A_Recorder.xi',             'Recorder',0),
+    ('44_Oboe.xi',                 'Oboe',    0),
+    ('47_Clarinet.xi',             'Clarinet',0),
 ]
 
 
@@ -236,11 +237,13 @@ def midi_pitch_ratio(midi_diff):
         return (table[r] >> octaves) << 8
 
 
-def process_instrument(filepath):
+def process_instrument(filepath, sample_idx=0):
     name, samples = parse_xi_pcm(filepath)
     if not name or not samples:
         return None
-    s = samples[0]
+    if sample_idx >= len(samples):
+        return None
+    s = samples[sample_idx]
     if not s['has_loop'] or s['n_samples'] < 50:
         return None
 
@@ -288,13 +291,13 @@ def main():
     print(f"{'Instrument':<20s} {'Blocks':>6s} {'Bytes':>6s} {'LoopBlk':>7s} {'NativeMIDI':>10s} {'Seam':>8s}")
     print('-' * 70)
 
-    for pick, short_name in PICKS:
+    for pick, short_name, sample_idx in PICKS:
         filepath = os.path.join(XI_DIR, pick)
         if not os.path.exists(filepath):
             print(f'  SKIP {pick}'); continue
-        r = process_instrument(filepath)
+        r = process_instrument(filepath, sample_idx)
         if r is None:
-            print(f'  SKIP {pick} (process failed)'); continue
+            print(f'  SKIP {pick} s{sample_idx} (process failed)'); continue
         r['short_name'] = short_name
         results.append(r)
         seam_str = 'PERFECT' if r['seam'] == 0 else f'{r["seam"]}'

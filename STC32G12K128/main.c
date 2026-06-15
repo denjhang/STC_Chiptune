@@ -252,7 +252,7 @@ void process_uart(void) {
             if (r >= 0x15 && r <= 0x33) {
                 pcm_active = 1;
                 pcm_wr(r, d);
-            } else if (r >= 0x34 && r <= 0x47) {
+            } else if (r >= 0x34 && r <= 0x4F) {
                 brr_active = 1;
                 brr_wr(r - 0x34, d);
             } else {
@@ -343,6 +343,7 @@ void led_tick_update(void) {
         if (gt_active) mask |= gt_channel_mask();
         if (wt_active) mask |= wt_channel_mask() & 0x0F;
         if (pcm_active) mask |= pcm_channel_mask() << 2;
+        if (brr_active) mask |= brr_channel_mask();
         if (ay_active) mask |= ay_channel_mask() << 3;
         if (sn_active) mask |= sn_channel_mask() << 4;
 

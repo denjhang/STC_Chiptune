@@ -220,6 +220,11 @@ static void pcm_env_tick(u8 ch) {
         }
         break;
     case 3: /* sustain */
+        /* SF2 旋律有循环点: 保持 level 不变, 等 note_off 进 release */
+        if (pcm_ch[ch].is_sf2) {
+            break;
+        }
+        /* 鼓声 one-shot: 衰减到 0 杀死 */
         if (lvl > 0) lvl--;
         pcm_ch[ch].level = lvl;
         if (lvl == 0) {

@@ -72,6 +72,7 @@ static struct {
     /* ADSR */
     u8  env_state;
     u8  env_cnt;
+    u8  loop_sustain;  /* 1=持续乐器 sustain 保持, 0=弹拨 sustain 衰减 */
     u8  atk, decy, sul, sus, rel;
     u8  level;
     u8  env_step;
@@ -160,24 +161,27 @@ static void brr_env_tick(u8 ch) {
     case 2: /* decay */
         if (lvl > 0) lvl--;
         brr_ch[ch].level = lvl;
-        if (lvl == brr_ch[ch].sul) {
+        if (lvl <= brr_ch[ch].sul) {
             brr_ch[ch].env_state = 3;
             brr_ch[ch].env_step = brr_ch[ch].sus;
         }
         break;
-    case 3: /* sustain */
-        /* 保持 level, 等待 note off */
+    case 3: /* sustain: 继续衰减到 0, 速度由 sus 控制 */
+        if (lvl > 0) lvl--;
+        brr_ch[ch].level = lvl;
+        if (lvl == 0) goto env_kill;
         break;
     case 4: /* release */
         if (lvl > 0) lvl--;
         brr_ch[ch].level = lvl;
-        if (lvl == 0) {
-            brr_ch[ch].step = 0;
-            brr_ch[ch].active = 0;
-            brr_active_mask &= ~(1 << ch);
-        }
+        if (lvl == 0) goto env_kill;
         break;
     }
+    return;
+env_kill:
+    brr_ch[ch].step = 0;
+    brr_ch[ch].active = 0;
+    brr_active_mask &= ~(1 << ch);
 }
 
 /* ========== 公开函数 ========== */
@@ -255,7 +259,7 @@ s16 brr_render(void) {
         vol = brr_ch[ch].vol;
         if (brr_ch[ch].env_state) {
             out >>= 8;
-            total += (s16)((long)out * vol * brr_ch[ch].level >> 10);
+            total += (s16)((long)out * brr_ch[ch].level >> 5);
         } else {
             out >>= 8;
             total += (s16)((long)out * vol >> 5);
@@ -288,10 +292,12 @@ void brr_wr(u8 addr, u8 dat) {
         brr_ch[ch].sul  = brr_tone.sul;
         brr_ch[ch].sus  = brr_tone.sus;
         brr_ch[ch].rel  = brr_tone.rel;
-        brr_ch[ch].env_state = 3;   /* 直接 sustain, 等 0x0C 调 pitch */
         brr_ch[ch].env_cnt = 250;
-        brr_ch[ch].level = 31;
-        brr_ch[ch].env_step = brr_ch[ch].sus;
+        /* 所有乐器统一完整 ADSR, sustain 保持 (loop_sustain=1) */
+        brr_ch[ch].loop_sustain = 1;
+        brr_ch[ch].env_state = 1;
+        brr_ch[ch].level = 0;
+        brr_ch[ch].env_step = brr_ch[ch].atk;
         brr_ch[ch].active = 1;
         brr_active_mask |= (1 << ch);
 
@@ -344,9 +350,9 @@ void brr_wr(u8 addr, u8 dat) {
         brr_tone.decy = brr_env_cnt[dat & 0x0F];
 
     } else if (addr == 0x19) {
-        /* sus | sul */
-        brr_tone.sul = (dat >> 4) & 0x0F;
-        brr_tone.sul = brr_tone.sul == 15 ? 0 : 31 - brr_tone.sul * 2;
+        /* sus_level(高4) | sus_speed(低4) */
+        /* sul: 0=衰减到静音, 15=满电平(level=30), 线性映射 sul*2 */
+        brr_tone.sul = ((dat >> 4) & 0x0F) * 2;
         brr_tone.sus = brr_env_cnt[dat & 0x0F];
 
     } else if (addr == 0x1A) {
