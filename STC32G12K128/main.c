@@ -50,6 +50,7 @@
 #include "gigatron.h"
 #include "wt.h"
 #include "adpcm.h"
+#include "brr.h"
 /* 暂不启用: #include "gb.h" #include "nes.h" #include "saa1099.h" */
 
 /* ========== 芯片活跃标志 ========== */
@@ -60,6 +61,7 @@ bit fm_active;
 bit gt_active;
 bit wt_active;
 bit pcm_active;
+bit brr_active;
 /* gb/nes/saa 暂不启用 */
 
 /* ========== 16kHz tick ========== */
@@ -250,6 +252,9 @@ void process_uart(void) {
             if (r >= 0x15 && r <= 0x33) {
                 pcm_active = 1;
                 pcm_wr(r, d);
+            } else if (r >= 0x34 && r <= 0x47) {
+                brr_active = 1;
+                brr_wr(r - 0x34, d);
             } else {
                 wt_active = 1;
                 wt_wr(r, d);
@@ -396,6 +401,10 @@ void timer0_isr(void) interrupt 1 {
         mix += pcm_render() * 3 / 2;
         if (!pcm_channel_mask()) pcm_active = 0;
     }
+    if (brr_active) {
+        mix += brr_render() * 3 / 2;
+        if (!brr_channel_mask()) brr_active = 0;
+    }
     if (mix > 127) mix = 127;
     if (mix < -128) mix = -128;
     out = 128 + (u8)mix;
@@ -436,6 +445,7 @@ void main(void) {
     gt_init();
     wt_init();
     pcm_init();
+    brr_init();
     /* gb/nes/saa 暂不启用 */
     test_start();
     led_tick = 0;
