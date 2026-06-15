@@ -42,15 +42,11 @@ def send(ser, addr, data):
 
 def set_step(ser, ch, step):
     step = int(step)
-    step = max(0x0020, min(step, 0x0400))
     send(ser, 0x10 + ch, (step >> 8) & 0xFF)
     send(ser, 0x14 + ch, step & 0xFF)
 
 def note_on(ser, ch, inst_idx, midi_note):
-    semi = midi_note - INSTRUMENTS[inst_idx][2]
-    step = int(round(0x0100 * (2.0 ** (semi / 12.0))))
     send(ser, 0x00 + ch, inst_idx)
-    set_step(ser, ch, step)
     send(ser, 0x0C + ch, midi_note)
 
 def note_off(ser, ch):
@@ -83,10 +79,11 @@ def main():
     time.sleep(0.1)
     ser.reset_input_buffer()
 
-    inst_name = sys.argv[1].lower() if len(sys.argv) > 1 else 'all'
+    arg = sys.argv[1] if len(sys.argv) > 1 else 'all'
+    inst_name = arg.lower() if not arg.isdigit() else arg
 
     for idx, name, native in INSTRUMENTS:
-        if inst_name != 'all' and name.lower() != inst_name:
+        if inst_name != 'all' and name.lower() != inst_name and str(idx) != inst_name:
             continue
 
         orig = native

@@ -85,7 +85,7 @@ static u8 brr_wait_cnt;
  */
 static s16 brr_decode_one(u8 inst_idx, u16 block_idx, u8 sample_idx) {
     const u8 code *p;
-    u8 header, scale, rs, ls, bp, sp, shift, b0, b1;
+    u8 header, scale, rs, ls, bp, sp;
     u16 nybbles;
     s16 raw, s;
 
@@ -95,14 +95,18 @@ static s16 brr_decode_one(u8 inst_idx, u16 block_idx, u8 sample_idx) {
     if (scale > 15) scale = 15;
     rs = brr_right_shift[scale];
     ls = brr_left_shift[scale];
-    bp = sample_idx >> 2;       /* 0-3 */
-    sp = sample_idx & 0x03;     /* 0-3 */
-    b0 = p[1 + bp*2];
-    b1 = p[2 + bp*2];
-    nybbles = ((u16)b0 << 8) | b1;
-    /* 提取第 sp 个 nybble (高位先), 符号扩展 */
-    shift = 12 - (sp << 2);
-    raw = (s16)(nybbles << shift);  /* 高 4 位 = signed nibble */
+    bp = sample_idx >> 2;       /* 0-3: 哪个 byte pair */
+    sp = sample_idx & 0x03;     /* 0-3: pair 内第几个 nybble */
+    {
+        u16 b0v, b1v;
+        b0v = p[1 + bp*2];
+        b1v = p[2 + bp*2];
+        nybbles = (b0v << 8) | b1v;
+    }
+    /* GME 方式: 左移 sp*4 位把目标 nybble 推到 bit15-12, 取高4位符号扩展 */
+    nybbles <<= (sp << 2);
+    /* nybbles 高4位 = signed nibble (bit15-12) */
+    raw = (s16)nybbles;         /* 符号扩展 */
     raw >>= rs;
     s = (s16)(((u16)raw) << ls);
     s <<= 1;   /* *2 */
@@ -250,10 +254,10 @@ s16 brr_render(void) {
 
         vol = brr_ch[ch].vol;
         if (brr_ch[ch].env_state) {
-            out >>= 5;
+            out >>= 8;
             total += (s16)((long)out * vol * brr_ch[ch].level >> 10);
         } else {
-            out >>= 5;
+            out >>= 8;
             total += (s16)((long)out * vol >> 5);
         }
     }
@@ -316,12 +320,12 @@ void brr_wr(u8 addr, u8 dat) {
             oct = (u8)diff / 12;
             r   = (u8)diff % 12;
             ratio = brr_semi_up[r];
-            brr_ch[ch].step = ratio >> oct;
+            brr_ch[ch].step = ratio << oct;
         } else {
             oct = (u8)(-diff) / 12;
             r   = (u8)(-diff) % 12;
             ratio = brr_semi_dn[r];
-            brr_ch[ch].step = ratio << oct;
+            brr_ch[ch].step = ratio >> oct;
         }
 
     } else if (addr >= 0x10 && addr <= 0x13) {
