@@ -1,8 +1,11 @@
 /*
- * STC32G144K246 USB HID + 64MHz HIRC (STC-ISP 配置) + DAC1 12-bit
+ * STC32G144K246 USB HID + 72MHz HPLL (代码配置) + DAC1 12-bit
  *
- * - 64MHz HIRC 主时钟 (STC-ISP 烧录时配置 IRCBAND/IRTRIM, 代码不动)
- * - USB HID EP1 IN/OUT 64 字节回环 (USB 走独立 IRC48M)
+ * - 主时钟: HPLL 输出 72MHz (代码切换 PLL, 必须在 USB 初始化之前)
+ *   路径: 24M HIRC -> /5 -> 4.8M -> x60 -> 288M -> /2 -> 144M -> CLKDIV=2 -> 72M
+ *   PLL 倍频编码猜测: HPLLCR 低4位 = (N - 52) / 2, 即 x60=0x04, x80=0x0e
+ *   PLL 工作范围参考: 用户测试数据 (x58~x70 对应 139~168M PLL 输出)
+ * - USB HID EP1 IN/OUT 64 字节回环 (USB 走独立 IRC48M, 不受主时钟影响)
  * - DAC1 P0.7 12-bit, PGA1 Buffer 模式
  * - Timer0 1000Hz 中断翻转 DAC (500Hz 方波试听)
  * - P2 流水灯
@@ -14,7 +17,7 @@
 #include "usb.h"
 #include "usb_req_class.h"
 
-#define MAIN_Fosc   64000000L
+#define MAIN_Fosc   72000000L
 
 #define LED P2
 
@@ -25,6 +28,30 @@ void delay_ms(unsigned int ms)
         i = MAIN_Fosc / 6000;
         while (--i);
     } while (--ms);
+}
+
+/* 主时钟切到 HPLL 72MHz. 必须在 USB 初始化之前调用, 否则 PLL 切换冲击 USB 模块 */
+void clk_init_72m(void)
+{
+    /* 关键: 先设 WTST/CLKDIV, 再切 PLL, 否则 PLL 输出后 Flash 读不出来 -> 死机 */
+    WTST = 3;                       /* FLASH 等待: 72MHz 用 WTST=3 */
+    CLKDIV = 2;                     /* 144M / 2 = 72MHz */
+
+    VRTRIM = CHIPID22;              /* 27MHz 频段的 VRTRIM 出厂校准值 */
+    IRTRIM = CHIPID12;              /* 恢复 HIRC 到 24MHz, 覆盖 ISP 设置 */
+    IRCBAND &= ~0x03;
+    IRCBAND |= 0x01;                /* 选 27MHz 频段 */
+
+    HPLLCR &= ~0x10;                /* PLL 时钟源 = HIRC */
+    HPLLPDIV = 5;                   /* 24M / 5 = 4.8M PLL 输入 */
+    HPLLCR &= ~0x0f;
+    HPLLCR |= 0x04;                 /* PLL 倍频 x60: 4.8M * 60 = 288MHz */
+    HPLLCR |= 0x80;                 /* 使能 PLL */
+    delay_ms(10);                   /* 等 PLL 锁定 */
+
+    CLKSEL &= ~0x03;                /* BASE_CLK 选 HIRC (准备给 HPLL) */
+    CLKSEL &= ~0x0c;
+    CLKSEL |= (1 << 2);             /* 主时钟源 = HPLL1 / 2 = 144MHz */
 }
 
 /* DAC1: 12-bit, P0.7 (DAC1+OP1 Buffer 模式) */
@@ -138,7 +165,10 @@ void main(void)
     P3M1 &= ~0x03;
     P3M0 &= ~0x03;
 
-    /* 顺序照搬 stc_hid-master: IRC48M -> USBCLK/USBCON -> usb_init -> DAC -> Timer0 -> EA */
+    /* 关键: PLL 切换必须在 USB 初始化之前, 否则冲击 USB 模块 (历史教训, 见 memory) */
+    clk_init_72m();
+
+    /* USB 走独立 IRC48M, 不受主时钟影响 */
     IRC48MCR = 0x80;
     while (!(IRC48MCR & 0x01));
 

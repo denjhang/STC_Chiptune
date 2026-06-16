@@ -4,6 +4,15 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 
 ## 当前状态 (2026-06-17)
 
+### 主时钟: 72MHz HPLL (代码配置) ✅
+
+- **72MHz HPLL** 通过代码 `clk_init_72m()` 配置,对标 STM32F103 主频
+- 路径: `24M HIRC → ÷5 → 4.8M → ×60 → 288M → ÷2 → 144M → CLKDIV=2 → 72M`
+- PLL 配置: HPLLPDIV=5, HPLLCR=0x84 (×60), WTST=3
+- **PLL 切换必须在 USB 初始化之前**, 否则冲击 USB 模块 (历史教训)
+- **72M 是默认 Vcore 下的稳定上限**: 76.8M 时 Flash 取指开始出错,音调反降
+- USB 走独立 IRC48M (48MHz 内部 RC), 跟主时钟无关
+
 ### USB HID 永久下载模式 ✅
 
 - **VID=0x34BF PID=0xFF01** (STC-ISP 自动下载默认 PID), product string `"STC USB HID"`, usage_page=0x0C (Consumer Control)
@@ -15,18 +24,14 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 ### DAC1 + Timer0 音频输出 ✅
 
 - **DAC1 P0.7** 12-bit, PGA1 Buffer 模式 (PGA1_CR1=0x43, PGA1_CR2=0x04, DAC1_CR=0x41)
-- **Timer0 1000Hz 中断** (1T 模式, MAIN_Fosc=64MHz ISP 配置) 翻转 DAC → 500Hz 方波试听
-- DAC1_DIV=2 → 24M/(2*4) = 3MHz 刷新率
-
-### 主时钟
-
-- **64MHz HIRC** 通过 STC-ISP 烧录时配置 (IRCBAND/IRTRIM), **代码不动**
-- USB 走独立 IRC48M (48MHz 内部 RC), 跟主时钟无关
-- ⚠️ **不能代码切 HPLL 超频**: HPLL 切换瞬间会冲击 USB 模块, 导致设备管理器"代码 10 启动失败"
+- **Timer0 1000Hz 中断** (1T 模式, MAIN_Fosc=72MHz) 翻转 DAC → 500Hz 方波试听
+- DAC1_DIV=2 → 18M/(2*4) = 2.25MHz 刷新率 (MCLK=72M 时, 经 PGA 缓冲)
 
 ### 移植来源
 
 `stc_hid-master` (https://gitee.com/) — STC32G 三合一 HID 键盘+鼠标+自定义通信。砍掉键盘/鼠标业务, 只保留自定义通信接口。
+
+PLL 配置参考: `Reference_Project/STC-MCU/STC32G144K246初始化配置/main.c`
 
 ## 关键文件
 
