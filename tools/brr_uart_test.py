@@ -35,7 +35,7 @@ INSTRUMENTS = [
 ADSR_TEMPLATES = {
     # idx  inst_idx  name        atk  dec  sul  sus  rel
     # 0    AcPiano:   (15, 3, 2, 4, 4)
-    'AcPiano':    (15, 3, 2, 4, 4),
+    'AcPiano':    (13, 3, 2, 4, 4),
     # 1    Violin:    (3,  4, 8, 5, 4)
     'Violin':     (10,  4, 2, 10, 10),
     # 2    Strings:   (3,  4, 8, 5, 4)

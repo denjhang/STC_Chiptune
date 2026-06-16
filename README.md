@@ -1,6 +1,8 @@
 # STC_Chiptune
 
-STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC 输出音频，实时模拟 6 种经典音源芯片 + ADPCM 采样。
+STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC 输出音频，实时模拟 6 种经典音源芯片 + ADPCM/BRR 采样。
+
+> 在开源社区中，同类项目通常是**单芯片复刻**（如 Teensy Audio Shield 跑 YM2149，MSP430 跑 AY-3-8910）或**PC 端软件合成**（Blaargchip、Chiptune Baker）。把 6 种不同架构的音源核心（AY8910/SN76489/FM/WT/ADPCM/BRR）塞进同一颗 38MHz 单片机，共享同一个 17640Hz ISR 混音输出 — 这种"多音源芯片硬件实时合成"在开源项目中没有先例。本质上是一颗 **"芯片音乐博物馆"**，在廉价 8 位 MCU 上同时仿真 ZX Spectrum / SMS / OPLL / Game Boy / NES / SNES 的声音，横跨 1970-2020 年代数字音频历史。
 
 **开发者**: Denjhang (硬件设计/系统架构), Claude (GLM-5) (固件开发/工具链/上位机)
 
@@ -10,6 +12,7 @@ STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC
   - [1.1 参数总览](#11-参数总览)
   - [1.2 引脚分配](#12-引脚分配)
   - [1.3 PWM DAC 输出原理](#13-pwm-dac-输出原理)
+    - [为什么是 8-bit 而非 10-bit](#为什么是-8-bit-而非-10-bit)
 - [2. 音源架构](#2-音源架构)
   - [2.1 活跃音源总览](#21-活跃音源总览)
   - [2.2 混音与处理](#22-混音与处理)
@@ -19,12 +22,26 @@ STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC
   - [2.6 Gigatron TTL 波形](#26-gigatron-ttl-波形)
   - [2.7 WT 波形表](#27-wt-波形表)
   - [2.8 ADPCM 采样](#28-adpcm-采样)
-  - [2.9 已放弃的音源](#29-已放弃的音源)
+    - [ADPCM 解码原理](#adpcm-解码原理)
+    - [鼓机序列播放器](#鼓机序列播放器-上位机)
+    - [鼓声变调](#鼓声变调)
+    - [SF2 乐器变调](#sf2-乐器变调)
+    - [SF2 乐器 ADSR 模板](#sf2-乐器-adsr-模板)
+    - [ADPCM 循环原理](#adpcm-循环原理)
+    - [ADPCM ADSR 包络原理](#adpcm-adsr-包络原理)
+  - [2.9 BRR 采样](#29-brr-采样)
+    - [BRR 编码格式](#brr-编码格式)
+    - [BRR 解码原理](#brr-解码原理-gme-spc_dspcpp-bit-exact)
+    - [BRR 乐器 ADSR 模板](#brr-乐器-adsr-模板-14-乐器)
+    - [BRR 循环原理](#brr-循环原理)
+    - [变频原理](#变频原理)
+  - [2.10 已放弃的音源](#210-已放弃的音源)
 - [3. UART 协议](#3-uart-协议)
   - [3.1 通用命令](#31-通用命令)
   - [3.2 WT 寄存器](#32-wt-寄存器)
   - [3.3 FM 寄存器](#33-fm-寄存器)
   - [3.4 ADPCM 寄存器](#34-adpcm-寄存器)
+  - [3.5 BRR 寄存器](#35-brr-寄存器)
 - [4. 上位机工具](#4-上位机工具)
   - [4.1 VGM 播放器](#41-vgm-播放器)
   - [4.2 ADPCM 鼓声测试](#42-adpcm-鼓声测试)
@@ -34,8 +51,9 @@ STC32G12K128 多音源芯片合成器。通过 UART 接收命令，PWM 8-bit DAC
   - [4.6 SF2 旋律测试](#46-sf2-旋律测试)
   - [4.7 SF2 变频扫频](#47-sf2-变频扫频)
   - [4.8 WT 扫频测试](#48-wt-扫频测试)
-  - [4.9 离线工具](#49-离线工具)
-  - [4.10 配置文件](#410-配置文件)
+  - [4.9 BRR 扫频测试](#49-brr-扫频测试)
+  - [4.10 离线工具](#410-离线工具)
+  - [4.11 配置文件](#411-配置文件)
 - [5. 工具链与编译](#5-工具链与编译)
   - [5.1 工具链](#51-工具链)
   - [5.2 编译步骤](#52-编译步骤)
@@ -113,6 +131,17 @@ Timer0 ISR (17640Hz)
 - 静音偏置 128: PWM 占空比 50% = 无音频输出
 - `OPTIMIZE(8, SPEED)`: Keil 最高优化, 确保 ISR 在 56.7us (17640Hz 周期) 内完成
 
+#### 为什么是 8-bit 而非 10-bit
+
+STC32G12K128 支持 HSPWM 高级 PWM, 理论上可将 ARR 从 255 提升到 1023 (10-bit), 动态范围从 48dB 提升到 60dB。但实测发现:
+
+- **10-bit 底噪问题**: ARR=1023 时, PWM 载波频率 = 38MHz / 1024 ≈ **37kHz**, 落在可听范围上限边缘, 产生明显的超声波底噪 (低龄人可听见)
+- **8-bit 无底噪**: ARR=255 时, 载波频率 = 38MHz / 256 ≈ **148kHz**, 远超人耳上限, 一阶 RC 即可完全滤除
+- **PLL 方案不可行**: 要在 10-bit 下保持 ≥140kHz 载波, 需要 PLL 提供 144MHz 时钟, 但 STC32G12K128 的 38MHz IRC 不是 PLL 标准输入频率, 锁频不稳定
+- **HSPWM 异步桥不可用**: 通过 HSPWMA_ADR/DAT 异步桥写寄存器会引入 `while(busy)` 等待, 在 17640Hz ISR 中阻塞导致尖叫音
+
+**结论**: 8-bit + 38MHz 是当前硬件的最优解 — 分辨率与底噪的平衡点。要突破此限制需换 STC32G144K246 (硬件 DAC, 不走 PWM)。
+
 ## 2. 音源架构
 
 ### 2.1 活跃音源总览
@@ -125,6 +154,7 @@ Timer0 ISR (17640Hz)
 | **Gigatron** | `0xB0` | 4 ch | 8820Hz | 4ch TTL 波形, 直接写 fnum |
 | **WT** (Wavetable) | `0xC0` | 4 ch | 17640Hz | 14 种波形, ADSR 包络 |
 | **ADPCM** | `0xC0` | 6 ch | 17640Hz | 鼓声 + SF2 旋律采样 |
+| **BRR** | `0xC0` | 4 ch | 17640Hz | 14 乐器 BRR 旋律采样 (SNES DSP filter=0) |
 
 ### 2.2 混音与处理
 
@@ -329,6 +359,18 @@ YM2608 ADPCM Type-A 解码, 49 级 JEDI 查表, 12-bit 累加器。
 - **8-bit 压缩比**: ~3.2:1
 - **线性插值**: `s_prev + (s_cur - s_prev) * frac >> 8`
 
+#### ADPCM 解码原理
+
+YM2608 Type-A ADPCM (自适应差分脉冲编码调制):
+
+1. **存储**: 每个采样用 4-bit nibble 表示, 2 nibble 打包进 1 byte (ROM 地址按 nibble 编址)
+2. **查表**: 以当前 `adpcm_step` (0-768) 为行, nibble 值 (0-15) 为列, 查 `jedi_table[step + nibble]` 得到差值 delta
+3. **累加**: 12-bit 累加器 `acc = CLIP12(acc + delta)`, bit11 符号扩展到 s16
+4. **自适应**: `adpcm_step += adpcm_step_inc[nib & 7]`, clamp [0, 768] — 量化误差大时 step 增大 (下次量化范围更宽), 误差小时 step 缩小 (精度更高)
+5. **输出**: acc 即解码后的 12-bit 采样值
+
+特点: 压缩比高 (~3.2:1), 算法简单 (查表+累加, 无乘除), 适合 8-bit MCU。缺点是量化噪声随频率升高而增大 (step 只能描述趋势, 不能精确编码高频)。
+
 #### 鼓声 (6种, one-shot, 无循环)
 
 | ID | 名称 | 采样长 (bytes) | 基准 Step | 说明 |
@@ -344,6 +386,33 @@ YM2608 ADPCM Type-A 解码, 49 级 JEDI 查表, 12-bit 累加器。
 - 鼓变频无上限 (无循环, ISR 无压力)
 - 包络: env_state=0 (无 ADSR), `out>>5` 增益归一化, `total += out * vol >> 5`
 
+#### 鼓机序列播放器 (上位机)
+
+鼓机由上位机 Python 驱动, 从配置文件读取 MIDI 音高映射 + 鼓声序列:
+
+- **drum.ini**: 全局配置 — MIDI 音高映射 (`bass=36`, `snare=38`...)、音量、别名 (`oh=x+closed_hihat`)
+- **drum_patterns/*.ini**: 每个风格一个文件, 包含 `[info]` (BPM/bars/swing) 和 `[pattern]` (节拍序列)
+- **节拍序列**: 每行一个 step, 可用别名 (如 `bass`, `oh`) 或 MIDI 音高数字, `.` 为空拍
+- **Swing**: `swing=50` 为 16 分音符三连音延迟百分比, 实现摇摆节奏
+
+```
+python tools/adpcm_drumkit_pro.py           # 依次播放全部风格
+python tools/adpcm_drumkit_pro.py 3          # 只播第 3 个
+python tools/adpcm_drumkit_pro.py list       # 列出全部风格
+```
+
+#### 鼓声变调
+
+通过 step 寄存器 (0x27/0x2D) 改变 ADPCM 采样播放速率, 实现鼓声变调:
+- `step = base_step * 2^(semi/12)`, semi=半音偏移, base_step 为各鼓声原始值
+- 例如底鼓 base_step=0x0100, 升一个八度: step=0x0200, 降一个八度: step=0x0080
+- 无循环, 变频无算力上限
+- step < 0x0100 时启用线性插值 (sub-sample interpolation), 音质更平滑
+
+```
+python tools/adpcm_pitch_test.py             # 6 种鼓声半音阶变调演示
+```
+
 #### SF2 旋律乐器 (5种, 有循环, DSR 包络)
 
 | ID | 名称 | 采样长 (bytes) | 循环区间 (nibbles) |
@@ -358,6 +427,25 @@ YM2608 ADPCM Type-A 解码, 49 级 JEDI 查表, 12-bit 累加器。
 - 包络: DSR only (无 Attack), note_on 直接 level=31, note_off 触发 release
 - 变频: 通过 0x27/0x2D 写 step, 上限 0x0400 (有循环, C5 以上死机)
 - 循环: loop 回绕时恢复 acc/adpcm_step 状态 (防漂移)
+
+#### SF2 乐器变调
+
+SF2 旋律乐器支持 pitch shift, 上位机计算 step:
+- `step = 0x0100 * 2^(semi/12)`, semi = midi_note - orig_pitch (采样基准音高)
+- step 范围限制 0x0020-0x0200 (0.125x ~ 2x 速率), 防止循环解码溢出
+- 播放流程: 先发 `0x15+ch` (note on, data=16+inst_idx) → 写 step → 发 `0x33` (midi note, 触发 DSR)
+
+#### SF2 乐器 ADSR 模板
+
+5 种 SF2 乐器的 DSR 参数 (atk 不使用, 设为默认值):
+
+| 乐器 | atk | dec | sul | sus | rel | 特征 |
+|------|-----|-----|-----|-----|-----|------|
+| Piano | 3 | 4 | 8 | 5 | 4 | 中等衰减, 中 sustain |
+| SlapBass | 2 | 9 | 14 | 14 | 4 | 快衰减, 高 sustain (近保持) |
+| Guitar | 2 | 5 | 7 | 7 | 6 | 均衡衰减, 中等释放 |
+| Oboe | 3 | 5 | 7 | 7 | 7 | 类似 Guitar, 释放稍慢 |
+| Harp | 2 | 6 | 7 | 7 | 6 | 均衡, 类似 Guitar |
 
 #### ADPCM 通道分配
 
@@ -379,7 +467,180 @@ YM2608 ADPCM Type-A 解码, 49 级 JEDI 查表, 12-bit 累加器。
 包络速度表: `pcm_env_cnt[16] = {0,1,2,3,4,5,7,10,13,20,29,43,64,86,128,255}`
 Round-robin: 每 4 tick 轮一圈 (6 通道)。
 
-### 2.9 已放弃的音源
+#### ADPCM 循环原理
+
+ADPCM 解码是有状态的 (12-bit acc + step index 随采样推进变化), 循环不能简单跳回地址。
+
+**SF2 旋律乐器循环方式**:
+- ROM 中预存每个乐器的 `loop_start`, `loop_end` (nibble 地址) 和 `loop_acc`, `loop_step` (循环起点的解码器状态)
+- 播放指针超过 loop_end 时: `addr = loop_addr; acc = loop_acc; adpcm_step = loop_step`
+- 恢复解码器状态后, 循环点处的波形完美衔接, 无 pop/click
+
+**鼓声**: one-shot, 无循环, 播放到 end_addr 自动停止并释放通道。
+
+#### ADPCM ADSR 包络原理
+
+ADPCM/SF2/BRR 三者共用相同的 ADSR 架构 (env_state 有限状态机):
+
+```
+note_on → Attack(1) → Decay(2) → Sustain(3) → note_off → Release(4) → level=0 释放通道
+```
+
+**速度控制** (env_cnt/step 计数器机制):
+- `env_step` = 当前阶段的衰减间隔 (从 env_cnt 表查得)
+- 每包络 tick: `env_cnt -= env_step`; 若 env_cnt >= env_step 则跳过, 否则 level 变化一步
+- 数值越大 = 间隔越短 = 衰减越快
+
+**SF2 特殊行为**: note_on 直接进入 Sustain (无 Attack), Sustain 阶段 **保持** level 不变 (不衰减), 等 note_off 触发 Release。这是 SF2 旋律乐器的设计: 有循环点支撑, 适合无限延音。
+
+**BRR 特殊行为**: 完整 ADSR (有 Attack), Sustain 阶段 **继续衰减到 0** (非保持), sus 控制衰减速度。所有乐器最终都会自动衰减到静音并释放通道, 无需手动 note_off。
+
+### 2.9 BRR 采样 (SNES DSP filter=0)
+
+BRR (Binary Resonance Representation) 4ch 旋律采样合成, 参考 GME Spc_Dsp.cpp bit-exact 实现。
+
+#### 架构
+
+- **4 通道**: 独立循环/频率/包络/音量
+- **14 种乐器**: 从 YRW801 (OPL4) ROM XI 文件生成 (gen_brr_rom.py)
+- **编码格式**: BRR filter=0 (无状态, 9 字节/block, 16 采样/block, ~56% 压缩)
+- **采样率**: 17640Hz (MCU DAC 甜点)
+- **GME 精确解码**: `s = ((nibble >> rs) << ls) * 2`, rs/ls 查表
+
+#### BRR 编码格式
+
+SNES SPC700 DSP 的 BRR (Binary Resonance Representation) 格式:
+
+- **Block 结构**: 每个 block 9 字节 = 1 byte header + 8 byte data
+- **Header**: 高 4 bit = `scale` (0-15, 量化阶数), bit3 = loop 标志 (本项目固定 filter=0, 此位不使用)
+- **Data**: 8 bytes = 16 nibble (每个 nibble 4-bit signed, 编码 16 个采样)
+- **压缩比**: 16-bit PCM → 4-bit nibble ≈ 4:1, 加 header 开销 ≈ 3.5:1
+- **Filter**: filter=0 (本项目选用), 无状态, 每个采样独立解码, 无需前一采样的滤波器状态
+
+#### BRR 解码原理 (GME Spc_Dsp.cpp bit-exact)
+
+本项目采用 filter=0 (最简模式, 无状态滤波):
+
+1. **提取 nibble**: 从 block 的 8 byte data 中, 按采样索引定位 byte pair 和 pair 内位置
+   - `bp = sample_idx >> 2` (0-3: 第几个 byte pair)
+   - `sp = sample_idx & 0x03` (0-3: pair 内第几个 nibble)
+2. **符号扩展**: `nybbles <<= (sp << 4)`, 高 4 bit 符号扩展为 s16
+3. **缩放**: `raw >>= rs` (右移消除 scale 量化), `s = raw << ls` (左移恢复动态范围)
+4. **增益**: `s <<= 1` (*2 增益补偿), clamp [-32768, 32767]
+5. **输出**: s 即解码后的 16-bit 采样值
+
+shift 表 (16 级 scale):
+- `brr_right_shift[16] = {13,12,12,...,16,16,16}` — scale 越大右移越多, 量化噪声越大
+- `brr_left_shift[16] = {0,0,1,2,...,11,11,11,11}` — 左移补偿, scale 越大左移越多
+
+**vs ADPCM 对比**:
+| | ADPCM (YM2608) | BRR (SNES DSP) |
+|--|----------------|----------------|
+| 压缩单位 | nibble (4-bit) | block (9 bytes/16 samples) |
+| 有状态 | 是 (acc + step) | 否 (filter=0) |
+| 循环复杂度 | 需恢复 acc+step | 简单地址跳回 |
+| 量化噪声 | 自适应 (低频好) | 固定 scale (平坦) |
+| MCU 算力 | 查表+累加 (轻量) | 移位+查表 (轻量) |
+
+#### 乐器列表
+
+| # | 名称 | native_midi | ROM 大小 | 特征 |
+|---|------|-----------|---------|------|
+| 0 | AcPiano | 51 | 8289B | 明亮原声钢琴 (s2) |
+| 1 | Violin | 45 | 1560B | 小提琴 |
+| 2 | Strings | 42 | 4944B | 弦乐组 |
+| 3 | Harp | 34 | 2256B | 竖琴 |
+| 4 | Accordion | 38 | 1764B | 手风琴 |
+| 5 | Organ | 63 | 648B | 管风琴 |
+| 6 | Fretless | 46 | 1792B | 无品贝斯 |
+| 7 | JazzGtr | 58 | 504B | 爵士吉他 |
+| 8 | DistGtr | 59 | 576B | 失真吉他 |
+| 9 | Celesta | 30 | 2904B | 钢片琴 |
+| 10 | Flute | 42 | 1764B | 长笛 |
+| 11 | Recorder | 43 | 3168B | 竖笛 |
+| 12 | Oboe | 40 | 1404B | 双簧管 |
+| 13 | Clarinet | 51 | 1344B | 单簧管 |
+
+ROM 总计 ~23KB, 全部 seam=0 (完美循环)。
+
+#### ADSR 包络
+
+4 态: Attack → Decay → Sustain → Release。
+速度表 `brr_env_cnt[16]` (同 FM/WT)。
+Round-robin: 每 4 tick 轮一圈 (4 通道)。
+
+**ADSR 直接控制音量**: `out * level >> 5`, 不经过 vol。
+
+| 参数 | 地址 | 含义 |
+|------|------|------|
+| atk (高4) \| dec (低4) | 0x18 | attack/decay 速度 |
+| sul (高4) \| sus (低4) | 0x19 | decay 终止目标 (sul*2=level) / sustain 衰减速度 |
+| rel | 0x1A | release 速度 |
+
+**关键行为**: sustain 阶段继续衰减到 0 (非保持), sus 控制衰减速度。level=0 自动释放通道。
+
+#### BRR 乐器 ADSR 模板 (14 乐器)
+
+按 ROM 乐器编号排序, 均已调试验证 (atk/dec/sul/sus/rel 范围 0-15, 索引 env_cnt[], 数值越大越快):
+
+| # | 乐器 | atk | dec | sul | sus | rel | 特征 |
+|---|------|-----|-----|-----|-----|-----|------|
+| 0 | AcPiano | 13 | 3 | 2 | 4 | 4 | 瞬起音, 快衰减, 低终止, 中持续/释放 |
+| 1 | Violin | 10 | 4 | 2 | 10 | 10 | 中起音, 慢衰减/持续/释放 (持续乐) |
+| 2 | Strings | 10 | 4 | 2 | 10 | 10 | 同 Violin |
+| 3 | Harp | 15 | 8 | 2 | 4 | 4 | 瞬起音, 中衰减, 类似钢琴 |
+| 4 | Accordion | 7 | 3 | 8 | 4 | 4 | 中起音, 快衰减, 高终止 (保持感) |
+| 5 | Organ | 5 | 6 | 12 | 6 | 5 | 慢起音, 中衰减, 高终止 (持续) |
+| 6 | Fretless | 15 | 3 | 12 | 2 | 2 | 瞬起音, 快衰减, 高终止, 极快持续/释放 |
+| 7 | JazzGtr | 15 | 3 | 12 | 2 | 2 | 同 Fretless |
+| 8 | DistGtr | 15 | 8 | 2 | 4 | 4 | 瞬起音, 中衰减, 低终止 |
+| 9 | Celesta | 15 | 10 | 6 | 2 | 2 | 瞬起音, 慢衰减, 中终止, 极快持续/释放 |
+| 10 | Flute | 3 | 4 | 9 | 5 | 4 | 慢起音, 中衰减, 高终止 (持续) |
+| 11 | Recorder | 10 | 4 | 2 | 10 | 10 | 中起音, 慢衰减/持续/释放 |
+| 12 | Oboe | 10 | 4 | 2 | 10 | 10 | 同 Recorder |
+| 13 | Clarinet | 10 | 4 | 2 | 10 | 10 | 同 Recorder |
+
+持续乐器 (Violin/Strings/Organ/Flute/Recorder/Oboe/Clarinet): sul 低 + sus/rel 慢 → sustain 阶段缓慢衰减, 延音长。
+弹拨乐器 (AcPiano/Harp/DistGtr): sul 低 + dec 快 → 短促衰减, 延音短。
+
+#### BRR 循环原理
+
+BRR filter=0 是无状态解码, 循环比 ADPCM 简单得多 — 只需跳回 block 地址, 无需恢复解码器状态。
+
+**循环方式**: ROM 中每个乐器存储 `n_blocks` (总 block 数) 和 `loop_block` (循环起始 block)。播放指针到达末尾时:
+```
+if (block_idx >= n_blocks) block_idx = loop_block;
+```
+直接跳回, 下一采样继续从 loop_block 的 sample 0 解码, 波形无缝衔接。
+
+**seam=0 验证**: ROM 生成时 (gen_brr_rom.py), 对每个乐器的循环点进行交叉淡出处理, 验证循环起止处的采样差值为 0 (seam=0), 确保无 pop/click。
+
+**vs ADPCM 循环**: ADPCM 需要同时恢复 `acc` 和 `adpcm_step` 两个状态量才能无缝循环; BRR filter=0 无状态, 一个地址跳回就完成循环, 这也是本项目选择 BRR 而非 ADPCM 做旋律采样的原因之一。
+
+#### 变频原理
+
+变频通过改变采样播放速率实现, 所有采样模块共用同一机制:
+
+**8.8 fixed-point step**: step 值的高 8 位 = 每采样周期推进几个采样, 低 8 位 = 小数部分 (用于线性插值)。
+- `step = 0x0100` = 原速 (每 tick 推进 1.0 个采样)
+- `step = 0x0200` = 2x 速 (高一个八度)
+- `step = 0x0080` = 0.5x 速 (低一个八度)
+
+**半音步进**: `step = 0x0100 * 2^(semi/12)`, 上位机 Python 计算后写入 MCU step 寄存器。
+MCU 端也预存了 12 级半音查表 (`brr_semi_up[12]`, `brr_semi_dn[12]`), 可根据 midi note 差值直接查表乘以八度偏移。
+
+**线性插值**: 当 step < 0x0100 (降调) 时, frac 部分用于相邻采样间线性插值:
+`out = s_prev + (s_cur - s_prev) * frac >> 8`
+避免降调时因采样跳步造成的锯齿噪声。
+
+#### ROM 生成工具链
+
+```
+XI 文件 → resample 17640Hz → PCM crossfade → BRR encode → BRR crossfade → verify seam=0
+```
+详见 [docs/xi_brr_workflow.md](docs/xi_brr_workflow.md) 和 [docs/brr_adsr_debug.md](docs/brr_adsr_debug.md)。
+
+### 2.10 已放弃的音源
 
 以下 4 种音源在 STC8H8K64U 原型阶段实现, 迁移至 STC32G 后因资源/优先级考虑未启用。源码文件仍保留于 `STC32G12K128/` 目录, `main.c` 中 `#include` 已注释, UART 命令分支保留但无效。
 
@@ -406,9 +667,11 @@ Round-robin: 每 4 tick 轮一圈 (6 通道)。
 | AY8910 | `[0xA0][reg][data]` | 无 | 无 | 3 字节, 透明 |
 | FM | `[0x51][addr][data][xor]` | XOR | 0xAA/0xFF | 4 字节 |
 | Gigatron | `[0xB0][addr][data][xor]` | XOR | 丢弃 | 4 字节 |
-| WT/ADPCM | `[0xC0][addr][data][xor]` | XOR | 0xAA/0xFF | 4 字节 |
+| WT/ADPCM/BRR | `[0xC0][addr][data][xor]` | XOR | 0xAA/0xFF | 4 字节, addr 范围区分模块 |
 
 ### 3.2 WT 寄存器 (0xC0, addr 0x00-0x14)
+
+WT 和 ADPCM/BRR 共用 0xC0 前缀, main.c 按 addr 范围路由: 0x00-0x14→WT, 0x15-0x33→ADPCM, 0x34-0x4F→BRR。
 
 | 地址 | 说明 |
 |------|------|
@@ -440,6 +703,20 @@ Round-robin: 每 4 tick 轮一圈 (6 通道)。
 | 0x27-0x2C | ch0-5 Step Hi (变频步进高位) |
 | 0x2D-0x32 | ch0-5 Step Lo (变频步进低位) |
 | 0x33 | MIDI Note (紧跟 SF2 Note On, 24-95) |
+
+### 3.5 BRR 寄存器 (0xC0, addr 0x34-0x4F)
+
+| 地址 | 说明 |
+|------|------|
+| 0x34-0x37 | ch0-3 Note On (data: 0-13=乐器索引) |
+| 0x38-0x3B | ch0-3 Note Off |
+| 0x3C-0x3F | ch0-3 Volume (0-31) |
+| 0x40-0x43 | ch0-3 MIDI Note (24-127) |
+| 0x44-0x47 | ch0-3 Step Hi (8.8 fp) |
+| 0x48-0x4B | ch0-3 Step Lo (8.8 fp) |
+| 0x4C | ADSR atk\|dec |
+| 0x4D | ADSR sul\|sus |
+| 0x4E | ADSR rel |
 
 ---
 
@@ -526,7 +803,15 @@ python tools/wt_scale_test.py                 # 14 种波形 C2↔C6 循环扫�
 python tools/wt_pcm_debug.py                  # WT+ADPCM 简单测试
 ```
 
-### 4.9 离线工具 (无需串口)
+### 4.9 BRR 扫频测试
+
+```
+python tools/brr_uart_test.py                 # 14 乐器扫频 (上行→下行, 4ch 轮转)
+python tools/brr_uart_test.py 0               # 只测 AcPiano (按编号)
+python tools/brr_uart_test.py violin           # 只测 Violin (按名称)
+```
+
+### 4.10 离线工具 (无需串口)
 
 **SF2 采样处理链**:
 ```
@@ -559,6 +844,8 @@ python tools/polyphone_loop.py                 # 多点质量评分 + 交叉淡�
 ```
 python tools/brr_test.py                      # BRR 编解码验证 (GME Spc_Dsp 兼容)
 python tools/brr_loop.py                      # BRR 块状循环模拟
+python tools/gen_brr_rom.py                  # XI → BRR ROM C header 生成 (14 乐器)
+python tools/brr_uart_test.py                 # BRR 14乐器扫频测试 (串口)
 ```
 
 **XI 格式 (YRW801/OPL4 波形)**:
@@ -578,7 +865,7 @@ python tools/piano_pitch_sweep.py             # Grand Piano C3 采样 C1-C8 扫�
 python tools/gen_scc_table.py                 # SCC 步进查表生成 (STC8H 历史遗留)
 ```
 
-### 4.10 配置文件
+### 4.11 配置文件
 
 | 文件 | 说明 |
 |------|------|
@@ -596,6 +883,10 @@ python tools/gen_scc_table.py                 # SCC 步进查表生成 (STC8H �
 | HEX 转换 | `D:/Keil_v5/C251/BIN/OH251.exe` | 输出 Intel HEX |
 | 烧录 | STC-ISP | 手动烧录 (串口 P3.4/P3.5) |
 | 上位机 | Python 3 + pyserial | 测试/播放工具 |
+
+**为什么是 Keil C251 而非 SDCC/PIO**:
+
+STC32G12K128 使用 32 位 1T 8051 内核，只有 Keil C251 支持其 C251 扩展指令集（32 位运算、32-bit 位移等）。`OPTIMIZE(8, SPEED)` 极限优化下的代码密度和执行效率远超 SDCC 对 8051 的支持。更重要的是 **Keil 允许命令行调用**（`C251.EXE` / `L251.EXE` / `OH251.EXE`），使得 Python → 编译 → hex 的全自动化流水线成为可能，这是本项目能走到 BRR 14 乐器 ROM 自动生成 + 编译 + 烧录的先决条件。SDCC 不支持 C251 扩展指令集，PIO 没有 Keil C251，在此平台上基本等于不可用。
 
 ### 5.2 编译选项
 
@@ -616,14 +907,15 @@ D:/Keil_v5/C251/BIN/C251.exe fm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe gigatron.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe wt.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe adpcm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
+D:/Keil_v5/C251/BIN/C251.exe brr.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
-D:/Keil_v5/C251/BIN/L251.exe ay8910.OBJ,sn76489.OBJ,fm.OBJ,gigatron.OBJ,wt.OBJ,adpcm.OBJ,main.OBJ TO build/MAIN 2>&1
+D:/Keil_v5/C251/BIN/L251.exe ay8910.OBJ,sn76489.OBJ,fm.OBJ,gigatron.OBJ,wt.OBJ,adpcm.OBJ,brr.OBJ,main.OBJ TO build/MAIN 2>&1
 D:/Keil_v5/C251/BIN/OH251.exe build/MAIN HEXFILE\(build/MAIN.hex\) 2>&1
 ```
 
 **方法二: 一行命令 (bash)**
 ```bash
-cd STC32G12K128 && rm -f *.OBJ ; D:/Keil_v5/C251/BIN/C251.exe ay8910.c "LARGE" "OPTIMIZE(8,SPEED)" "NOALIAS" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe sn76489.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe gigatron.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe fm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe wt.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe adpcm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/L251.exe ay8910.OBJ,sn76489.OBJ,gigatron.OBJ,fm.OBJ,wt.OBJ,adpcm.OBJ,main.OBJ TO build/MAIN 2>&1 ; D:/Keil_v5/C251/BIN/OH251.exe build/MAIN HEXFILE\(build/MAIN.hex\) 2>&1 ; echo "BUILD DONE"
+cd STC32G12K128 && rm -f *.OBJ ; D:/Keil_v5/C251/BIN/C251.exe ay8910.c "LARGE" "OPTIMIZE(8,SPEED)" "NOALIAS" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe sn76489.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe gigatron.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe fm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe wt.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe adpcm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe brr.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1 ; D:/Keil_v5/C251/BIN/l251.exe ay8910.OBJ,sn76489.OBJ,fm.OBJ,gigatron.OBJ,wt.OBJ,adpcm.OBJ,brr.OBJ,main.OBJ TO build/MAIN 2>&1 ; D:/Keil_v5/C251/BIN/OH251.exe build/MAIN HEXFILE\(build/MAIN.hex\) 2>&1 ; echo "BUILD DONE"
 ```
 
 ### 5.4 编译注意事项
@@ -648,6 +940,8 @@ STC_Chiptune/
 │   ├── gigatron.c/h          # Gigatron TTL 波形 (4ch, 256B共享表)
 │   ├── wt.c/h                # Wavetable 合成 (4ch / 14波形 / ADSR)
 │   ├── adpcm.c/h             # ADPCM 解码 (6ch: 鼓声+SF2旋律)
+│   ├── brr.c/h               # BRR 4ch 旋律采样 (SNES DSP filter=0)
+│   ├── brr_rom.h             # BRR ROM (14 乐器, ~23KB, seam=0)
 │   ├── types.h               # 共享类型定义
 │   ├── sf2_rom.h             # SF2 采样 ROM (5乐器, 11936B)
 │   ├── fmopn_2608rom.h       # YM2608 ADPCM 鼓声 ROM + JEDI表
@@ -745,6 +1039,16 @@ STC32G C251, 38MHz, 128KB Flash, 4KB SRAM + 8KB XRAM。
 - ini 驱动: drum.ini (映射+别名+音量) + drum_patterns/ (独立风格)
 - MIDI GM Percussion 35-81 全覆盖
 - 19 个变频别名快捷键
+
+### 7.6 Phase 11: BRR 旋律采样
+
+- 实现 SNES DSP BRR filter=0 解码器 (GME Spcc_Dsp.cpp bit-exact)
+- 从 YRW801 XI 文件生成 14 乐器 ROM (~23KB, 全部 seam=0)
+- BRR ROM 生成链: resample → PCM crossfade → BRR encode → BRR crossfade → verify
+- ADSR 包络 (参考 Arduino wavetable synth 实现)
+- ADSR 调试修复 5 个 bug (路由范围/音量公式/sul映射/sustain行为/通道释放)
+- 14 乐器 ADSR 模板调试验证 (钢琴/提琴/吉他/钢片琴等)
+- 变频: 8.8 fixed-point step + 半音步进表, 上限 ~+6 半音
 
 ## 8. 参考项目与移植说明
 

@@ -85,7 +85,7 @@ static u16 task_div;
 #define ENO1P       0x01
 
 /* ========== PWMA PWM1 -> P2.0, 8-bit DAC ========== */
-void pwma_dac_init(void) {
+void hs_pwm_dac_init(void) {
     PWMA_ENO   = 0x00;
     PWMA_CCER1 = 0x00;
     PWMA_CCER2 = 0x00;
@@ -437,7 +437,7 @@ void main(void) {
 
     P0 = 0xFF;
 
-    pwma_dac_init();
+    hs_pwm_dac_init();
     UART1_config();
     /* scc_init(); */  /* SCC 已剔除 */
     ay_init();

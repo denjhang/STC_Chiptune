@@ -14,3 +14,23 @@
 *.CRF
 *.hex
 example/
+
+# Python
+__pycache__/
+*.pyc
+
+# STC release zips (历史备份, 用户已移到项目外, 不入 git)
+*.zip
+
+# Keil misc
+*.cfg
+link.args
+
+# STC-ISP project files
+*.stc
+
+# Tools output (生成产物, 不入 git)
+tools/adpcm_wav/
+tools/brr_wav/
+tools/xi_out/
+tools/yrw801_out/

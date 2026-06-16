@@ -18,6 +18,8 @@ FM 直接测试 — tools/vgm_player.py
 
 
 python tools/vgm_player.py --fm-note 0 60 --baud 115200   # FM ch0 C4
+
+cd ../tools
 python tools/vgm_player.py --fm-scale --baud 115200       # FM 扫频 C1-C9
 WT 直接测试 — tools/vgm_player.py
 
@@ -48,6 +50,10 @@ ADPCM 变频扫频 — tools/sf2_sweep.py
 python tools/sf2_sweep.py                                 # 所有乐器
 python tools/sf2_sweep.py piano                           # 钢琴
 
+
+python tools/brr_uart_test.py 1
+
+python tools/brr_uart_test.py
 
 
 

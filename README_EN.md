@@ -10,6 +10,7 @@ Multi-source chiptune synthesizer on STC32G12K128. Receives commands via UART, o
   - [1.1 Overview](#11-overview)
   - [1.2 Pin Assignment](#12-pin-assignment)
   - [1.3 PWM DAC Output](#13-pwm-dac-output)
+    - [Why 8-bit not 10-bit](#why-8-bit-not-10-bit)
 - [2. Sound Source Architecture](#2-sound-source-architecture)
   - [2.1 Active Sources Overview](#21-active-sources-overview)
   - [2.2 Mixing & Processing](#22-mixing--processing)
@@ -19,12 +20,26 @@ Multi-source chiptune synthesizer on STC32G12K128. Receives commands via UART, o
   - [2.6 Gigatron TTL Waveform](#26-gigatron-ttl-waveform)
   - [2.7 WT Wavetable](#27-wt-wavetable)
   - [2.8 ADPCM Sampling](#28-adpcm-sampling)
-  - [2.9 Abandoned Sound Sources](#29-abandoned-sound-sources)
+    - [ADPCM Decode Principle](#adpcm-decode-principle)
+    - [Drum Machine Sequencer](#drum-machine-sequencer)
+    - [Drum Pitch Shift](#drum-pitch-shift)
+    - [SF2 Pitch Shift](#sf2-pitch-shift)
+    - [SF2 Instrument ADSR Templates](#sf2-instrument-adsr-templates)
+    - [ADPCM Loop Principle](#adpcm-loop-principle)
+    - [ADPCM ADSR Envelope Principle](#adpcm-adsr-envelope-principle)
+  - [2.9 BRR Sampling (SNES DSP filter=0)](#29-brr-sampling-snes-dsp-filter0)
+    - [BRR Encoding Format](#brr-encoding-format)
+    - [BRR Decode Principle](#brr-decode-principle-gme-spc_dspcpp-bit-exact)
+    - [BRR Instrument ADSR Templates](#brr-instrument-adsr-templates-14-instruments)
+    - [BRR Loop Principle](#brr-loop-principle)
+    - [Pitch Shift Principle](#pitch-shift-principle)
+  - [2.10 Abandoned Sound Sources](#210-abandoned-sound-sources)
 - [3. UART Protocol](#3-uart-protocol)
   - [3.1 General Commands](#31-general-commands)
   - [3.2 WT Registers](#32-wt-registers)
   - [3.3 FM Registers](#33-fm-registers)
   - [3.4 ADPCM Registers](#34-adpcm-registers)
+  - [3.5 BRR Registers](#35-brr-registers)
 - [4. Host Tools](#4-host-tools)
   - [4.1 VGM Player](#41-vgm-player)
   - [4.2 ADPCM Drum Tests](#42-adpcm-drum-tests)
@@ -34,8 +49,9 @@ Multi-source chiptune synthesizer on STC32G12K128. Receives commands via UART, o
   - [4.6 SF2 Melody Tests](#46-sf2-melody-tests)
   - [4.7 SF2 Pitch Sweep](#47-sf2-pitch-sweep)
   - [4.8 WT Sweep Test](#48-wt-sweep-test)
-  - [4.9 Offline Tools](#49-offline-tools)
-  - [4.10 Config Files](#410-config-files)
+  - [4.9 BRR Sweep Test](#49-brr-sweep-test)
+  - [4.10 Offline Tools](#410-offline-tools)
+  - [4.11 Config Files](#411-config-files)
 - [5. Toolchain & Build](#5-toolchain--build)
   - [5.1 Toolchain](#51-toolchain)
   - [5.2 Build Options](#52-build-options)
@@ -114,6 +130,17 @@ Timer0 ISR (17640Hz)
 - Silence bias 128: PWM duty 50% = no audio output
 - `OPTIMIZE(8, SPEED)`: Keil max optimization, ensures ISR completes within 56.7us (17640Hz period)
 
+#### Why 8-bit not 10-bit
+
+STC32G12K128 supports HSPWM (High-Speed PWM) that could theoretically increase ARR from 255 to 1023 (10-bit), improving dynamic range from 48dB to 60dB. However, testing revealed:
+
+- **10-bit noise floor**: ARR=1023 gives carrier = 38MHz / 1024 = **37kHz**, right at the edge of audible range, producing noticeable ultrasonic noise floor (young people can hear it)
+- **8-bit is clean**: ARR=255 gives carrier = 38MHz / 256 = **148kHz**, well above human hearing, a simple 1st-order RC filter completely removes it
+- **PLL not feasible**: To maintain >=140kHz carrier at 10-bit, PLL must provide 144MHz clock, but STC32G12K128's 38MHz IRC is not a standard PLL input frequency, PLL lock is unstable
+- **HSPWM async bridge unusable**: Writing via HSPWMA_ADR/DAT async bridge introduces `while(busy)` waits that block inside the 17640Hz ISR, causing audio glitches
+
+**Conclusion**: 8-bit + 38MHz is the optimal balance for this hardware. To break this limitation, upgrade to STC32G144K246 (hardware DAC, no PWM involved).
+
 ## 2. Sound Source Architecture
 
 ### 2.1 Active Sources Overview
@@ -126,12 +153,13 @@ Timer0 ISR (17640Hz)
 | **Gigatron** | `0xB0` | 4 ch | 8820Hz | 4ch TTL waveform, direct fnum write |
 | **WT** (Wavetable) | `0xC0` | 4 ch | 17640Hz | 14 waveforms, ADSR envelope |
 | **ADPCM** | `0xC0` | 6 ch | 17640Hz | Drums + SF2 melodic samples |
+| **BRR** | `0xC0` | 4 ch | 17640Hz | 14 instruments BRR melodic samples (SNES DSP filter=0) |
 
 ### 2.2 Mixing & Processing
 
 Timer0 ISR at 17640Hz renders all active sources every tick, sums and clamps to 8-bit DAC:
 ```
-mix = ay*1.5 + sn*0.75 + fm*1.5 + gt*1.5 + wt*1.5 + adpcm*1.5
+mix = ay*1.5 + sn*0.75 + fm*1.5 + gt*1.5 + wt*1.5 + adpcm*1.5 + brr*1.5
 clamp(-128, 127) -> 128+offset -> PWM
 ```
 
@@ -330,6 +358,47 @@ YM2608 ADPCM Type-A decode, 49-level JEDI lookup, 12-bit accumulator.
 - **8-bit compression ratio**: ~3.2:1
 - **Linear interpolation**: `s_prev + (s_cur - s_prev) * frac >> 8`
 
+#### ADPCM Decode Principle
+
+YM2608 Type-A ADPCM (Adaptive Differential Pulse Code Modulation):
+
+1. **Storage**: Each sample encoded as 4-bit nibble, 2 nibbles packed per byte (ROM addressed by nibble)
+2. **Lookup**: Uses current `adpcm_step` (0-768) as row, nibble value (0-15) as column, looks up `jedi_table[step + nibble]` for delta
+3. **Accumulate**: 12-bit accumulator `acc = CLIP12(acc + delta)`, bit11 sign-extends to s16
+4. **Adaptive**: `adpcm_step += adpcm_step_inc[nib & 7]`, clamped [0, 768] — large quantization error increases step (wider range next time), small error decreases step (higher precision)
+5. **Output**: acc is the decoded 12-bit sample value
+
+Pros: High compression (~3.2:1), simple algorithm (table lookup + accumulate, no multiply/divide), ideal for 8-bit MCU. Cons: quantization noise increases with frequency (step can only capture trends, not encode high-freq precisely).
+
+#### Drum Machine Sequencer (Host-driven)
+
+The drum machine is host-driven by Python, reading MIDI mapping + drum sequences from config files:
+
+- **drum.ini**: Global config — MIDI pitch mapping (`bass=36`, `snare=38`...), volume, aliases (`oh=x+closed_hihat`)
+- **drum_patterns/*.ini**: One file per style, with `[info]` (BPM/bars/swing) and `[pattern]` (beat sequence)
+- **Beat sequence**: One step per line, using aliases (`bass`, `oh`) or MIDI pitch numbers, `.` for rest
+- **Swing**: `swing=50` = 16th-note triplet delay percentage, creates swing feel
+
+```
+python tools/adpcm_drumkit_pro.py           # Play all styles
+python tools/adpcm_drumkit_pro.py 3          # Play style #3
+python tools/adpcm_drumkit_pro.py list       # List all styles
+```
+
+#### Drum Pitch Shift
+
+Drum pitch shift via step register (0x27/0x2D) changes ADPCM playback rate:
+- `step = base_step * 2^(semi/12)`, semi = semitone offset, base_step = original value per drum
+- E.g. Bass Drum base_step=0x0100, up one octave: step=0x0200, down one octave: step=0x0080
+- No loop, no CPU limit on pitch shift range
+- When step < 0x0100, linear interpolation enabled (sub-sample), smoother quality
+
+```
+python tools/adpcm_pitch_test.py             # 6 drums semitone pitch sweep
+```
+
+#### SF2 Melodic Instruments (5 types, looped, DSR envelope)
+
 #### Drums (6 types, one-shot, no loop)
 
 | ID | Name | Sample Length (bytes) | Base Step | Description |
@@ -360,6 +429,25 @@ YM2608 ADPCM Type-A decode, 49-level JEDI lookup, 12-bit accumulator.
 - Pitch shift: via 0x27/0x2D, upper limit 0x0400 (loop present, C5+ causes crash)
 - Loop: loop wrap restores acc/adpcm_step state (prevents drift)
 
+#### SF2 Pitch Shift
+
+SF2 melodic instruments support pitch shift, computed by host:
+- `step = 0x0100 * 2^(semi/12)`, semi = midi_note - orig_pitch (sample base pitch)
+- Step range clamped 0x0020-0x0200 (0.125x ~ 2x rate), prevents loop decode overflow
+- Play sequence: send `0x15+ch` (note on, data=16+inst_idx) -> write step -> send `0x33` (midi note, triggers DSR)
+
+#### SF2 Instrument ADSR Templates
+
+DSR parameters for 5 SF2 instruments (atk unused, set to default):
+
+| Instrument | atk | dec | sul | sus | rel | Characteristics |
+|------------|-----|-----|-----|-----|-----|----------------|
+| Piano | 3 | 4 | 8 | 5 | 4 | Medium decay, mid sustain |
+| SlapBass | 2 | 9 | 14 | 14 | 4 | Fast decay, high sustain (near-hold) |
+| Guitar | 2 | 5 | 7 | 7 | 6 | Balanced, medium release |
+| Oboe | 3 | 5 | 7 | 7 | 7 | Similar to Guitar, slightly slower release |
+| Harp | 2 | 6 | 7 | 7 | 6 | Balanced, similar to Guitar |
+
 #### ADPCM Channel Assignment
 
 6 channels multiplexed: ch0-5 can play drums or SF2 melody simultaneously.
@@ -380,7 +468,180 @@ Distinguished by data range:
 Speed table: `pcm_env_cnt[16] = {0,1,2,3,4,5,7,10,13,20,29,43,64,86,128,255}`
 Round-robin: full cycle every 4 ticks (6 channels).
 
-### 2.9 Abandoned Sound Sources
+#### ADPCM Loop Principle
+
+ADPCM decode is stateful (12-bit acc + step index change with each sample), so looping cannot simply jump back to an address.
+
+**SF2 melodic instrument looping**:
+- ROM stores `loop_start`, `loop_end` (nibble addresses) and `loop_acc`, `loop_step` (decoder state at loop point) per instrument
+- When play pointer exceeds loop_end: `addr = loop_addr; acc = loop_acc; adpcm_step = loop_step`
+- Restoring decoder state ensures perfect waveform continuity at loop point, no pop/click
+
+**Drums**: one-shot, no loop, auto-stops at end_addr and releases channel.
+
+#### ADPCM ADSR Envelope Principle
+
+ADPCM/SF2/BRR share the same ADSR architecture (env_state finite state machine):
+
+```
+note_on -> Attack(1) -> Decay(2) -> Sustain(3) -> note_off -> Release(4) -> level=0 release channel
+```
+
+**Speed control** (env_cnt/step counter mechanism):
+- `env_step` = decay interval for current stage (looked up from env_cnt table)
+- Each envelope tick: `env_cnt -= env_step`; if env_cnt >= env_step, skip; otherwise level changes by one step
+- Larger value = shorter interval = faster decay
+
+**SF2 special behavior**: note_on enters Sustain directly (no Attack), Sustain stage **holds** level unchanged (no decay), waits for note_off to trigger Release. This suits SF2 melodic instruments with loop points for infinite sustain.
+
+**BRR special behavior**: Full ADSR (has Attack), Sustain stage **continues decaying to 0** (not holding), sus controls decay speed. All instruments eventually auto-decay to silence and release channel, no manual note_off needed.
+
+### 2.9 BRR Sampling (SNES DSP filter=0)
+
+BRR (Binary Resonance Representation) 4ch melodic sample synthesis, GME Spc_Dsp.cpp bit-exact implementation.
+
+#### Architecture
+
+- **4 channels**: independent loop/frequency/envelope/volume
+- **14 instruments**: generated from YRW801 (OPL4) ROM XI files (gen_brr_rom.py)
+- **Encoding**: BRR filter=0 (stateless, 9 bytes/block, 16 samples/block, ~56% compression)
+- **Sample rate**: 17640Hz (MCU DAC sweet spot)
+- **GME bit-exact decode**: `s = ((nibble >> rs) << ls) * 2`, rs/ls table lookup
+
+#### BRR Encoding Format
+
+SNES SPC700 DSP BRR (Binary Resonance Representation):
+
+- **Block structure**: each block = 1 byte header + 8 bytes data (9 bytes total)
+- **Header**: high 4 bits = `scale` (0-15, quantization level), bit3 = loop flag (unused in this project, filter=0)
+- **Data**: 8 bytes = 16 nibbles (each 4-bit signed, encoding 16 samples)
+- **Compression**: 16-bit PCM -> 4-bit nibble = ~4:1, plus header overhead = ~3.5:1
+- **Filter**: filter=0 (chosen for this project), stateless, each sample decoded independently, no previous-sample filter state needed
+
+#### BRR Decode Principle (GME Spc_Dsp.cpp bit-exact)
+
+This project uses filter=0 (simplest mode, stateless):
+
+1. **Extract nibble**: From block's 8-byte data, locate byte pair and position by sample index
+   - `bp = sample_idx >> 2` (0-3: which byte pair)
+   - `sp = sample_idx & 0x03` (0-3: which nibble within pair)
+2. **Sign-extend**: `nybbles <<= (sp << 4)`, high 4 bits sign-extend to s16
+3. **Scale**: `raw >>= rs` (right-shift removes scale quantization), `s = raw << ls` (left-shift restores dynamic range)
+4. **Gain**: `s <<= 1` (*2 gain compensation), clamp [-32768, 32767]
+5. **Output**: s is the decoded 16-bit sample value
+
+Shift tables (16 scale levels):
+- `brr_right_shift[16] = {13,12,12,...,16,16,16}` — higher scale = more right-shift = more quantization noise
+- `brr_left_shift[16] = {0,0,1,2,...,11,11,11,11}` — higher scale = more left-shift = compensation
+
+**vs ADPCM comparison**:
+| | ADPCM (YM2608) | BRR (SNES DSP) |
+|--|----------------|----------------|
+| Compression unit | nibble (4-bit) | block (9 bytes/16 samples) |
+| Stateful | Yes (acc + step) | No (filter=0) |
+| Loop complexity | Must restore acc+step | Simple address jump |
+| Quantization noise | Adaptive (good at low freq) | Fixed scale (flat) |
+| MCU computation | Table lookup+accumulate (light) | Shift+table lookup (light) |
+
+#### Instrument List
+
+| # | Name | native_midi | ROM Size | Characteristics |
+|---|------|-----------|---------|----------------|
+| 0 | AcPiano | 51 | 8289B | Bright piano (s2) |
+| 1 | Violin | 45 | 1560B | Violin |
+| 2 | Strings | 42 | 4944B | String section |
+| 3 | Harp | 34 | 2256B | Harp |
+| 4 | Accordion | 38 | 1764B | Accordion |
+| 5 | Organ | 63 | 648B | Pipe organ |
+| 6 | Fretless | 46 | 1792B | Fretless bass |
+| 7 | JazzGtr | 58 | 504B | Jazz guitar |
+| 8 | DistGtr | 59 | 576B | Distortion guitar |
+| 9 | Celesta | 30 | 2904B | Celesta |
+| 10 | Flute | 42 | 1764B | Flute |
+| 11 | Recorder | 43 | 3168B | Recorder |
+| 12 | Oboe | 40 | 1404B | Oboe |
+| 13 | Clarinet | 51 | 1344B | Clarinet |
+
+ROM total ~23KB, all seam=0 (perfect loop).
+
+#### ADSR Envelope
+
+4 states: Attack -> Decay -> Sustain -> Release.
+Speed table `brr_env_cnt[16]` (same as FM/WT).
+Round-robin: every 4 ticks (4 channels).
+
+**ADSR directly controls volume**: `out * level >> 5`, bypasses vol.
+
+| Parameter | Address | Meaning |
+|-----------|---------|---------|
+| atk (high 4) \| dec (low 4) | 0x18 | attack/decay speed |
+| sul (high 4) \| sus (low 4) | 0x19 | decay target (sul*2=level) / sustain decay speed |
+| rel | 0x1A | release speed |
+
+**Key behavior**: sustain stage continues decaying to 0 (not holding), sus controls decay speed. level=0 auto-releases channel.
+
+#### BRR Instrument ADSR Templates (14 instruments)
+
+Sorted by ROM instrument number, all tuned and verified (atk/dec/sul/sus/rel range 0-15, indexes env_cnt[], larger = faster):
+
+| # | Instrument | atk | dec | sul | sus | rel | Characteristics |
+|---|-----------|-----|-----|-----|-----|-----|----------------|
+| 0 | AcPiano | 13 | 3 | 2 | 4 | 4 | Instant attack, fast decay, low target, mid sustain/release |
+| 1 | Violin | 10 | 4 | 2 | 10 | 10 | Mid attack, slow decay/sustain/release (sustained) |
+| 2 | Strings | 10 | 4 | 2 | 10 | 10 | Same as Violin |
+| 3 | Harp | 15 | 8 | 2 | 4 | 4 | Instant attack, mid decay, similar to piano |
+| 4 | Accordion | 7 | 3 | 8 | 4 | 4 | Mid attack, fast decay, high target (sustain feel) |
+| 5 | Organ | 5 | 6 | 12 | 6 | 5 | Slow attack, mid decay, high target (sustained) |
+| 6 | Fretless | 15 | 3 | 12 | 2 | 2 | Instant attack, fast decay, high target, fast sustain/release |
+| 7 | JazzGtr | 15 | 3 | 12 | 2 | 2 | Same as Fretless |
+| 8 | DistGtr | 15 | 8 | 2 | 4 | 4 | Instant attack, mid decay, low target |
+| 9 | Celesta | 15 | 10 | 6 | 2 | 2 | Instant attack, slow decay, mid target, very fast sustain/release |
+| 10 | Flute | 3 | 4 | 9 | 5 | 4 | Slow attack, mid decay, high target (sustained) |
+| 11 | Recorder | 10 | 4 | 2 | 10 | 10 | Mid attack, slow decay/sustain/release |
+| 12 | Oboe | 10 | 4 | 2 | 10 | 10 | Same as Recorder |
+| 13 | Clarinet | 10 | 4 | 2 | 10 | 10 | Same as Recorder |
+
+Sustained instruments (Violin/Strings/Organ/Flute/Recorder/Oboe/Clarinet): low sul + slow sus/rel -> sustain stage decays slowly, long sustain.
+Plucked instruments (AcPiano/Harp/DistGtr): low sul + fast dec -> short decay, short sustain.
+
+#### BRR Loop Principle
+
+BRR filter=0 is stateless decode, looping is much simpler than ADPCM — just jump back to block address, no need to restore decoder state.
+
+**Loop method**: ROM stores `n_blocks` (total blocks) and `loop_block` (loop start block) per instrument. When play pointer reaches end:
+```
+if (block_idx >= n_blocks) block_idx = loop_block;
+```
+Simply jumps back, next sample continues decoding from loop_block sample 0, waveform seamless.
+
+**seam=0 verification**: ROM generation (gen_brr_rom.py) applies crossfade at loop points, verifies loop start/end sample difference = 0 (seam=0), ensuring no pop/click.
+
+**vs ADPCM loop**: ADPCM must restore both `acc` and `adpcm_step` state variables for seamless loop; BRR filter=0 is stateless, one address jump completes the loop. This is why BRR was chosen over ADPCM for melodic sampling.
+
+#### Pitch Shift Principle
+
+Pitch shift by changing sample playback rate, shared by all sampling modules:
+
+**8.8 fixed-point step**: high 8 bits = samples advanced per tick, low 8 bits = fractional part (linear interpolation).
+- `step = 0x0100` = original speed (1.0 sample per tick)
+- `step = 0x0200` = 2x speed (one octave up)
+- `step = 0x0080` = 0.5x speed (one octave down)
+
+**Semitone stepping**: `step = 0x0100 * 2^(semi/12)`, host Python computes then writes to MCU step register.
+MCU also stores 12-level semitone lookup tables (`brr_semi_up[12]`, `brr_semi_dn[12]`), can directly look up by midi note difference times octave offset.
+
+**Linear interpolation**: When step < 0x0100 (down-pitch), frac part interpolates between adjacent samples:
+`out = s_prev + (s_cur - s_prev) * frac >> 8`
+Prevents锯齿 noise from step skipping during down-pitch.
+
+#### ROM Generation Toolchain
+
+```
+XI file -> resample 17640Hz -> PCM crossfade -> BRR encode -> BRR crossfade -> verify seam=0
+```
+See [docs/xi_brr_workflow.md](docs/xi_brr_workflow.md) and [docs/brr_adsr_debug.md](docs/brr_adsr_debug.md).
+
+### 2.10 Abandoned Sound Sources
 
 The following 4 sound sources were implemented during the STC8H8K64U prototype phase but were not enabled after migrating to STC32G. Source files remain in the `STC32G12K128/` directory; `#include` directives in `main.c` are commented out, and UART command branches are reserved but inactive.
 
@@ -407,9 +668,11 @@ The following 4 sound sources were implemented during the STC8H8K64U prototype p
 | AY8910 | `[0xA0][reg][data]` | None | None | 3 bytes, transparent |
 | FM | `[0x51][addr][data][xor]` | XOR | 0xAA/0xFF | 4 bytes |
 | Gigatron | `[0xB0][addr][data][xor]` | XOR | Discard | 4 bytes |
-| WT/ADPCM | `[0xC0][addr][data][xor]` | XOR | 0xAA/0xFF | 4 bytes |
+| WT/ADPCM/BRR | `[0xC0][addr][data][xor]` | XOR | 0xAA/0xFF | 4 bytes, addr range routes to module |
 
 ### 3.2 WT Registers (0xC0, addr 0x00-0x14)
+
+WT and ADPCM/BRR share 0xC0 prefix, main.c routes by addr range: 0x00-0x14->WT, 0x15-0x33->ADPCM, 0x34-0x4F->BRR.
 
 | Address | Description |
 |---------|-------------|
@@ -441,6 +704,20 @@ The following 4 sound sources were implemented during the STC8H8K64U prototype p
 | 0x27-0x2C | ch0-5 Step Hi (pitch shift high byte) |
 | 0x2D-0x32 | ch0-5 Step Lo (pitch shift low byte) |
 | 0x33 | MIDI Note (follows SF2 Note On, 24-95) |
+
+### 3.5 BRR Registers (0xC0, addr 0x34-0x4F)
+
+| Address | Description |
+|---------|-------------|
+| 0x34-0x37 | ch0-3 Note On (data: 0-13=instrument index) |
+| 0x38-0x3B | ch0-3 Note Off |
+| 0x3C-0x3F | ch0-3 Volume (0-31) |
+| 0x40-0x43 | ch0-3 MIDI Note (24-127) |
+| 0x44-0x47 | ch0-3 Step Hi (8.8 fp) |
+| 0x48-0x4B | ch0-3 Step Lo (8.8 fp) |
+| 0x4C | ADSR atk\|dec |
+| 0x4D | ADSR sul\|sus |
+| 0x4E | ADSR rel |
 
 ---
 
@@ -527,6 +804,14 @@ python tools/wt_scale_test.py                 # 14 waveforms C2<->C6 loop sweep
 python tools/wt_pcm_debug.py                  # WT+ADPCM simple test
 ```
 
+### 4.9 BRR Sweep Test
+
+```
+python tools/brr_uart_test.py                 # 14 instruments sweep (up->down, 4ch round-robin)
+python tools/brr_uart_test.py 0               # Test AcPiano only (by index)
+python tools/brr_uart_test.py violin           # Test Violin only (by name)
+```
+
 ### 4.9 Offline Tools (no serial required)
 
 **SF2 sampling pipeline**:
@@ -560,6 +845,8 @@ python tools/polyphone_loop.py                 # Multi-point quality scoring + c
 ```
 python tools/brr_test.py                      # BRR encode/decode verification (GME Spc_Dsp compliant)
 python tools/brr_loop.py                      # BRR block-based loop simulation
+python tools/gen_brr_rom.py                  # XI -> BRR ROM C header generation (14 instruments)
+python tools/brr_uart_test.py                 # BRR 14-instrument sweep test (serial)
 ```
 
 **XI format (YRW801/OPL4 waveforms)**:
@@ -618,8 +905,9 @@ D:/Keil_v5/C251/BIN/C251.exe gigatron.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe fm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe wt.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe adpcm.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
+D:/Keil_v5/C251/BIN/C251.exe brr.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
 D:/Keil_v5/C251/BIN/C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)" 2>&1
-D:/Keil_v5/C251/BIN/L251.exe ay8910.OBJ,sn76489.OBJ,gigatron.OBJ,fm.OBJ,wt.OBJ,adpcm.OBJ,main.OBJ TO build/MAIN 2>&1
+D:/Keil_v5/C251/BIN/L251.exe ay8910.OBJ,sn76489.OBJ,gigatron.OBJ,fm.OBJ,wt.OBJ,adpcm.OBJ,brr.OBJ,main.OBJ TO build/MAIN 2>&1
 D:/Keil_v5/C251/BIN/OH251.exe build/MAIN HEXFILE\(build/MAIN.hex\) 2>&1
 ```
 
@@ -650,6 +938,8 @@ STC_Chiptune/
 │   ├── gigatron.c/h          # Gigatron TTL waveform (4ch, 256B shared table)
 │   ├── wt.c/h                # Wavetable synth (4ch / 14 waveforms / ADSR)
 │   ├── adpcm.c/h             # ADPCM decode (6ch: drums+SF2 melody)
+│   ├── brr.c/h               # BRR 4ch melodic samples (SNES DSP filter=0)
+│   ├── brr_rom.h             # BRR ROM (14 instruments, ~23KB, seam=0)
 │   ├── types.h               # Shared type definitions
 │   ├── sf2_rom.h             # SF2 sample ROM (5 instruments, 11936B)
 │   ├── fmopn_2608rom.h       # YM2608 ADPCM drum ROM + JEDI table
@@ -676,6 +966,8 @@ STC_Chiptune/
 │   ├── polyphone_loop.py     # Multi-point quality score loop finder
 │   ├── brr_test.py           # BRR encode/decode verify (SNES DSP)
 │   ├── brr_loop.py           # BRR block-based loop simulation
+│   ├── gen_brr_rom.py        # XI -> BRR ROM C header generation
+│   ├── brr_uart_test.py      # BRR 14-instrument sweep test (serial)
 │   ├── sf2_extract.py        # SF2 -> WAV + JSON + C header
 │   ├── sf2_test.py           # SF2 melody hardware test
 │   ├── sf2_sweep.py          # SF2 pitch sweep
@@ -747,6 +1039,15 @@ STC32G C251, 38MHz, 128KB Flash, 4KB SRAM + 8KB XRAM.
 - ini-driven: drum.ini (mapping+aliases+volume) + drum_patterns/ (independent styles)
 - MIDI GM Percussion 35-81 full coverage
 - 19 pitch shift alias shortcuts
+
+### 7.6 Phase 11: BRR Melodic Sampling
+
+- Implemented SNES DSP BRR filter=0 decoder (GME Spcc_Dsp.cpp bit-exact)
+- 14 instruments from YRW801 ROM XI files (Piano/Violin/Strings/Harp/Accordion/Organ/Fretless/JazzGtr/DistGtr/Celesta/Flute/Recorder/Oboe/Clarinet)
+- BRR ROM generation pipeline: resample -> PCM crossfade -> BRR encode -> BRR crossfade -> verify
+- ADSR envelope (4-state, 14 instrument templates tuned and verified)
+- ADSR debug: 5 bugs fixed (route range/volume formula/sul mapping/sustain behavior/channel release)
+- 8-bit PWM DAC: tested HSPWM 10-bit, reverted due to audible ultrasonic noise floor (37kHz carrier)
 
 ## 8. Reference Projects & Porting Notes
 
