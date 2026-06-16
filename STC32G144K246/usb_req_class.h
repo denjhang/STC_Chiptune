@@ -12,6 +12,7 @@
 
 void usb_req_class();
 void usb_class_out_ep1();
+void usb_class_ep0_out_done();
 
 void usb_get_report();
 void usb_set_report();

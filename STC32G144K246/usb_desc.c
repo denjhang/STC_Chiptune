@@ -11,7 +11,7 @@ char code DEVICEDESC[18] =
     0x00,                   //bDeviceProtocol(0)
     0x40,                   //bMaxPacketSize0(64);
     0xbf,0x34,              //idVendor(34bf)
-    0x0a,0xff,              //idProduct(ff0a)
+    0x01,0xff,              //idProduct(ff01) -- STC-ISP 自动下载默认 PID
     0x00,0x01,              //bcdDevice(1.00);
     0x01,                   //iManufacturer(1);
     0x02,                   //iProduct(2);

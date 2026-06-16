@@ -8,7 +8,7 @@ import time
 import hid  # cython-hidapi
 
 VID = 0x34bf
-PID = 0xff0a
+PID = 0xff01
 
 def main():
     devs = list(hid.enumerate(VID, PID))

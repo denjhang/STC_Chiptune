@@ -6,6 +6,8 @@ BYTE bHidIdle;
 volatile BOOL HidEp1OutReady;
 BYTE xdata HidEp1OutBuffer[64];
 
+static char code stcisp_cmd[] = "@STCISP#";
+
 void usb_req_class()
 {
     switch (Setup.bRequest)
@@ -103,14 +105,35 @@ void usb_set_protocol()
     usb_setup_stall();
 }
 
-/* EP1 OUT 中断处理: 把数据搬到 HidEp1OutBuffer, 通知主循环 */
+/* EP1 OUT 中断处理: 把数据搬到 HidEp1OutBuffer, 同时扫描 @STCISP# */
 void usb_class_out_ep1()
 {
     BYTE cnt;
+    BYTE i;
 
     cnt = usb_bulk_intr_out(HidEp1OutBuffer, 1);
+    if (cnt >= 8)
+    {
+        for (i = 0; i < 8; i++)
+        {
+            if (HidEp1OutBuffer[i] != (BYTE)stcisp_cmd[i]) break;
+        }
+        if (i == 8)
+        {
+            USBCON = 0x00;
+            USBCLK = 0x00;
+            IRC48MCR = 0x00;
+            IAP_CONTR = 0x60;  /* 软件复位到 ISP 监控区 */
+            while (1);
+        }
+    }
     if (cnt > 0)
     {
         HidEp1OutReady = 1;
     }
+}
+
+/* 保留空函数, usb.c 调用, 但 EP0 路径不扫描 @STCISP# (走 EP1 OUT) */
+void usb_class_ep0_out_done()
+{
 }

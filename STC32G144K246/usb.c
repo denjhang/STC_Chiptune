@@ -240,6 +240,7 @@ void usb_ctrl_out()
     {
         usb_write_reg(CSR0, SOPRDY | DATEND);
         Ep0State.bState = EPSTATE_IDLE;
+        usb_class_ep0_out_done();
     }
     else
     {
