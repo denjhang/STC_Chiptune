@@ -24,8 +24,23 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 ### DAC1 + Timer0 音频输出 ✅
 
 - **DAC1 P0.7** 12-bit, PGA1 Buffer 模式 (PGA1_CR1=0x43, PGA1_CR2=0x04, DAC1_CR=0x41)
-- **Timer0 1000Hz 中断** (1T 模式, MAIN_Fosc=72MHz) 翻转 DAC → 500Hz 方波试听
-- DAC1_DIV=2 → 18M/(2*4) = 2.25MHz 刷新率 (MCLK=72M 时, 经 PGA 缓冲)
+- **Timer0 17640Hz 中断** (1T 模式, MAIN_Fosc=72MHz) → DAC1 12-bit 输出, 给 AY/SN 合成用
+- DAC1_DIV=2 → 72M/(2*4) = 9MHz 刷新率 (经 PGA 缓冲)
+- **PT0=1 Timer0 高优先级**: USB ISR 不打断音频 ISR (DAC1 far 寻址要 DPTR 稳定)
+- **ISR 写 DAC1 路径验证通过**:
+  - 1000Hz 翻转 → 500Hz 方波 (bce30b3 版本)
+  - 17640Hz 翻转 → 8820Hz 方波
+  - 17640Hz + 100 样本三角波 → 176.4Hz 三角波
+  - 17640Hz + u8 自增锯齿 → 69Hz 锯齿波
+- 全部能听到, ISR + DAC1 链路完全正常
+
+### AY8910 移植进行中 ⚠️
+
+- `ay8910.c/h` 从 STC32G12K128 移植 (12K128 hex 直接烧能响, AY 核心代码本身没问题)
+- **现状**: ISR 调 `ay_render()` 没声音, 但 ISR 不调 ay_render 改写固定波形有声音
+- **怀疑**: 144K246 编译环境下 ay_render 调用有问题 (OVERLAY/寄存器保护/far 寻址冲突)
+- link.args 用 `NOOVERLAY` 没解决, PT0=1 没解决
+- **下一步**: 排查 ay_render 内部 u32 累加 (AY_BASE_INCR=212779134UL) 在 144K246 上的执行, 或试 ISR 用 `#pragma` 把 ay_render 改 registerbank
 
 ### 移植来源
 
@@ -189,6 +204,7 @@ P3.2 准双向口浮空时, 弱上拉拉不动容性负载, 会被反复读到 0
 
 ## 下一步
 
-- [ ] 14 乐器合成器（从 STC32G12K128 移植）
-- [ ] DAC1 改 8kHz/16kHz 采样率播放真实音频
+- [ ] **AY8910 调试**: 找出 ISR 调 ay_render 没声音的根因 (ay8910.c 代码本身正确, 编译/链接问题)
+- [ ] 14 乐器合成器（从 STC32G12K128 移植, AY 先通再上 SN/FM/WT）
+- [ ] USB HID 协议接入 ([0xA0][reg][data] 写 AY)
 - [ ] P3.2 接按键, 启用物理复位
