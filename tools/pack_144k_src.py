@@ -1,7 +1,7 @@
 """打包 STC32G144K246 源码 + tools/*.py 为 zip 备份
 
 用法: python tools/pack_144k_src.py
-输出: 项目根目录 STC32G144K246_src-vN-{tag}_{YYYYMMDD_HHMMSS}.zip
+输出: 项目根目录 STC32G144K246_src_{YYYYMMDD_HHMMSS}.zip
 
 排除: build/, __pycache__/, .git/, *.OBJ/.o/.exe/.lst/.map/.bak
 """
@@ -9,16 +9,13 @@ import os
 import zipfile
 import datetime
 
-VERSION = "v5"
-TAG = "72mhz-hpll"
-
 EXCLUDES_DIR = {"build", "__pycache__", ".git"}
 EXCLUDES_EXT = {".obj", ".o", ".exe", ".lst", ".map", ".bak"}
 
 
 def main():
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = f"STC32G144K246_src-{VERSION}-{TAG}_{ts}.zip"
+    out = f"STC32G144K246_src_{ts}.zip"
 
     count = 0
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
