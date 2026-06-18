@@ -6,6 +6,7 @@
 #include "usb.h"
 #include "timer.h"
 #include "ay8910.h"
+/* 暂时只做 AY, 其他音源稍后加 */
 
 unsigned long MAIN_Fosc = 60000000L;  /* 60MHz (ISP 设) */
 #define SAMPLE_RATE 17640
@@ -134,6 +135,30 @@ void sys_init(void)
     P2 = 0xFF;
 }
 
+void process_uart(void)
+{
+    u8 b, r, d;
+
+    while (TX1_Cnt != RX1_Cnt)
+    {
+        b = RX1_Buffer[TX1_Cnt];
+        if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+
+        if (b == 0xA0)
+        {
+            /* AY8910: [0xA0][reg][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            ay_active = 1;
+            ay_wr(r, d);
+        }
+    }
+}
+
 void main(void)
 {
     sys_init();
@@ -146,5 +171,6 @@ void main(void)
 
     while (1)
     {
+        process_uart();  /* 解析 USB CDC 接收的 AY 命令 */
     }
 }

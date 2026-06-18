@@ -833,7 +833,7 @@ def main():
     parser = argparse.ArgumentParser(description='VGM Player for STC Chiptune Synth')
     parser.add_argument('song', nargs='?', help='Track number or name')
     parser.add_argument('--list', action='store_true')
-    parser.add_argument('--port', help='Serial port')
+    parser.add_argument('--port', default='COM24', help='Serial port (default COM24)')
     parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--speed', type=float, default=1.0)
     parser.add_argument('--loop', action='store_true')
