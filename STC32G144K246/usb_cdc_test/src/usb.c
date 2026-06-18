@@ -506,9 +506,14 @@ void usb_out_ep4()
         cnt = usb_read_reg(OUTCOUNT1);
         while (cnt--)
         {
-            RX1_Buffer[RX1_Cnt++] = usb_read_reg(FIFO4);
+            u16 next = (RX1_Cnt + 1) & (UART1_BUF_LENGTH - 1);  /* 环形缓冲 (要求 2^N) */
+            if (next == TX1_Cnt) {  /* 缓冲满, 丢弃剩余字节防止越界 */
+                usb_read_reg(FIFO4);
+                continue;
+            }
+            RX1_Buffer[RX1_Cnt] = usb_read_reg(FIFO4);
+            RX1_Cnt = next;
         }
-        /* 单 CDC, 删掉 Uart3RxBuffer + Ep4OutBusy 逻辑 */
         usb_write_reg(OUTCSR1, 0);
     }
 }
