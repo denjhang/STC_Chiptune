@@ -2,7 +2,6 @@
 #define __STC_H__
 
 #include <intrins.h>
-#include <stdio.h>
 
 #include "..\comm\stc32g.h"
 #include "config.h"
@@ -16,6 +15,10 @@ typedef unsigned long DWORD;
 typedef unsigned char u8;
 typedef unsigned int u16;
 typedef unsigned long u32;
+
+typedef signed char s8;
+typedef signed int s16;
+typedef signed long s32;
 
 typedef unsigned char uchar;
 typedef unsigned int uint;

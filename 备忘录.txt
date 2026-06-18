@@ -1,4 +1,51 @@
 
+
+
+参考项目总结
+1. 88-USB-CDC双串口 (STC32G12K128, C251, 官方纯源码)
+最关键发现：这是 STC 官方的 纯源码 USB CDC，结构极简
+只用 usb.c + usb_req_std.c + usb_req_class.c + usb_desc.c，无 LIB 依赖
+ISR (interrupt 25) 和 AI8051U 声卡参考完全相同的结构
+数据流：USB BULK EP → 环形 buffer → UART TX（或反向 UART RX → USB BULK EP）
+Timer0 只做 1ms flag，在主循环处理
+默认 24MHz，无 PLL，USB 走独立 IRC48M
+2. audio_play_32G144 (STC32G144K246, C251, MP3/PCM 播放器)
+PLL 配置参考：HPLL1_PreDivider(8) → HPLL1_Lock408MHz → /2 → SYSCLK_Divider(2) = 102.4MHz！
+用 I2S 硬件外设 + TLV320AIC23B 外部 codec 做 DAC
+USB CDC 用的是 stc_usb_cdc_32.LIB（不是纯源码），printf 走 USB CDC
+Timer0 只做空 ISR（被 I2S ISR 取代），I2S 中断做音频输出
+关键：my_def.h 包含大量 STC32G144K246 寄存器定义和 AICUBE 库函数
+3. 核心启示
+88 号项目的纯源码 USB CDC 可以直接移植到 144K246，代码结构和我们之前失败的尝试不同 — 这个版本更简洁，EP 配置更干净
+audio_play 验证了 144K246 上 PLL 102MHz + I2S + USB CDC LIB 共存可行
+88 号项目的 Timer0 和 USB ISR 共存没问题，因为 Timer0 ISR 极轻量（只设 flag）
+要移植 88 号纯源码 CDC 到我们的项目，只需：
+
+复制 usb.c/usb_req_std.c/usb_req_class.c/usb_req_vendor.c/util.c 到我们的项目
+精简描述符为 1 CDC + 1 HID（或只用 1 CDC）
+在 USB ISR 的 OUT EP handler 里把数据写入 RX1_Buffer 替代 UART RX
+删除 stc_usb_cdc_32g_xdata.LIB 依赖
+要先开始移植吗？
+
+1
+
+
+
+
+py -3 STC32G144K246/tools/vgm_player.py --port COM15 --list
+py -3 STC32G144K246/tools/vgm_player.py 01 --port COM15
+py -3 STC32G144K246/tools/vgm_player.py 01 --port COM15 --loop
+py -3 STC32G144K246/tools/vgm_player.py --ay-test --port COM15
+
+
+
+D:\working\vscode-projects\Reference_Project\STC-MCU\STC32G144K246开发板\4 STC厂方_USB库_LIBRARY
+
+
+
+
+
+
 VGM AY 播放 — tools/vgm_player.py
 
 
