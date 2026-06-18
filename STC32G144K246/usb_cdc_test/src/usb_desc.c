@@ -7,7 +7,7 @@
 /* --- Web: www.STCAI.com ---------------------------------------------*/
 /* --- BBS: www.STCAIMCU.com  -----------------------------------------*/
 /* --- QQ:  800003751 -------------------------------------------------*/
-/* »Áπ˚“™‘⁄≥Ã–Ú÷– π”√¥À¥˙¬Î,«Î‘⁄≥Ã–Ú÷–◊¢√˜ π”√¡ÀSTCµƒ◊ ¡œº∞≥Ã–Ú        */
+/* Â¶ÇÊûúË¶ÅÂú®Á®ãÂ∫è‰∏≠‰ΩøÁî®Ê≠§‰ª£Á†Å,ËØ∑Âä°ÂøÖÂú®Á®ãÂ∫èÂºÄÂ§¥Ê≥®Êòé‰ΩøÁî®STCÂÆòÊñπÁöÑ‰∏ä‰ΩçÊú∫        */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
@@ -31,12 +31,13 @@ char code DEVICEDESC[18] =
     0x01,                   //bNumConfigurations(1);
 };
 
-char code CONFIGDESC[141] =
+/* Âçï CDC ÈÖçÁΩÆÊèèËø∞Á¨¶ (Âè™‰øùÁïô CDC1, Âà†Êéâ CDC2) */
+char code CONFIGDESC[115] =
 {
     0x09,                   //bLength(9);
     0x02,                   //bDescriptorType(Configuration);
-    0x8d,0x00,              //wTotalLength(141);
-    0x04,                   //bNumInterfaces(4);
+    0x73,0x00,              //wTotalLength(115);
+    0x02,                   //bNumInterfaces(2);
     0x01,                   //bConfigurationValue(1);
     0x00,                   //iConfiguration(0);
     0x80,                   //bmAttributes(BUSPower);
@@ -113,78 +114,6 @@ char code CONFIGDESC[141] =
     0x02,                   //bmAttributes(Bulk);
     0x40,0x00,              //wMaxPacketSize(64);
     0x00,                   //bInterval(Ignored);
-
-    0x08,                   //bLength(8);
-    0x0b,                   //bDescriptorType(IAD);
-    0x02,                   //bFirstInterface(2);
-    0x02,                   //bInterfaceCount(2);
-    0x02,                   //bFunctionClass(Communication Device Class);
-    0x02,                   //bInterfaceSubClass(Abstract Control Model);
-    0x01,                   //bInterfaceProtocol(Common AT commands);
-    0x00,                   //iInterface(0);
-
-    0x09,                   //bLength(9);
-    0x04,                   //bDescriptorType(Interface);
-    0x02,                   //bInterfaceNumber(2);
-    0x00,                   //bAlternateSetting(0);
-    0x01,                   //bNumEndpoints(1);
-    0x02,                   //bInterfaceClass(Communication Interface Class);
-    0x02,                   //bInterfaceSubClass(Abstract Control Model);
-    0x01,                   //bInterfaceProtocol(Common AT commands);
-    0x00,                   //iInterface(0);
-
-    0x05,                   //bLength(5);
-    0x24,                   //bDescriptorType(CS_INTERFACE);
-    0x00,                   //bDescriptorSubtype(Header Functional Descriptor);
-    0x10,0x01,              //bcdCDC(1.10);
-
-    0x05,                   //bLength(5);
-    0x24,                   //bDescriptorType(CS_INTERFACE);
-    0x01,                   //bDescriptorSubtype(Call Management Functional Descriptor);
-    0x00,                   //bmCapabilities(Device does not handles call management itself);
-    0x01,                   //bDataInterface(1);
-
-    0x04,                   //bLength(4);
-    0x24,                   //bDescriptorType(CS_INTERFACE);
-    0x02,                   //bDescriptorSubtype(Abstract Control Management Functional Descriptor);
-    0x02,                   //bmCapabilities(Set/Get_Line_Coding,Serial_State,Set_Control_Line_State);
-
-    0x05,                   //bLength(5);
-    0x24,                   //bDescriptorType(CS_INTERFACE);
-    0x06,                   //bDescriptorSubtype(Union Functional descriptor);
-    0x00,                   //bMasterInterface(0);
-    0x01,                   //bSlaveInterface0(1);
-
-    0x07,                   //bLength(7);
-    0x05,                   //bDescriptorType(Endpoint);
-    0x83,                   //bEndpointAddress(EndPoint3 as IN);
-    0x03,                   //bmAttributes(Interrupt);
-    0x40,0x00,              //wMaxPacketSize(64);
-    0xff,                   //bInterval(255ms);
-
-    0x09,                   //bLength(9);
-    0x04,                   //bDescriptorType(Interface);
-    0x03,                   //bInterfaceNumber(3);
-    0x00,                   //bAlternateSetting(0);
-    0x02,                   //bNumEndpoints(2);
-    0x0a,                   //bInterfaceClass(Data Interface Class);
-    0x00,                   //bInterfaceSubClass(AData Interface Class SubClass Codes);
-    0x00,                   //bInterfaceProtocol(USB SPEC);
-    0x00,                   //iInterface(0);
-
-    0x07,                   //bLength(7);
-    0x05,                   //bDescriptorType(Endpoint);
-    0x85,                   //bEndpointAddress(EndPoint5 as IN);
-    0x02,                   //bmAttributes(Bulk);
-    0x40,0x00,              //wMaxPacketSize(64);
-    0x00,                   //bInterval(Ignored);
-
-    0x07,                   //bLength(7);
-    0x05,                   //bDescriptorType(Endpoint);
-    0x05,                   //bEndpointAddress(EndPoint5 as OUT);
-    0x02,                   //bmAttributes(Bulk);
-    0x40,0x00,              //wMaxPacketSize(64);
-    0x00,                   //bInterval(Ignored);
 };
 
 char code LANGIDDESC[4] =
@@ -220,12 +149,12 @@ char code PRODUCTDESC[30] =
     'l',0,
 };
 
-char code PACKET0[2] = 
+char code PACKET0[2] =
 {
     0, 0,
 };
 
-char code PACKET1[2] = 
+char code PACKET1[2] =
 {
     1, 0,
 };

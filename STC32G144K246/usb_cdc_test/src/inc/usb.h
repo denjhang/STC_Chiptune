@@ -110,4 +110,8 @@ extern BOOL Ep5InBusy;
 extern BOOL Ep4OutBusy;
 extern BOOL Ep5OutBusy;
 
+/* main.c 定义的 UART buffer (单 CDC, 直接写入) */
+extern u8 xdata RX1_Buffer[];
+extern volatile u16 RX1_Cnt;
+
 #endif

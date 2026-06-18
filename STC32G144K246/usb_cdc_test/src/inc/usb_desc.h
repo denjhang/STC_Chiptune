@@ -2,7 +2,7 @@
 #define __USB_DESC_H__
 
 extern char code DEVICEDESC[18];
-extern char code CONFIGDESC[141];
+extern char code CONFIGDESC[115];  /* 单 CDC, 115 字节 */
 extern char code LANGIDDESC[4];
 extern char code MANUFACTDESC[8];
 extern char code PRODUCTDESC[30];

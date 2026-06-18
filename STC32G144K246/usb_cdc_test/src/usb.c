@@ -7,7 +7,7 @@
 /* --- Web: www.STCAI.com ---------------------------------------------*/
 /* --- BBS: www.STCAIMCU.com  -----------------------------------------*/
 /* --- QQ:  800003751 -------------------------------------------------*/
-/* »Áπ˚“™‘⁄≥Ã–Ú÷– π”√¥À¥˙¬Î,«Î‘⁄≥Ã–Ú÷–◊¢√˜ π”√¡ÀSTCµƒ◊ ¡œº∞≥Ã–Ú        */
+/* ÔøΩÔøΩÔøΩ“™ÔøΩ⁄≥ÔøΩÔøΩÔøΩÔøΩÔøΩ πÔøΩ√¥À¥ÔøΩÔøΩÔøΩ,ÔøΩÔøΩÔøΩ⁄≥ÔøΩÔøΩÔøΩÔøΩÔøΩ◊¢ÔøΩÔøΩ πÔøΩÔøΩÔøΩÔøΩSTCÔøΩÔøΩÔøΩÔøΩÔøΩœºÔøΩÔøΩÔøΩÔøΩÔøΩ        */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
@@ -109,7 +109,7 @@ void usb_isr() interrupt 25
     BYTE introut;
     BYTE adrTemp;
 
-    adrTemp = USBADR;     //USBADR œ÷≥°±£¥Ê£¨±‹√‚÷˜—≠ª∑¿Ô–¥ÕÍ USBADR ∫Û≤˙…˙÷–∂œ£¨‘⁄÷–∂œ¿Ô–ﬁ∏ƒ¡À USBADR ƒ⁄»›
+    adrTemp = USBADR;     //USBADR ÔøΩ÷≥ÔøΩÔøΩÔøΩÔøΩÊ£¨ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ—≠ÔøΩÔøΩÔøΩÔøΩ–¥ÔøΩÔøΩ USBADR ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ–∂œ£ÔøΩÔøΩÔøΩÔøΩ–∂ÔøΩÔøΩÔøΩÔøΩﬁ∏ÔøΩÔøΩÔøΩ USBADR ÔøΩÔøΩÔøΩÔøΩ
 
     intrusb = usb_read_reg(INTRUSB);
     intrin = usb_read_reg(INTRIN1);
@@ -154,7 +154,7 @@ void usb_isr() interrupt 25
 
     if (intrusb & SUSIF) usb_suspend();
 
-    USBADR = adrTemp;    //USBADR œ÷≥°ª÷∏¥
+    USBADR = adrTemp;    //USBADR ÔøΩ÷≥ÔøΩÔøΩ÷∏ÔøΩ
 }
 
 void usb_resume()
@@ -506,16 +506,10 @@ void usb_out_ep4()
         cnt = usb_read_reg(OUTCOUNT1);
         while (cnt--)
         {
-            Uart3RxBuffer[Uart3RxWptr++] = usb_read_reg(FIFO4);
+            RX1_Buffer[RX1_Cnt++] = usb_read_reg(FIFO4);
         }
-        if ((BYTE)(Uart3RxWptr - Uart3RxRptr) >= (BYTE)(256 - EP4OUT_SIZE))
-        {
-            Ep4OutBusy = 1;
-        }
-        else
-        {
-            usb_write_reg(OUTCSR1, 0);
-        }
+        /* Âçï CDC, Âà†Êéâ Uart3RxBuffer + Ep4OutBusy ÈÄªËæë */
+        usb_write_reg(OUTCSR1, 0);
     }
 }
 #endif

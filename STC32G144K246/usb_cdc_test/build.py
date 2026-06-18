@@ -22,7 +22,7 @@ OH251 = os.path.join(KEIL, "OH251.exe")
 SOURCES = [
     "main", "ay8910", "usb", "usb_desc",
     "usb_req_class", "usb_req_std", "usb_req_vendor",
-    "util", "uart", "timer",
+    "util", "timer",  # 不用 uart.c (CDC2/UART 透传), 单 CDC 直接 USB -> Buffer
 ]
 
 

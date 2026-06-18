@@ -3,11 +3,7 @@
 
 extern unsigned long MAIN_Fosc;
 
-#define Dynamic_Frequency         //¸ù¾İ²¨ÌØÂÊ¶¯Ì¬µ÷ÕûÖ÷Æµ¿ØÖÆ¿ª¹Ø
-                                  //Ê¹ÄÜºó¿É¸ù¾İ´®¿Ú²¨ÌØÂÊ¶¯Ì¬µ÷ÕûÖ÷ÆµÒÔÌá¸ß´®¿ÚÍ¨ĞÅ¾«¶È
-                                  //²»¹ıÒ»¸öÍ¨µÀ²¨ÌØÂÊµ÷ÕûÒı·¢Ö÷Æµ±ä»¯ºó£¬ÁíÒ»¸öÍ¨µÀµÄ²¨ÌØÂÊ¼ÆËã¾Í»áÊÜÓ°Ïì
-                                  //²»ĞèÒª´Ë¹¦ÄÜ¿ÉÆÁ±ÎÕâ¸ö¶¨Òå
-
+/* å• CDC æ¨¡å¼: åªå¯ç”¨ EP2/EP4 (CDC1), å…³é—­ EP3/EP5 (CDC2) */
 
 #define EP0_SIZE                64
 #define EP1IN_SIZE              64
@@ -21,11 +17,11 @@ extern unsigned long MAIN_Fosc;
 #define EP4OUT_SIZE             64
 #define EP5OUT_SIZE             64
 
-#define EN_EP2IN                        //´®¿Ú1µÄÊı¾İIN¶Ëµã
-#define EN_EP3IN                        //´®¿Ú2µÄ¿ØÖÆIN¶Ëµã
-#define EN_EP4IN                        //´®¿Ú1µÄÊı¾İIN¶Ëµã
-#define EN_EP5IN                        //´®¿Ú2µÄ¿ØÖÆIN¶Ëµã
-#define EN_EP4OUT                       //´®¿Ú1µÄÊı¾İOUT¶Ëµã
-#define EN_EP5OUT                       //´®¿Ú2µÄÊı¾İOUT¶Ëµã
+#define EN_EP2IN                        /* CDC1 ä¸­æ–­ IN */
+// #define EN_EP3IN                     /* CDC2 ä¸­æ–­ IN (å…³é—­) */
+#define EN_EP4IN                        /* CDC1 Bulk IN */
+// #define EN_EP5IN                     /* CDC2 Bulk IN (å…³é—­) */
+#define EN_EP4OUT                       /* CDC1 Bulk OUT */
+// #define EN_EP5OUT                    /* CDC2 Bulk OUT (å…³é—­) */
 
 #endif

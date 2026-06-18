@@ -1,4 +1,10 @@
 
+D:\working\vscode-projects\Reference_Project\STC-MCU\STC32G144K246开发板\4 STC厂方_USB库_LIBRARY\范例程序
+
+D:\working\vscode-projects\Reference_Project\STC-MCU\STC32G144K246开发板\3 CDC虚拟串口通信写法例子
+
+
+
 
 
 参考项目总结

@@ -1,14 +1,13 @@
 /*---------------------------------------------------------------------*/
-/* Phase 5b: PWMB 438Hz + Timer0 ISR 17640Hz + USB CDC 双串口          */
+/* Phase 5c: PWMB 8-bit DAC + Timer0 ISR 17640Hz + USB 单 CDC + AY 开机音 */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
 #include "usb.h"
-#include "uart.h"
 #include "timer.h"
 #include "ay8910.h"
 
-unsigned long MAIN_Fosc = 24000000L;
+unsigned long MAIN_Fosc = 60000000L;  /* 60MHz (ISP 设) */
 #define SAMPLE_RATE 17640
 
 #define PWMB_ENO1P    0x01
@@ -21,7 +20,18 @@ static u8 test_active = 0;
 static u8 ay_active = 0;
 #define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
 
-void pwmb_dac_init(void)  /* 改名: 不再是固定 440Hz, 而是 8-bit DAC */
+/* ========== UART 命令缓冲 ========== */
+#define UART1_BUF_LENGTH 2048
+u8 xdata RX1_Buffer[UART1_BUF_LENGTH];
+u8 xdata Uart3RxBuffer[UART1_BUF_LENGTH];  /* usb.c 引用, 别名到 RX1_Buffer */
+volatile u16 RX1_Cnt = 0;
+volatile u16 TX1_Cnt = 0;
+u8 Uart3RxRptr = 0, Uart3RxWptr = 0;
+
+void uart_set_parity(void) {}
+void uart_set_baud(void) {}
+
+void pwmb_dac_init(void)
 {
     PWMB_ENO   = 0x00;
     PWMB_CCER1 = 0x00;
@@ -31,9 +41,9 @@ void pwmb_dac_init(void)  /* 改名: 不再是固定 440Hz, 而是 8-bit DAC */
     PWMB_ARRL  = 255;
     PWMB_CCR5H = 0x00;
     PWMB_CCR5L = 128;
-    PWMB_PSCRH = 0x00;       /* PSC=0, 高频 PWM (24MHz/256 ≈ 94kHz) */
+    PWMB_PSCRH = 0x00;
     PWMB_PSCRL = 0x00;
-    PWMB_PS    = (PWMB_PS & ~0x03) | 0x02;  /* PS=2 -> P0.0 */
+    PWMB_PS    = (PWMB_PS & ~0x03) | 0x02;
     PWMB_ENO   = PWMB_ENO1P;
     PWMB_BKR   = 0x80;
     PWMB_CR1   = 0x01;
@@ -56,7 +66,6 @@ void test_start(void)
     ay_wr(10, 0x10);
 }
 
-/* Timer0: 1T 17640Hz (跟主线一样, ISR 混音 + 流水灯节拍 + test_tick) */
 void timer0_init(void)
 {
     u32 reload;
@@ -74,7 +83,6 @@ void tm0_isr() interrupt 1
     s16 mix;
     u8 out;
 
-    /* test_tick: 5 秒后停 AY */
     if (test_active)
     {
         if (++test_cnt >= BOOT_NOTE_TICKS)
@@ -87,7 +95,6 @@ void tm0_isr() interrupt 1
         }
     }
 
-    /* AY 混音输出到 PWMB P0.0 (只在 ay_active 时) */
     if (ay_active)
     {
         mix = ay_render();
@@ -97,7 +104,6 @@ void tm0_isr() interrupt 1
         PWMB_CCR5L = out;
     }
 
-    /* 流水灯节拍: 每 1 秒 (17640 次) */
     if (++led_tick >= 17640)
     {
         led_tick = 0;
@@ -116,14 +122,14 @@ void sys_init(void)
     P0M1 = 0x00;   P0M0 = 0x00;
     P1M1 = 0x00;   P1M0 = 0x00;
     P2M1 = 0x00;   P2M0 = 0x00;
-    P3M1 = 0x00;   P3M0 = 0x00;   /* P3.0/P3.1 = USB D-/D+ */
+    P3M1 = 0x00;   P3M0 = 0x00;
     P4M1 = 0x00;   P4M0 = 0x00;
     P5M1 = 0x00;   P5M0 = 0x00;
     P6M1 = 0x00;   P6M0 = 0x00;
     P7M1 = 0x00;   P7M0 = 0x00;
 
-    S3_S = 1;       /* UART3 (P5.0/P5.1) - CDC1 */
-    S2_S = 1;       /* UART2 (P4.6/P4.7) - CDC2 */
+    S3_S = 1;
+    S2_S = 1;
 
     P2 = 0xFF;
 }
@@ -133,14 +139,12 @@ void main(void)
     sys_init();
     pwmb_dac_init();
     ay_init();
-    test_start();        /* AY 开机 C4/E4/G4 和弦 */
+    test_start();
     timer0_init();
-    uart_init();
     usb_init();
     EA = 1;
 
     while (1)
     {
-        uart_polling();
     }
 }

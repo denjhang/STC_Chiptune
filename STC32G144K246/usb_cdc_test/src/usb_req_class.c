@@ -7,7 +7,7 @@
 /* --- Web: www.STCAI.com ---------------------------------------------*/
 /* --- BBS: www.STCAIMCU.com  -----------------------------------------*/
 /* --- QQ:  800003751 -------------------------------------------------*/
-/* Èç¹ûÒªÔÚ³ÌĞòÖĞÊ¹ÓÃ´Ë´úÂë,ÇëÔÚ³ÌĞòÖĞ×¢Ã÷Ê¹ÓÃÁËSTCµÄ×ÊÁÏ¼°³ÌĞò        */
+/* ï¿½ï¿½ï¿½Òªï¿½Ú³ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½Ã´Ë´ï¿½ï¿½ï¿½,ï¿½ï¿½ï¿½Ú³ï¿½ï¿½ï¿½ï¿½ï¿½×¢ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½STCï¿½ï¿½ï¿½ï¿½ï¿½Ï¼ï¿½ï¿½ï¿½ï¿½ï¿½        */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
@@ -16,8 +16,7 @@
 #include "util.h"
 #include "uart.h"
 
-LINECODING LineCoding1;
-LINECODING LineCoding2;
+LINECODING LineCoding1;  /* å• CDC, åˆ æ‰ LineCoding2 */
 
 void usb_req_class()
 {
@@ -52,10 +51,6 @@ void usb_set_line_coding()
     {
         Ep0State.pData = (BYTE *)&LineCoding1;
     }
-    else if (Interface == 2)
-    {
-        Ep0State.pData = (BYTE *)&LineCoding2;
-    }
     else
     {
         usb_setup_stall();
@@ -79,10 +74,6 @@ void usb_get_line_coding()
     if (Interface == 0)
     {
         Ep0State.pData = (BYTE *)&LineCoding1;
-    }
-    else if (Interface == 2)
-    {
-        Ep0State.pData = (BYTE *)&LineCoding2;
     }
     else
     {
@@ -112,11 +103,6 @@ void usb_uart_settings()
     {
         LineCoding1.bCharFormat = 0;
         LineCoding1.bDataBits = 8;
-    }
-    else if (Interface == 2)
-    {
-        LineCoding2.bCharFormat = 0;
-        LineCoding2.bDataBits = 8;
     }
 
     uart_set_parity();
