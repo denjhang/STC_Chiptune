@@ -29,4 +29,8 @@ typedef unsigned char uint8_t;
 typedef unsigned int uint16_t;
 typedef unsigned long uint32_t;
 
+/* GPIO 模式宏 */
+#define P0n_HighZ(bitn)  P0M1 |=  (bitn), P0M0 &= ~(bitn)
+#define P0n_push_pull(bitn) P0M0 |= (bitn), P0M1 &= ~(bitn)
+
 #endif

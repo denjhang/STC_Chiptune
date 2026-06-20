@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------*/
-/* Phase 5c: PWMB 8-bit DAC + Timer0 ISR 17640Hz + USB 单 CDC + AY 开机音 */
+/* DAC1 12-bit + Timer0 ISR 17640Hz + USB 单 CDC + AY 开机音 */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
@@ -13,8 +13,6 @@ char *USER_STCISPCMD = "@STCISP#";
 
 unsigned long MAIN_Fosc = 60000000L;  /* 60MHz (ISP 设) */
 #define SAMPLE_RATE 17640
-
-#define PWMB_ENO1P    0x01
 
 u8 led_val = 0xFE;
 static u16 led_tick = 0;
@@ -37,22 +35,15 @@ u8 Uart3RxRptr = 0, Uart3RxWptr = 0;
 void uart_set_parity(void) {}
 void uart_set_baud(void) {}
 
-void pwmb_dac_init(void)
+void dac1_init(void)
 {
-    PWMB_ENO   = 0x00;
-    PWMB_CCER1 = 0x00;
-    PWMB_CCMR1 = 0x68;
-    PWMB_CCER1 = 0x05;
-    PWMB_ARRH  = 0x00;
-    PWMB_ARRL  = 255;
-    PWMB_CCR5H = 0x00;
-    PWMB_CCR5L = 128;
-    PWMB_PSCRH = 0x00;
-    PWMB_PSCRL = 0x00;
-    PWMB_PS    = (PWMB_PS & ~0x03) | 0x02;
-    PWMB_ENO   = PWMB_ENO1P;
-    PWMB_BKR   = 0x80;
-    PWMB_CR1   = 0x01;
+    DAC1_DIV = 2;
+    PGA1_CR1 = 0x43;  /* MSEL=Buffer(1), OSEL=P0.7(0), NSEL=P0.5(0), PSEL=DAC1O(3) */
+    PGA1_CR2 = 0x04;  /* GSEL=1, OE=1, PWD=0 */
+    P0n_HighZ(0x80);  /* P0.7 高阻 */
+    P0n_HighZ(0x20);  /* P0.5 高阻 */
+    DAC1_DAT = 2048;
+    DAC1_CR = 0x41;
 }
 
 void test_start(void)
@@ -87,7 +78,7 @@ void timer0_init(void)
 void tm0_isr() interrupt 1
 {
     s16 mix;
-    u8 out;
+    u16 out;
 
     if (test_active)
     {
@@ -104,11 +95,17 @@ void tm0_isr() interrupt 1
     if (ay_active)
     {
         mix = ay_render();
-        if (mix > 127) mix = 127;
-        if (mix < -128) mix = -128;
-        out = 128 + (u8)mix;
-        PWMB_CCR5L = out;
+        mix = mix * 8;
+        if (mix > 2047) mix = 2047;
+        if (mix < -2048) mix = -2048;
+        out = 2048 + (u16)mix;
     }
+    else
+    {
+        out = 2048;  /* 静音时持续输出中点，避免 POP */
+    }
+    DAC1_DAT = out;
+    DAC1_CR = 0x41;
 
     if (++led_tick >= 17640)
     {
@@ -187,7 +184,7 @@ void process_uart(void)
 void main(void)
 {
     sys_init();
-    pwmb_dac_init();
+    dac1_init();
     ay_init();
     test_start();
     timer0_init();
