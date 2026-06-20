@@ -5,7 +5,7 @@ extern char code DEVICEDESC[18];
 extern char code CONFIGDESC[115];  /* 单 CDC, 115 字节 */
 extern char code LANGIDDESC[4];
 extern char code MANUFACTDESC[8];
-extern char code PRODUCTDESC[30];
+extern char code PRODUCTDESC[];
 
 extern char code PACKET0[2];
 extern char code PACKET1[2];
