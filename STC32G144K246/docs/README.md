@@ -4,18 +4,18 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 
 ## 当前状态 (2026-06-21)
 
-### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz (里程碑) ✅
+### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 双音源 (里程碑) ✅
 
 **usb_cdc_test 目录** — 独立可运行的完整固件：
 
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
 2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
 3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-4. **AY8910 开机音** — C4/E4/G4 和弦 2 秒
-5. **VGM 播放** — USB CDC 接收 AY 命令，vgm_player.py 通过 COM24 播放
-6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，无需拔线
-6. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
-7. **PRODUCTDESC** — "STC32G144K Chiptune"
+4. **AY8910 + SN76489 双音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
+5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50) 命令，vgm_player.py 通过 COM24 播放
+6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，续命匹配优先避免和 0x50 冲突
+7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
+8. **PRODUCTDESC** — "STC32G144K Chiptune"
 
 ### DAC1 + PGA1 Buffer 配置
 
@@ -42,8 +42,9 @@ DAC1_CR  = 0x41       // 使能 + 触发输出
 
 | 文件 | 作用 |
 |------|------|
-| `src/main.c` | 入口: sys_init + DAC1 + AY8910 + Timer0 17640Hz + USB CDC + @STCISP# |
+| `src/main.c` | 入口: sys_init + DAC1 + AY8910/SN76489 + Timer0 17640Hz + USB CDC + @STCISP# |
 | `src/ay8910.c/h` | AY8910 音源芯片驱动 + render |
+| `src/sn76489.c/h` | SN76489 (SegaVDP 变体) 仿真核心 + render |
 | `src/usb.c` | USB 寄存器操作 + ISR + EP4 OUT 环形缓冲写入 |
 | `src/usb_desc.c/h` | USB 描述符（CDC 单串口, VID=34BF PID=FF0A） |
 | `src/usb_req_class.c` | CDC 类请求 (LineCoding / SerialState) |
@@ -95,3 +96,9 @@ DAC1 不能直接输出引脚，必须通过 PGA1 Buffer 放大后输出到 P0.7
 ### STC32G.H 完整版冲突
 
 完整版 include 了 stdio.h/string.h/main() 宏，和 C251 编译冲突。需注释掉 stdio.h/string.h 和 main() 宏。
+
+### @STCISP# 和 SN76489 0x50 命令冲突
+
+`@STCISP#` 第 7 字节 `'P'` = 0x50，与 SN76489 VGM 命令前缀 0x50 完全相同。原代码先判 0xA0/0x50 再判 @STCISP#，导致 isp_match 走到 6 之后，`'P'` 被 SN 分支截走，连带吞掉 `'#'`，复位命令永远匹配不完整。
+
+修复：`process_uart()` 改成 `isp_match > 0` 时优先走 @STCISP# 续命分支，只有 `isp_match == 0` 才允许处理 0xA0/0x50 音源命令。

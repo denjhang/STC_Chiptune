@@ -6,6 +6,7 @@
 #include "usb.h"
 #include "timer.h"
 #include "ay8910.h"
+#include "sn76489.h"
 
 char *USER_DEVICEDESC = 0;
 char *USER_PRODUCTDESC = 0;
@@ -20,6 +21,7 @@ static u16 led_tick = 0;
 static u16 test_cnt = 0;
 static u8 test_active = 0;
 static u8 ay_active = 0;
+static u8 sn_active = 0;
 #define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
 
 static u8 isp_match = 0;
@@ -92,18 +94,14 @@ void tm0_isr() interrupt 1
         }
     }
 
-    if (ay_active)
-    {
-        mix = ay_render();
-        mix = mix * 8;
-        if (mix > 2047) mix = 2047;
-        if (mix < -2048) mix = -2048;
-        out = 2048 + (u16)mix;
-    }
-    else
-    {
-        out = 2048;  /* 静音时持续输出中点，避免 POP */
-    }
+    mix = 0;
+    if (ay_active) mix += ay_render();
+    if (sn_active) mix += sn_render();
+
+    mix *= 8;
+    if (mix > 2047) mix = 2047;
+    if (mix < -2048) mix = -2048;
+    out = 2048 + (u16)mix;
     DAC1_DAT = out;
     DAC1_CR = 0x41;
 
@@ -168,7 +166,23 @@ void process_uart(void)
         b = RX1_Buffer[TX1_Cnt];
         if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
-        if (b == 0xA0)
+        /* @STCISP# 续命优先, 否则 0x50='P' 会被 SN 分支截走 */
+        if (isp_match > 0 && b == USER_STCISPCMD[isp_match])
+        {
+            if (++isp_match >= 8)
+            {
+                USBCON = 0x00;
+                USBCLK = 0x00;
+                IRC48MCR = 0x00;
+                IAP_CONTR = 0x60;
+                while (1);
+            }
+        }
+        else if (isp_match == 0 && b == USER_STCISPCMD[0])
+        {
+            isp_match = 1;
+        }
+        else if (b == 0xA0)
         {
             /* AY8910: [0xA0][reg][data] */
             if (TX1_Cnt == RX1_Cnt) break;
@@ -181,24 +195,19 @@ void process_uart(void)
             ay_wr(r, d);
             isp_match = 0;
         }
+        else if (b == 0x50)
+        {
+            /* SN76489: [0x50][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            sn_active = 1;
+            sn_wr(d);
+            isp_match = 0;
+        }
         else
         {
-            /* 逐字节匹配 @STCISP# */
-            if (b == USER_STCISPCMD[isp_match])
-            {
-                if (++isp_match >= 8)
-                {
-                    USBCON = 0x00;
-                    USBCLK = 0x00;
-                    IRC48MCR = 0x00;
-                    IAP_CONTR = 0x60;
-                    while (1);
-                }
-            }
-            else
-            {
-                isp_match = 0;
-            }
+            isp_match = 0;
         }
     }
 }
@@ -208,6 +217,7 @@ void main(void)
     sys_init();
     clk_init_72m();  /* PLL 72MHz, 必须在 usb_init 之前 */
     dac1_init();
+    sn_init();
     ay_init();
     test_start();
     timer0_init();
