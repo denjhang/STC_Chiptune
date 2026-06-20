@@ -6,7 +6,10 @@
 #include "usb.h"
 #include "timer.h"
 #include "ay8910.h"
-/* 暂时只做 AY, 其他音源稍后加 */
+
+char *USER_DEVICEDESC = 0;
+char *USER_PRODUCTDESC = 0;
+char *USER_STCISPCMD = "@STCISP#";
 
 unsigned long MAIN_Fosc = 60000000L;  /* 60MHz (ISP 设) */
 #define SAMPLE_RATE 17640
@@ -20,6 +23,8 @@ static u16 test_cnt = 0;
 static u8 test_active = 0;
 static u8 ay_active = 0;
 #define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
+
+static u8 isp_match = 0;
 
 /* ========== UART 命令缓冲 ========== */
 #define UART1_BUF_LENGTH 2048
@@ -155,6 +160,26 @@ void process_uart(void)
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             ay_active = 1;
             ay_wr(r, d);
+            isp_match = 0;
+        }
+        else
+        {
+            /* 逐字节匹配 @STCISP# */
+            if (b == USER_STCISPCMD[isp_match])
+            {
+                if (++isp_match >= 8)
+                {
+                    USBCON = 0x00;
+                    USBCLK = 0x00;
+                    IRC48MCR = 0x00;
+                    IAP_CONTR = 0x60;
+                    while (1);
+                }
+            }
+            else
+            {
+                isp_match = 0;
+            }
         }
     }
 }
