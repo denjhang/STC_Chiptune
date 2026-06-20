@@ -112,11 +112,20 @@ def parse_vgm_header(data):
         else:
             sn_variant = 1  # Sega VDP (default)
 
+    # NES APU 时钟 (header 0x84, vgm 1.60+), bit31=逆位, 低位为实际 Hz
+    # NTSC: 1789773, PAL: 1662607, 部分野 VGM 用 1652098
+    nes_clock = 0
+    if ver >= 0x160 and len(data) > 0x87:
+        raw = struct.unpack_from('<I', data, 0x84)[0]
+        nes_clock = raw & 0x7FFFFFFF  # 去掉可能的 chip flag bit
+        if nes_clock == 0:
+            nes_clock = 1789773  # 默认 NTSC
+
     return {
         'version': ver, 'eof': eof, 'data_offset': data_off,
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
-        'sn_variant': sn_variant,
+        'sn_variant': sn_variant, 'nes_clock': nes_clock,
     }
 
 
@@ -240,6 +249,11 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     if sn_var is not None:
         print(f"  SN variant: {sn_names.get(sn_var, '?')}")
         ser.write(bytes([0x52, sn_var]))
+    # NES APU 时钟下发 (NTSC=1789773, PAL=1662607, 野档 1652098)
+    nes_clk = hdr.get('nes_clock') or 1789773
+    region = 'NTSC' if nes_clk > 1700000 else 'PAL'
+    print(f"  NES clock: {nes_clk} Hz ({region})")
+    ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 
@@ -984,6 +998,8 @@ def main():
         # SCC: key register 写 0 (全 keyoff), 模仿真实 VGM 结尾序列
         # 真实 VGM 结尾: d2 03 00 00 (port=3 key bank, reg=0, data=0)
         ser.write(bytes([0xD2, 0x03, 0x00, 0x00]))
+        # NES APU: status reg 0x15 写 0, 关闭所有通道
+        ser.write(bytes([0xB4, 0x15, 0x00]))
         # GT: 4 ch note off
         for ch in range(4):
             addr = 0x10 + ch

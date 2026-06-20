@@ -8,6 +8,7 @@
 #include "ay8910.h"
 #include "sn76489.h"
 #include "scc.h"
+#include "nes.h"
 
 char *USER_DEVICEDESC = 0;
 char *USER_PRODUCTDESC = 0;
@@ -24,6 +25,7 @@ static u8 test_active = 0;
 static u8 ay_active = 0;
 static u8 sn_active = 0;
 static u8 scc_active = 0;
+static u8 nes_active = 0;
 #define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
 
 static u8 isp_match = 0;
@@ -100,6 +102,7 @@ void tm0_isr() interrupt 1
     if (ay_active) mix += (s16)(ay_render() * 2);
     if (sn_active) mix += sn_render();
     if (scc_active) mix += (s16)(scc_render() / 2);
+    if (nes_active) mix += nes_render();
 
     mix *= 8;
     if (mix > 2047) mix = 2047;
@@ -225,6 +228,34 @@ void process_uart(void)
             scc_wr(((p & 0x7F) << 1) | 1, d);
             isp_match = 0;
         }
+        else if (b == 0xB4)
+        {
+            /* NES APU: [0xB4][reg][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            nes_active = 1;
+            nes_wr(r, d);
+            isp_match = 0;
+        }
+        else if (b == 0xB5)
+        {
+            /* NES set clock: [0xB5][clk0][clk1][clk2][clk3] little-endian */
+            u32 clk = 0;
+            u8 k;
+            for (k = 0; k < 4; k++) {
+                if (TX1_Cnt == RX1_Cnt) break;
+                clk |= ((u32)RX1_Buffer[TX1_Cnt]) << (k * 8);
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            }
+            if (k == 4) {
+                nes_set_clock(clk);
+            }
+            isp_match = 0;
+        }
         else
         {
             isp_match = 0;
@@ -240,6 +271,7 @@ void main(void)
     sn_init();
     ay_init();
     scc_init();
+    nes_init();
     test_start();
     timer0_init();
     usb_init();
