@@ -11,7 +11,7 @@ char *USER_DEVICEDESC = 0;
 char *USER_PRODUCTDESC = 0;
 char *USER_STCISPCMD = "@STCISP#";
 
-unsigned long MAIN_Fosc = 60000000L;  /* 60MHz (ISP 设) */
+unsigned long MAIN_Fosc = 72000000L;  /* 72MHz HPLL */
 #define SAMPLE_RATE 17640
 
 u8 led_val = 0xFE;
@@ -137,6 +137,28 @@ void sys_init(void)
     P2 = 0xFF;
 }
 
+void clk_init_72m(void)
+{
+    WTST = 3;
+    CLKDIV = 2;
+    VRTRIM = CHIPID22;
+    IRTRIM = CHIPID12;
+    IRCBAND &= ~0x03;
+    IRCBAND |= 0x01;
+    HPLLCR &= ~0x10;
+    HPLLPDIV = 5;
+    HPLLCR &= ~0x0f;
+    HPLLCR |= 0x04;
+    HPLLCR |= 0x80;
+    {
+        unsigned int d;
+        for (d = 0; d < 60000; d++);
+    }
+    CLKSEL &= ~0x03;
+    CLKSEL &= ~0x0c;
+    CLKSEL |= (1 << 2);
+}
+
 void process_uart(void)
 {
     u8 b, r, d;
@@ -184,6 +206,7 @@ void process_uart(void)
 void main(void)
 {
     sys_init();
+    clk_init_72m();  /* PLL 72MHz, 必须在 usb_init 之前 */
     dac1_init();
     ay_init();
     test_start();
