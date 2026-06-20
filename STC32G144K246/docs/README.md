@@ -4,15 +4,16 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 
 ## 当前状态 (2026-06-21)
 
-### USB CDC 纯源码 + DAC1 12-bit 音频输出 (里程碑) ✅
+### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz (里程碑) ✅
 
 **usb_cdc_test 目录** — 独立可运行的完整固件：
 
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
-2. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-3. **AY8910 开机音** — C4/E4/G4 和弦 2 秒
-4. **VGM 播放** — USB CDC 接收 AY 命令，vgm_player.py 通过 COM24 播放
-5. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，无需拔线
+2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
+3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
+4. **AY8910 开机音** — C4/E4/G4 和弦 2 秒
+5. **VGM 播放** — USB CDC 接收 AY 命令，vgm_player.py 通过 COM24 播放
+6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，无需拔线
 6. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 7. **PRODUCTDESC** — "STC32G144K Chiptune"
 
@@ -31,9 +32,10 @@ DAC1_CR  = 0x41       // 使能 + 触发输出
 - 静音时持续输出 2048（中点），避免 POP 声
 - 硬件建议 P0.7 加 3K + 220pF RC 滤波
 
-### 主时钟: 60MHz (ISP 配置)
+### 主时钟: 72MHz PLL
 
-- 通过 STC-ISP 工具设置，代码不改主时钟
+- 代码配置 PLL：24M HIRC → /5 → 4.8M → ×60 → 288M → /2 → 144M → CLKDIV=2 → 72M
+- **PLL 切换必须在 usb_init() 之前**，否则冲击 USB 模块
 - USB 走独立 IRC48M，与主时钟无关
 
 ### usb_cdc_test 文件结构
