@@ -4,18 +4,19 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 
 ## 当前状态 (2026-06-21)
 
-### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 双音源 (里程碑) ✅
+### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 三音源 (里程碑) ✅
 
 **usb_cdc_test 目录** — 独立可运行的完整固件：
 
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
 2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
 3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-4. **AY8910 + SN76489 双音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
-5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50) 命令，vgm_player.py 通过 COM24 播放
+4. **AY8910 + SN76489 + SCC(K051649) 三音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
+5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2) 命令，vgm_player.py 通过 COM24 播放
 6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，续命匹配优先避免和 0x50 冲突
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
+9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
 
 ### DAC1 + PGA1 Buffer 配置
 
@@ -42,9 +43,10 @@ DAC1_CR  = 0x41       // 使能 + 触发输出
 
 | 文件 | 作用 |
 |------|------|
-| `src/main.c` | 入口: sys_init + DAC1 + AY8910/SN76489 + Timer0 17640Hz + USB CDC + @STCISP# |
+| `src/main.c` | 入口: sys_init + DAC1 + AY8910/SN76489/SCC + Timer0 17640Hz + USB CDC + @STCISP# |
 | `src/ay8910.c/h` | AY8910 音源芯片驱动 + render |
 | `src/sn76489.c/h` | SN76489 (SegaVDP 变体) 仿真核心 + render |
+| `src/scc.c/h` | SCC (K051649) 仿真核心 (对齐 RPFM, 双精度 step) + render |
 | `src/usb.c` | USB 寄存器操作 + ISR + EP4 OUT 环形缓冲写入 |
 | `src/usb_desc.c/h` | USB 描述符（CDC 单串口, VID=34BF PID=FF0A） |
 | `src/usb_req_class.c` | CDC 类请求 (LineCoding / SerialState) |
@@ -102,3 +104,22 @@ DAC1 不能直接输出引脚，必须通过 PGA1 Buffer 放大后输出到 P0.7
 `@STCISP#` 第 7 字节 `'P'` = 0x50，与 SN76489 VGM 命令前缀 0x50 完全相同。原代码先判 0xA0/0x50 再判 @STCISP#，导致 isp_match 走到 6 之后，`'P'` 被 SN 分支截走，连带吞掉 `'#'`，复位命令永远匹配不完整。
 
 修复：`process_uart()` 改成 `isp_match > 0` 时优先走 @STCISP# 续命分支，只有 `isp_match == 0` 才允许处理 0xA0/0x50 音源命令。
+
+### SCC (K051649) 对齐 RPFM 实现要点
+
+STC8H/STC32G12K 老版 SCC 仿真音高不准，直接参考 RPFM (github RPFM 项目) 重新实现。关键差异：
+
+1. **切频重置相位** — 写 frequency 时 `counter &= 0xFFFF0000u`，避免相位不连续产生咔哒声
+2. **test bit 0x20/0x1F** — 实现 test register 的 reset 位 (`counter = 0xFFFFFFFF`)
+3. **SCC 共享波表** — 模式下 offset 0x60-0x7F 同时写 ch3+ch4 (硬件共享 bank 3)
+4. **wave RAM 用 int8_t** — 直接带符号，去掉运行时 `>=128` 判断
+5. **双精度 step 计算** — `((double)1789772 * 131072) / ((freq+1) * 17640)`，等价 RPFM 的 64-bit 整数除法，分子 2^37.77 在 double 52-bit 尾数内完全精确。旧整数宏 `(1789772/17640)*131072` 因整数除法截断丢 0.6% 精度，听感偏低
+6. **signed 运算陷阱** — `(s16)wave * (u16)vol` 会被 C 的 usual arithmetic conversions 提升为 unsigned，负半周波形丢失符号变成大正值，累加后 `*8` 严重削顶。必须全用 `s16` 运算
+
+### VGM 协议命令字节
+
+| 前缀 | 芯片 | 格式 |
+|------|------|------|
+| 0xA0 | AY8910 | `[0xA0][reg][data]` |
+| 0x50 | SN76489 | `[0x50][data]` |
+| 0xD2 | SCC K051649 | `[0xD2][port][reg][data]` |

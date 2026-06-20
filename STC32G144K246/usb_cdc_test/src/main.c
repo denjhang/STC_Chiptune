@@ -7,6 +7,7 @@
 #include "timer.h"
 #include "ay8910.h"
 #include "sn76489.h"
+#include "scc.h"
 
 char *USER_DEVICEDESC = 0;
 char *USER_PRODUCTDESC = 0;
@@ -22,6 +23,7 @@ static u16 test_cnt = 0;
 static u8 test_active = 0;
 static u8 ay_active = 0;
 static u8 sn_active = 0;
+static u8 scc_active = 0;
 #define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
 
 static u8 isp_match = 0;
@@ -97,6 +99,7 @@ void tm0_isr() interrupt 1
     mix = 0;
     if (ay_active) mix += ay_render();
     if (sn_active) mix += sn_render();
+    if (scc_active) mix += scc_render();
 
     mix *= 8;
     if (mix > 2047) mix = 2047;
@@ -159,7 +162,7 @@ void clk_init_72m(void)
 
 void process_uart(void)
 {
-    u8 b, r, d;
+    u8 b, r, d, p;
 
     while (TX1_Cnt != RX1_Cnt)
     {
@@ -205,6 +208,23 @@ void process_uart(void)
             sn_wr(d);
             isp_match = 0;
         }
+        else if (b == 0xD2)
+        {
+            /* SCC: [0xD2][port][reg][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            p = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            scc_active = 1;
+            scc_wr((p & 0x7F) << 1, r);
+            scc_wr(((p & 0x7F) << 1) | 1, d);
+            isp_match = 0;
+        }
         else
         {
             isp_match = 0;
@@ -219,6 +239,7 @@ void main(void)
     dac1_init();
     sn_init();
     ay_init();
+    scc_init();
     test_start();
     timer0_init();
     usb_init();
