@@ -981,8 +981,9 @@ def main():
         # SN76489: 4 ch silence
         for d in (0x9F, 0xBF, 0xDF, 0xFF):
             ser.write(bytes([0x50, d]))
-        # SCC: 静音
-        ser.write(bytes([0xD2, 0x00, 0x03, 0x00]))
+        # SCC: key register 写 0 (全 keyoff), 模仿真实 VGM 结尾序列
+        # 真实 VGM 结尾: d2 03 00 00 (port=3 key bank, reg=0, data=0)
+        ser.write(bytes([0xD2, 0x03, 0x00, 0x00]))
         # GT: 4 ch note off
         for ch in range(4):
             addr = 0x10 + ch

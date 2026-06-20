@@ -97,9 +97,9 @@ void tm0_isr() interrupt 1
     }
 
     mix = 0;
-    if (ay_active) mix += ay_render();
+    if (ay_active) mix += (s16)(ay_render() * 2);
     if (sn_active) mix += sn_render();
-    if (scc_active) mix += scc_render();
+    if (scc_active) mix += (s16)(scc_render() / 2);
 
     mix *= 8;
     if (mix > 2047) mix = 2047;

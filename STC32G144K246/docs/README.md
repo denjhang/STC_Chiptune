@@ -123,3 +123,22 @@ STC8H/STC32G12K 老版 SCC 仿真音高不准，直接参考 RPFM (github RPFM �
 | 0xA0 | AY8910 | `[0xA0][reg][data]` |
 | 0x50 | SN76489 | `[0x50][data]` |
 | 0xD2 | SCC K051649 | `[0xD2][port][reg][data]` |
+
+SCC port 字段语义（RPFM 对齐）:
+- port=0x00 写波形 bank (offset 由 reg 决定)
+- port=0x01 写频率 bank
+- port=0x02 写音量 bank
+- port=0x03 写 key register (data bit0-4 = ch0-4 keyon/off)
+- port=0x05 写 test register
+
+### SCC 静音命令的正确写法
+
+参考真实 VGM 文件结尾序列（如 `vgm/scc/11 Stage Clear.vgz` 解压后）:
+
+```
+d2 03 00 00    ← port=3 key bank, reg=0, data=0: 全 5 通道 keyoff
+```
+
+注意 port 和 reg 不能反。错误写法 `[0xD2, 0x00, 0x03, 0x00]` 会把 reg=0x03 解释成波形 bank 的 offset，写波形数据而不是 key register，无法静音。
+
+vgm_player.py finally 块已对齐真实 VGM 序列。
