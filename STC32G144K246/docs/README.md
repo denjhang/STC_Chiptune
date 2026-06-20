@@ -1,210 +1,95 @@
 # STC32G144K246 固件
 
-STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HID/CDC, 100-pin LQFP）。本项目目标是把 STC32G12K128 的 14 乐器多音源合成器迁移过来，并加上 USB 通信能力。
+STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HID/CDC, 100-pin LQFP）。本项目把 12K128 的多音源合成器迁移过来，使用 USB CDC 通信 + 12-bit DAC 音频输出。
 
-## 当前状态 (2026-06-17)
+## 当前状态 (2026-06-21)
 
-### 主时钟: 72MHz HPLL (代码配置) ✅
+### USB CDC 纯源码 + DAC1 12-bit 音频输出 (里程碑) ✅
 
-- **72MHz HPLL** 通过代码 `clk_init_72m()` 配置,对标 STM32F103 主频
-- 路径: `24M HIRC → ÷5 → 4.8M → ×60 → 288M → ÷2 → 144M → CLKDIV=2 → 72M`
-- PLL 配置: HPLLPDIV=5, HPLLCR=0x84 (×60), WTST=3
-- **PLL 切换必须在 USB 初始化之前**, 否则冲击 USB 模块 (历史教训)
-- **72M 是默认 Vcore 下的稳定上限**: 76.8M 时 Flash 取指开始出错,音调反降
-- USB 走独立 IRC48M (48MHz 内部 RC), 跟主时钟无关
+**usb_cdc_test 目录** — 独立可运行的完整固件：
 
-### USB HID 永久下载模式 ✅
+1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
+2. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
+3. **AY8910 开机音** — C4/E4/G4 和弦 2 秒
+4. **VGM 播放** — USB CDC 接收 AY 命令，vgm_player.py 通过 COM24 播放
+5. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，无需拔线
+6. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
+7. **PRODUCTDESC** — "STC32G144K Chiptune"
 
-- **VID=0x34BF PID=0xFF01** (STC-ISP 自动下载默认 PID), product string `"STC USB HID"`, usage_page=0x0C (Consumer Control)
-- 单 HID 接口, **EP1 IN + EP1 OUT, 64 字节**
-- 回环测试 4 个用例全部 PASS（0..63 / 0xAA / 0x55 / 0xFF）
-- **纯源码 USB 栈**, 无 LIB 依赖
-- **`@STCISP#` 自动复位**: STC-ISP 工具一键触发, 无需拔线/按键
+### DAC1 + PGA1 Buffer 配置
 
-### DAC1 + Timer0 音频输出 ✅
+```
+DAC1_DIV = 2          // 60MHz / (2*4) = 7.5MHz 刷新
+PGA1_CR1 = 0x43       // MSEL=Buffer, OSEL=P0.7, NSEL=P0.5, PSEL=DAC1O
+PGA1_CR2 = 0x04       // GSEL=1, OE=1
+DAC1_CR  = 0x41       // 使能 + 触发输出
+```
 
-- **DAC1 P0.7** 12-bit, PGA1 Buffer 模式 (PGA1_CR1=0x43, PGA1_CR2=0x04, DAC1_CR=0x41)
-- **Timer0 17640Hz 中断** (1T 模式, MAIN_Fosc=72MHz) → DAC1 12-bit 输出, 给 AY/SN 合成用
-- DAC1_DIV=2 → 72M/(2*4) = 9MHz 刷新率 (经 PGA 缓冲)
-- **PT0=1 Timer0 高优先级**: USB ISR 不打断音频 ISR (DAC1 far 寻址要 DPTR 稳定)
-- **ISR 写 DAC1 路径验证通过**:
-  - 1000Hz 翻转 → 500Hz 方波 (bce30b3 版本)
-  - 17640Hz 翻转 → 8820Hz 方波
-  - 17640Hz + 100 样本三角波 → 176.4Hz 三角波
-  - 17640Hz + u8 自增锯齿 → 69Hz 锯齿波
-- 全部能听到, ISR + DAC1 链路完全正常
+- 输出引脚: **P0.7**（不是 P0.0）
+- P0.5/P0.7 需高阻（OPA 引脚）
+- 每次 ISR 写 `DAC1_DAT` 后必须写 `DAC1_CR = 0x41` 触发
+- 静音时持续输出 2048（中点），避免 POP 声
+- 硬件建议 P0.7 加 3K + 220pF RC 滤波
 
-### AY8910 移植进行中 ⚠️
+### 主时钟: 60MHz (ISP 配置)
 
-- `ay8910.c/h` 从 STC32G12K128 移植 (12K128 hex 直接烧能响, AY 核心代码本身没问题)
-- **现状**: ISR 调 `ay_render()` 没声音, 但 ISR 不调 ay_render 改写固定波形有声音
-- **怀疑**: 144K246 编译环境下 ay_render 调用有问题 (OVERLAY/寄存器保护/far 寻址冲突)
-- link.args 用 `NOOVERLAY` 没解决, PT0=1 没解决
-- **下一步**: 排查 ay_render 内部 u32 累加 (AY_BASE_INCR=212779134UL) 在 144K246 上的执行, 或试 ISR 用 `#pragma` 把 ay_render 改 registerbank
+- 通过 STC-ISP 工具设置，代码不改主时钟
+- USB 走独立 IRC48M，与主时钟无关
 
-### 移植来源
-
-`stc_hid-master` (https://gitee.com/) — STC32G 三合一 HID 键盘+鼠标+自定义通信。砍掉键盘/鼠标业务, 只保留自定义通信接口。
-
-PLL 配置参考: `Reference_Project/STC-MCU/STC32G144K246初始化配置/main.c`
-
-## 关键文件
+### usb_cdc_test 文件结构
 
 | 文件 | 作用 |
 |------|------|
-| `main.c` | 入口: IRC48M + USB + DAC1 + Timer0 + 流水灯 + HID 回环 |
-| `usb.c/h` | USB 寄存器抽象 + ISR + EP0 setup 状态机 |
-| `usb_req_std.c/h` | 标准请求 (GET_DESCRIPTOR / SET_CONFIGURATION 等) |
-| `usb_req_class.c/h` | HID 类请求 (GET_REPORT / SET_IDLE 等) + EP1 OUT 缓冲 + `@STCISP#` 扫描 |
-| `usb_req_vendor.c/h` | Vendor 请求 stub (返回 STALL) |
-| `usb_desc.c/h` | 描述符: DEVICE / CONFIG / HID Report / 字符串 |
-| `util.c/h` | `reverse2()` 字节序翻转 |
-| `stc.h` | 统一类型头 (bit BOOL / BYTE / WORD / DWORD) |
-| `config.h` | EP 配置宏 (`EN_EP1IN` / `EN_EP1OUT` / `EP1IN_SIZE=64`) |
-| `STC32G.H` | 芯片寄存器定义 (来自 STC 官方) |
+| `src/main.c` | 入口: sys_init + DAC1 + AY8910 + Timer0 17640Hz + USB CDC + @STCISP# |
+| `src/ay8910.c/h` | AY8910 音源芯片驱动 + render |
+| `src/usb.c` | USB 寄存器操作 + ISR + EP4 OUT 环形缓冲写入 |
+| `src/usb_desc.c/h` | USB 描述符（CDC 单串口, VID=34BF PID=FF0A） |
+| `src/usb_req_class.c` | CDC 类请求 (LineCoding / SerialState) |
+| `src/usb_req_std.c` | 标准请求 |
+| `src/usb_req_vendor.c` | Vendor 请求 (STALL) |
+| `src/inc/stc.h` | 统一类型定义 + GPIO 模式宏 |
+| `src/inc/config.h` | EP 端点配置 (EP2IN + EP4IN + EP4OUT) |
+| `src/comm/STC32G.H` | 完整版芯片寄存器定义（含 DAC1/PGA1 far 指针） |
+| `src/util.c` | reverse2() 字节序翻转 |
+| `tools/vgm_player.py` | VGM 播放脚本，默认 COM24 |
 
-## 编译
-
-```bash
-cd STC32G144K246
-
-# 1. 编译每个 .c
-C251.exe util.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe usb.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe usb_req_std.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe usb_req_class.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe usb_req_vendor.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe usb_desc.c "LARGE" "OPTIMIZE(8,SPEED)"
-C251.exe main.c "LARGE" "OPTIMIZE(8,SPEED)"
-
-# 2. 链接 (用响应文件, 因 CLASSES 带括号 bash 处理不了)
-echo 'util.OBJ,usb.OBJ,usb_req_std.OBJ,usb_req_class.OBJ,usb_req_vendor.OBJ,usb_desc.OBJ,main.OBJ TO build/MAIN PRINT(build/MAIN.map) CASE CLASSES(HCONST(0x0-0xFFFFF),EDATA(0x0-0x3FFF),HDATA(0x0-0x3FFF))' > link.args
-L251.exe @link.args
-
-# 3. 生成 hex
-OH251.exe build/MAIN "HEXFILE(build/MAIN.hex)"
-```
-
-预期: 0 错误 2 警告 (L57: `usb_bulk_intr_in` 和 `key_reset_scan` 未调用, 无害)
-
-## 烧录 (首次)
-
-用 STC-ISP 工具, 通过串口烧录 `build/MAIN.hex`:
-- 配置主时钟 IRCBAND/IRTRIM = **64MHz HIRC**
-- 烧录后 USB 插上电脑, 设备管理器显示 VID=34BF PID=FF01
-
-## 后续烧录 (HID 一键下载)
-
-烧完用户代码后, MCU 就成了"永久 HID 下载器":
-
-1. 打开 STC-ISP → 左侧 "收到用户命令后复位到ISP监控程序区"
-2. 勾选 "下次使用HID接口进行ISP下载"
-3. 加载新的 `build/MAIN.hex`
-4. 点 "发送指令触发MCU复位并自动下载"
-5. MCU 收到 `@STCISP#` → 复位进 ISP 监控区 → STC-ISP 自动识别 PID → 自动烧录 → 自动运行用户代码
-
-**不用拔 USB, 不用短接 P3.2**。
-
-## HID 回环测试
+### 编译
 
 ```bash
-pip install hid            # cython-hidapi 0.15.0
-python ../tools/hid_loopback_test.py
+cd STC32G144K246/usb_cdc_test
+py -3 build.py
 ```
 
-4 个用例: `0..63` / `0xAA` / `0x55` / `0xFF`, 全部 PASS。
+输出: `src/build/MAIN.hex`
 
-## `@STCISP#` 自动复位实现
+### 烧录
 
-**关键: 扫描器必须放在 EP1 OUT 中断路径, 不是 EP0 SET_REPORT**
+1. STC-ISP 打开 `src/build/MAIN.hex`，配置主时钟 60MHz
+2. 首次手动上电复位烧录
+3. 后续通过 STC-ISP "收到用户命令后复位到ISP监控程序区" 自动下载
 
-STC-ISP 工具发的 `@STCISP#` 走 HID Output Report → EP1 OUT 中断端点 (实测确认, 通过双探针诊断)。早期误以为走 EP0 SET_REPORT, 写了 `usb_class_ep0_out_done()` 钩子, 实际不触发。
+### 播放 VGM
 
-正确实现 ([usb_req_class.c](../usb_req_class.c)):
-
-```c
-void usb_class_out_ep1()
-{
-    BYTE cnt;
-    BYTE i;
-
-    cnt = usb_bulk_intr_out(HidEp1OutBuffer, 1);
-    if (cnt >= 8)
-    {
-        for (i = 0; i < 8; i++)
-        {
-            if (HidEp1OutBuffer[i] != (BYTE)stcisp_cmd[i]) break;
-        }
-        if (i == 8)
-        {
-            USBCON = 0x00;
-            USBCLK = 0x00;
-            IRC48MCR = 0x00;
-            IAP_CONTR = 0x60;  /* 软件复位到 ISP 监控区 */
-            while (1);
-        }
-    }
-    if (cnt > 0)
-    {
-        HidEp1OutReady = 1;
-    }
-}
+```bash
+cd STC32G144K246/usb_cdc_test
+py -3 tools\vgm_player.py --list --vgm-dir ..\..\vgm\ay8910
+py -3 tools\vgm_player.py 2 --vgm-dir ..\..\vgm\ay8910
 ```
-
-## P3.2 长按复位 (双保险, 默认禁用)
-
-代码保留 `key_reset_scan()` (Timer0 1ms 调用), 但**主循环默认不调用**——因为 P3.2 准双向口浮空会被误判为按键按下, 导致上电 0.5 秒后自动进 ISP。
-
-启用方法:
-1. 硬件上 P3.2 接按键到 GND (+ 外部上拉)
-2. `main.c` Timer0 ISR 里取消 `key_reset_scan()` 调用注释
 
 ## 踩坑记录
 
-### 1. `delay_ms` 必须 `while (--i)`, 不能 `while (i)`
+### CDC 比 UART 稳定
 
-后者 `i` 没人改，永远为真 → 死循环，整 main 卡住，连流水灯都不走。
+USB Bulk 有硬件 CRC16 + 自动重传，不会丢字节。UART 丢一个字节会导致后续命令错位（听起来乱音），CDC 要丢就丢整条命令不会错位。
 
-### 2. 头文件依赖关系
+### RX1_Buffer 环形缓冲
 
-- `usb.c` 必须 `#include "util.h"`，否则 `reverse2` 调用点签名不一致 → 链接报 `UNRESOLVED EXTERNAL SYMBOL`
-- `usb_req_std.c` 必须 `#include "usb_desc.h"` 和 `#include "usb_req_class.h"`，否则 `DESC_HIDREPORT` / `HIDREPORTDESC` / `PACKET0/1` 未定义
+原代码 `RX1_Buffer[RX1_Cnt++]` 无边界检查，AY 命令密度高时 ~2 秒填满 2048 字节越界覆盖其他变量导致死机。改为环形缓冲后满时丢弃新字节。
 
-### 3. 中断号用符号 `USB_VECTOR` 不用数字 25
+### DAC1 必须用 PGA1 Buffer
 
-STC32G.H 已定义 `USB_VECTOR = 25`，直接写符号可读性强，且对其他 STC32G 芯片兼容。
+DAC1 不能直接输出引脚，必须通过 PGA1 Buffer 放大后输出到 P0.7。直接写 DAC1_CR=0x80 无声，必须 0x41（使能+触发）。
 
-### 4. USB 初始化序列 (main.c)
+### STC32G.H 完整版冲突
 
-```c
-IRC48MCR = 0x80;            // 启用内部 48MHz IRC, 专给 USB
-while (!(IRC48MCR & 0x01)); // 等稳定
-USBCLK = 0x00;              // USB 时钟不分频
-USBCON = 0x90;              // ENUSB=1, DP/DM 使能
-usb_init();                 // 写 POWER/INTR 寄存器, EUSB=1
-EA = 1;                     // 开总中断
-```
-
-### 5. 为什么放弃官方 HID LIB
-
-`stc_usb_hid_32g_xdata.LIB` 反复枚举不稳（插上 USB 后设备管理器每秒弹出/消失）。LIB 是黑盒无法调试。开源移植版所有 USB 寄存器操作、状态机分支都在源码里，错了能改，反而稳定。
-
-### 6. EP1 数据流
-
-- **OUT (主机 → MCU)**: USB ISR `usb_out_ep1()` → `usb_class_out_ep1()` → 把 FIFO1 数据搬到 `HidEp1OutBuffer[64]` + `HidEp1OutReady = 1` (同时扫描 `@STCISP#`)
-- **IN (MCU → 主机)**: 主循环查询 `Usb1InBusy == 0` → `hid_send_ep1()` 直接写 FIFO1 + INIPRDY
-
-### 7. USB 不能超频
-
-HPLL 切换瞬间冲击 USB 模块内部状态机, 导致设备管理器"该设备无法启动 (代码 10)"。**用 STC-ISP 烧录时配置 64MHz HIRC 即可, 代码不动主时钟**。USB 走独立 IRC48M, 跟主时钟无关。
-
-### 8. P3.2 浮空误触发
-
-P3.2 准双向口浮空时, 弱上拉拉不动容性负载, 会被反复读到 0, `key_cnt` 累积达到阈值触发 `IAP_CONTR=0x60`, 表现为**上电 0.5 秒后自动进 ISP**。所以 `key_reset_scan()` 默认禁用, 等硬件接好按键再启用。
-
-## 下一步
-
-- [ ] **AY8910 调试**: 找出 ISR 调 ay_render 没声音的根因 (ay8910.c 代码本身正确, 编译/链接问题)
-- [ ] 14 乐器合成器（从 STC32G12K128 移植, AY 先通再上 SN/FM/WT）
-- [ ] USB HID 协议接入 ([0xA0][reg][data] 写 AY)
-- [ ] P3.2 接按键, 启用物理复位
+完整版 include 了 stdio.h/string.h/main() 宏，和 C251 编译冲突。需注释掉 stdio.h/string.h 和 main() 宏。
