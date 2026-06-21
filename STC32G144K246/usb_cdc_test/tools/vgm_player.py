@@ -86,20 +86,33 @@ def parse_vgm_header(data):
     # GD3 标签 10 字段 (VGM spec):
     # 0/1 = 曲名英/日, 2/3 = 游戏名英/日, 4/5 = 系统名英/日,
     # 6/7 = 作者英/日, 8 = 发布日期, 9 = VGM 作者(ripper)
+    # GD3 tag (对齐 libvgm vgmplayer.cpp GetTagData, line 428-467):
+    #   [magic 'Gd3 '][version u32][tag_len u32][utf16le 字段数据]
+    #   字段用 UTF-16 \0 分隔, 共 11 个 (libvgm _TAG_COUNT=11):
+    #     0/1 TITLE/TITLE-JPN, 2/3 GAME/GAME-JPN, 4/5 SYSTEM/SYSTEM-JPN,
+    #     6/7 ARTIST/ARTIST-JPN, 8 DATE, 9 ENCODED_BY (ripper), 10 COMMENT
     gd3 = {'title_en': '', 'title_jp': '', 'game_en': '', 'game_jp': '',
            'system_en': '', 'system_jp': '', 'author_en': '', 'author_jp': '',
-           'date': '', 'vgm_author': '', 'raw': []}
-    if gd3_off and gd3_off < len(data):
+           'date': '', 'vgm_author': '', 'comment': '', 'raw': []}
+    if gd3_off and gd3_off + 12 <= len(data):
         try:
-            tag_len = struct.unpack_from('<I', data, gd3_off)[0]
-            tag_data = data[gd3_off+4:gd3_off+4+tag_len]
-            text = tag_data.decode('utf-16-le', errors='replace')
-            fields = [f.strip('\x00') for f in text.split('\x00') if f.strip('\x00')]
-            gd3['raw'] = fields
-            keys = ['title_en','title_jp','game_en','game_jp','system_en','system_jp',
-                    'author_en','author_jp','date','vgm_author']
-            for i, f in enumerate(fields[:10]):
-                gd3[keys[i]] = f
+            magic = data[gd3_off:gd3_off+4]
+            if magic == b'Gd3 ':
+                tag_ver = struct.unpack_from('<I', data, gd3_off+4)[0]
+                # libvgm 要求 0x100 <= ver < 0x200, 否则视为坏 tag
+                if 0x100 <= tag_ver < 0x200:
+                    tag_len = struct.unpack_from('<I', data, gd3_off+8)[0]
+                    tag_data = data[gd3_off+12:gd3_off+12+tag_len]
+                    text = tag_data.decode('utf-16-le', errors='replace')
+                    # 不能过滤空字段 — jp 字段经常空, 过滤会导致索引错位
+                    fields = text.split('\x00')
+                    while fields and not fields[-1]:
+                        fields.pop()
+                    gd3['raw'] = fields
+                    keys = ['title_en','title_jp','game_en','game_jp','system_en','system_jp',
+                            'author_en','author_jp','date','vgm_author','comment']
+                    for i, f in enumerate(fields[:11]):
+                        gd3[keys[i]] = f.strip('\x00')
         except Exception:
             pass
     # SN76489 变体检测 (header 0x0C=SN clock, 0x28=taps, 0x2A=SRWidth, 0x2B=flags)
@@ -300,26 +313,20 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     ser.write(bytes([0xF0]))
     time.sleep(0.02)
 
-    # GD3 完整显示 (英文优先, 日文做补充; 部分 ripper 英/日标反, 取较短/可打印的那个)
+    # GD3 完整显示 (英文优先, 日文做 fallback)
     gd3 = hdr['gd3']
     def gbk(s):
         return s.encode('gbk', errors='replace').decode('gbk')
-    # 字段选择: 如果英文是乱码 (含非 ASCII 控制符), 用日文版
     def pick(en, jp):
-        if not en: return jp or ''
-        if not jp: return en
-        # 都有时, 优先英文 (除非英文含明显非 ASCII 字符, 说明是日语被标到 en 位)
-        try:
-            en.encode('ascii')
-            return en
-        except UnicodeEncodeError:
-            return jp if len(jp) <= len(en) * 2 else en
+        return en or jp or ''
     title = pick(gd3.get('title_en'), gd3.get('title_jp'))
     game = pick(gd3.get('game_en'), gd3.get('game_jp'))
     system = pick(gd3.get('system_en'), gd3.get('system_jp'))
     author = pick(gd3.get('author_en'), gd3.get('author_jp'))
     date = gd3.get('date', '')
     vgm_author = gd3.get('vgm_author', '')
+    # GD3 第 11 字段 COMMENT (注释/备注, 如 gbs2vgm 转换信息)
+    comment = gd3.get('comment', '')
     if title or game:
         line = f"  Track: {gbk(title)}" if title else "  Track:"
         if game: line += f"  [{gbk(game)}]"
@@ -331,6 +338,7 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     extras = []
     if date: extras.append(f"Date: {date}")
     if vgm_author: extras.append(f"Rip: {gbk(vgm_author)}")
+    if comment: extras.append(f"Comment: {gbk(comment)}")
     if extras:
         print(f"  " + "  ".join(extras))
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz  (data {end - pos} bytes)")
