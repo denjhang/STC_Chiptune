@@ -290,50 +290,226 @@ typedef struct {
 
 ## 12. 最终修复记录 (2026-06-21, GB 成功出声)
 
-经过长时间排查, GB 从"卡死无声"到"正常出声"经过 **三个独立 bug** 的修复:
+经过长时间排查, GB 从"卡死无声"到"正常出声"经过 **三个独立 bug** 的修复。
+本章详细记录每个 bug 的**诊断推理流程** (而不只是结论), 包括走错的弯路和关键转折点,
+作为后续移植其他音源 (FM OpN / C64 SID 等) 的参考。
 
-### Bug 1: NR52 power-off memset 数据竞争 (已修复)
-- **症状**: 早期版本下位机死机需断电
-- **根因**: NR52=0 时在主循环 memset 整个 SOUND 结构, 和 Timer0 ISR 的 gb_render 数据竞争
-- **修复**: NR52 power-off 只清 on 标志, 真正清零交给 gb_init() (0xF0 reset)
+---
 
-### Bug 2: 混音公式方向错误 (已修复)
-- **症状**: 不卡死但完全无声 (DAC 几乎只剩量化噪声)
-- **根因**: libvgm 的 `<<6` (放大 64 倍) 被误抄成 `>>4` (缩小 16 倍), 一来一回差 1024 倍
-- **验证**: Python 仿真器 (tools/gb_sim.py) 喂真实 VGM, 修复前平均幅度 0.73, 修复后 1100
-- **修复**: `mono = (left+right)/2; mono *= vol_avg; mono <<= 6` (对齐 libvgm pump up)
-- **教训**: 仿真器是排查"代码对但实机不响"的利器, 能定量验证 render 输出
+### Bug 1: NR52 power-off memset 数据竞争
 
-### Bug 3: ISR 超时饿死 USB CDC (已修复, 最难定位)
-- **症状**: py 播放 GB 时 `ser.write()` 永久阻塞, 不响应 Ctrl+C; 流水灯正常; 其他音源正常
-- **诊断关键**: 二分法 — ISR 注释掉 `gb_render()` 调用后 py 立刻不卡 → 100% 证明是 render 耗时
-- **根因**: libvgm 原版 `gb_update_wave` 用 `while(cycles_left >= 2)` 逐 GB cycle 推进,
-  22050Hz 下每采样循环 **95 次**, 循环体含除法/表查找 → ISR 超 45μs 预算 3-4 倍 → USB CDC 中断饿死
-- **对比 NES**: `nes_update_square` 循环体只有减法+加法, 循环 ~10 次, 所以 NES 5 通道不卡
-- **修复**: wave 改 NES 风格 phaseacc (cycles_left 累加到 period 才推进), 循环 95→10 次;
-  循环体用 `>>1` 代替 `/2`, level 用 if/else 代替变量移位
-- **教训**: 移植 libvgm 到 MCU 不能照搬 PC 算法, 必须评估 ISR 内循环次数和循环体重量
+**症状**: 烧录初期版本, 播放 GB VGM 时下位机直接死机, 必须断电才能重新烧录。
+py 端也跟着卡死 (USB CDC 串口阻塞)。
 
-### 被证伪的假设 (避免重复踩坑)
-1. ❌ C251 overlay 优化导致 gb_wr/gb_render 数据竞争 — 加 `NOOVERLAY` 链接无效
-2. ❌ VGM_CMD_LEN 表把 0xB3 误设为 4 字节 — GB VGM 没有未知命令, 不影响
-3. ❌ @STCISP# 序列误触发 — 流水灯正常证明没复位
-4. ❌ py 播放器命令发送 bug — 模拟运行证明播放器逻辑 13.4s 正常跑完
-5. ❌ guard 上限调小 (4096→48→16) — 治标不治本, cycles 丢失导致无声或雪崩
-6. ❌ 旧版 12K128 gb.c 移植 — 同样卡死 (旧版 render 也是逐 cycle 循环)
+**排查路径**:
+1. 症状是"死机要断电", 最像硬件异常或栈溢出, 但其他音源正常 → 排除通用问题
+2. 审视 main.c 的 0xB3 命令处理, 发现 NR52=0 (power-off) 分支调用了 memset 清整个 SOUND 结构
+3. SOUND 结构 43 字节 × 4 通道 = 172 字节, memset 在主循环 process_uart 里执行
+4. **关键洞察**: Timer0 ISR (22050Hz) 每 45μs 打断一次主循环, ISR 里调 gb_render 读这些结构
+5. 如果 memset 清到一半被 ISR 打断, gb_render 读到半清零的状态 → 行为未定义 → 可能死机
+
+**根因**: 主循环的 memset 和 ISR 的 gb_render 对同一组 SOUND 结构存在数据竞争。
+memset 不是原子的, 清到一半被 ISR 打断时结构处于不一致状态。
+
+**修复**: NR52 power-off 分支不再 memset, 只清 4 个 on 标志 (单字节写, 原子安全):
+```c
+case NR52:
+    if (!(val & 0x80)) {
+        gb_snd1.on = 0;  /* 只清 on, 不 memset */
+        gb_snd2.on = 0;
+        gb_snd3.on = 0;
+        gb_snd4.on = 0;
+    }
+```
+真正的结构清零交给 gb_init() (0xF0 reset 命令), 那时 ISR 还没启动或已停 GB。
+
+**教训**:
+- MCU 上主循环和 ISR 共享的数据结构, 写操作必须考虑原子性
+- memset 大结构是非原子的, ISR 随时可能读到半更新状态
+- 单字节写 (u8) 在 8051 上是原子的, 多字节写必须关中断或用标志位同步
+
+---
+
+### Bug 2: 混音公式方向错误 (`<<6` 抄成 `>>4`)
+
+**症状**: Bug 1 修复后不再死机, 流水灯正常, py 能正常播完, 但**完全无声** (扬声器绝对安静,
+不是音量小, 是完全没声音)。其他音源正常。
+
+**排查路径 (走了大弯路)**:
+1. 第一反应怀疑 py 播放器没正确解析/发送 GB 命令 → dump VGM 字节, 逐条对比, **完全正确**
+2. 怀疑下位机 0xB3 命令处理逻辑 → 对比 NES 的 0xB4 (工作正常), **代码结构一模一样**
+3. 怀疑 gb_active 没置位 → 检查 main.c, **逻辑正确**
+4. **关键转折: 写 Python 仿真器**。把 gb.c 的 gb_render/gb_update_state 等函数 1:1 翻译成 Python,
+   喂真实 GB VGM 数据进去, 看 render() 输出什么
+5. 仿真器驱动循环第一次写错 (budget 累积 bug), 修好后跑出来: **前 8000 采样非零率 10%, 最大幅度仅 12**
+6. DAC 范围 ±2048, 幅度 12 = 满幅度的 0.6%, **物理上几乎听不见** (扬声器推不动)
+7. 追踪幅度为什么这么小, 看 gb_render 的混音公式
+
+**根因**: libvgm 原版 `gameboy_update` (gb.c:1188-1194):
+```c
+left  *= vol_left;
+left <<= 6;       // pump up the volume (放大 64 倍)
+```
+移植时误抄成:
+```c
+mix_mono >>= 4;   // 缩小 16 倍 (方向完全相反!)
+```
+一来一回差 64×16 = **1024 倍**。signal=1, env=12, vol=7 的正常情形:
+- libvgm: 12 × 7 × 64 = 5376 (满幅度)
+- 我的移植: 24 × 7 / 16 = 10 (几乎听不见)
+
+**验证**: 仿真器修复前后定量对比:
+| 指标 | 修复前 (>>4) | 修复后 (<<6) |
+|------|-------------|-------------|
+| 非零采样率 | 10.1% | 74.3% |
+| 最大幅度 | 12 | 2048 (满幅度) |
+| 平均幅度 | 0.73 | 1100 |
+
+**修复**: 对齐 libvgm, 同时把 mono 合并从"左右累加"改成"(left+right)/2 平均"避免双使能通道 2x 失真:
+```c
+mono = (left + right) / 2;                    // mono 合并
+vol_avg = (vol_left + vol_right + 1) / 2;     // NR50 平均
+mono *= vol_avg;
+mono <<= 6;                                    // pump up (原误为 >>= 4)
+```
+
+**教训**:
+- **仿真器是排查"代码逻辑对但实机不响"的核武器**。人眼盯代码容易漏, 仿真器能定量给出输出幅度
+- `<<` 和 `>>` 看起来只差一个字符, 效果差 1024 倍, 这种错误代码审查很难发现
+- 移植时每个算术运算都要对照原版逐字符核对, 尤其是移位方向
+
+---
+
+### Bug 3: ISR 超时饿死 USB CDC (最难, 排查时间最长)
+
+**症状**: Bug 2 修复后, **py 播放 GB 时 ser.write() 永久阻塞, 不响应 Ctrl+C**。
+流水灯正常 (Timer0 ISR 在跑)。其他音源 (AY/SN/SCC/NES) 完全正常。
+烧旧版 12K128 的 gb.c (曾验证能出声) 移植过来也**同样卡死**。
+
+**排查路径 (走了非常多弯路, 记录所有方向)**:
+
+1. **怀疑 py 播放器 GB 命令发送 bug**:
+   - 对比 NES (0xB4) 和 GB (0xB3) 的发送代码 → 完全一样 (`ser.write(data[pos-1:pos+2])`)
+   - dump VGM 字节流 → 2744 条 0xB3 命令逐条正确
+   - **写无串口模拟器**: 把 ser.write 替换成 FakeSer, 跑完整首歌 → 13.4s 正常跑完, 处理 5557 条命令
+   - 结论: **播放器逻辑完全正确, py 卡死 100% 是 ser.write() 阻塞** (下位机不消费 USB 数据)
+
+2. **怀疑下位机 0xB3 命令路径卡死**:
+   - 对比 0xB3 和 0xB4 的 main.c 处理代码 → 一模一样 (break + 读 reg + 读 data + 调 wr)
+   - 怀疑 gb_wr 内部死循环 → 检查 gb.c, 只有 switch + 简单赋值, 无循环
+   - 怀疑 @STCISP# 序列误触发 → 流水灯正常证明没进 ISP
+
+3. **怀疑 C251 overlay 优化数据竞争** (这个方向花了最久):
+   - 看 MAIN.MAP, 发现 tm0_isr 和 process_uart 是两棵独立 overlay 子树
+   - C251 linker 不知道 ISR 会异步打断 main, 把 gb_render 链和 gb_wr 链的局部变量 overlay 到相同地址
+   - 加 NOOVERLAY 链接参数重编 → **烧录后仍然卡死** ❌ (假设证伪)
+   - 教训: MAP 文件看起来"有问题"不代表是真因, 必须实测验证
+
+4. **怀疑旧版 gb.c 能出声** (基线对照):
+   - 把 STC32G12K128/gb.c (曾验证能出声) 原样移植到 usb_cdc_test, 只改 include
+   - 烧录后 **同样卡死** ❌
+   - 这个结果非常关键: 证明**问题不在 gb.c 代码本身, 而在集成环境** (12K128 和 144K246 的差异)
+
+5. **关键转折: 二分法诊断**:
+   - 既然新旧版 gb.c 都卡, 且 NES 不卡, 做一个确定性实验:
+   - ISR 里注释掉 `if (gb_active) mix += gb_render();`, 改成 `(void)gb_active;`
+   - **保留 gb_active 置位 + gb_wr 命令处理完整路径, 只是不调 render**
+   - 烧录测试 → **py 立刻不卡了! 能正常播完响应 Ctrl+C**
+   - 结论: **100% 证明是 gb_render() 函数本身在 ISR 里执行时间过长**, 和命令路径无关
+
+6. **为什么 gb_render 耗时? 定量分析**:
+   - 22050Hz 下, gb_render 每采样推进 incr ≈ 190 GB cycles
+   - gb_update_wave 用 `while(cycles_left >= 2)` 逐 GB cycle 推进 freq_counter
+   - 190 cycles / 2 = **95 次循环** 每采样
+   - 每次循环体: `offset/2` 除法 + wave RAM 查表 + `level-1` 变量移位 + 多个条件分支
+   - ISR 预算 = 1/22050 = **45μs**, gb_render 单独就耗 100-200μs → **超时 3-4 倍**
+   - ISR 超时 → USB CDC 中断得不到执行时间 → RX1_Buffer 停止填充 → py write 永久阻塞
+
+7. **关键洞察: 为什么 NES 5 通道不卡?**:
+   - 用户一句反问: "为什么 NES 带 DMC 都能 5 通道完美播放, GB 才 4 通道就不行?"
+   - 这句话直接逼出和 NES 的对比 (之前一直只盯 GB 自己)
+   - 看 nes_update_square (nes.c:328-331):
+     ```c
+     while (chan->phaseacc >= freq) {
+         chan->phaseacc -= freq;              // 减法
+         chan->adder = (chan->adder + 1) & 0x0F;   // 加法 + 位运算
+     }
+     ```
+   - **循环体只有减法 + 加法 + 位运算**, 没有除法/表查找/条件分支
+   - NES cycles 81, freq 最小 8 → 循环最多 10 次
+   - GB wave: 循环 95 次 × 重循环体 = NES 工作量的 **~50 倍**
+   - 结论: 不是通道数问题, 是**算法效率问题**。NES 的 phaseacc 累加是 MCU 友好设计, GB 照搬 libvgm 逐 cycle 推进是 PC 思维
+
+8. **第一次修复尝试 (guard 调小) 失败**:
+   - 把 wave/noise 的 guard 从 4096 降到 48, 超出保留 cycles_left
+   - **失败**: cycles_left 保留后下个采样累积更多, guard 再次打满, **雪崩式增长** → 永久打满 → 还是卡
+   - 改成 guard=16 + 超出清零 (丢弃 cycles 防雪崩)
+   - **py 不卡了, 但没声音**: guard 太小, cycles 全丢, wave/noise 完全不前进
+
+9. **最终修复 (NES 风格 phaseacc)**:
+   - 核心思路: 不逐 GB cycle 推进, 而是 cycles_left 当 phaseacc 累加, 达到一个完整波形周期才推进 offset
+   - wave 一个 sample point 的周期 = `2 × (0x800 - frequency)` GB cycles
+   - 190 cycles / period ≈ **5-10 次循环** (从 95 次降到 10 次, 和 NES 相当)
+   - 循环体也优化: `offset/2` → `offset>>1`, level 用 `if/else` 代替变量移位
+   - noise 的 LFSR 是顺序依赖无法公式化, 但 period 本来就大 (8~32768), 循环最多 24 次, guard=32 保底
+   - square 本来就是公式法 (一次除法无循环), 不卡
+   - **烧录测试: 终于出声!** ✅
+
+**根因总结**: libvgm 为 PC (GHz 级 CPU) 设计, 逐 cycle 循环 95 次无所谓。
+照搬到 72MHz MCU 的 45μs ISR 里就是灾难。必须像 NES 那样用 phaseacc 累加 + 轻循环体。
+
+**教训 (最重要)**:
+1. **移植 libvgm 到 MCU 不能照搬 PC 算法**。每个 update 函数必须评估: ISR 内循环次数 × 循环体重量
+2. **遇到"代码逻辑对但实机卡死", 优先怀疑 ISR 执行时间**。用二分法 (注释掉可疑调用) 快速确诊
+3. **遇到"A 音源行 B 音源不行", 立刻对比两者的实现差异** (循环结构/循环体重量), 比孤立排查 B 高效 10 倍
+4. **用户的直觉反问往往是突破口**。"为什么 NES 行 GB 不行"直接定位了算法效率差异
+5. **guard 调小是治标不治本**: 要么雪崩 (保留 cycles), 要么丢声 (清零 cycles)。必须从算法层面减少循环次数
+6. **MAP 文件 / overlay 分析可能误导**: 看起来"有问题"的内存分配不一定是真因, 必须实测验证
+
+---
+
+### 被证伪的假设清单 (避免重复踩坑)
+
+| # | 假设 | 证伪方式 | 结果 |
+|---|------|---------|------|
+| 1 | C251 overlay 导致 gb_wr/gb_render 数据竞争 | 加 NOOVERLAY 链接, 烧录测试 | 仍卡死 ❌ |
+| 2 | VGM_CMD_LEN 表把 0xB3 误设为 4 字节导致命令错位 | 分析 GB VGM 命令流 | 无未知命令, 不影响 ❌ |
+| 3 | @STCISP# 序列误触发进 ISP | 观察流水灯 | 正常, 证明没复位 ❌ |
+| 4 | py 播放器 GB 命令发送 bug | 写无串口模拟器跑完整首 | 13.4s 正常跑完 ❌ |
+| 5 | guard 调小 (4096→48→16) 能解决 ISR 超时 | 烧录测试 | 雪崩卡死 或 丢声 ❌ |
+| 6 | 旧版 12K128 gb.c 移植能绕过问题 | 原样移植烧录 | 同样卡死 ❌ |
+| 7 | 命令密度过高塞满 USB buffer | 对比 NES 字节率 | NES 540B/s > GB 307B/s 都正常 ❌ |
+
+**共同特征**: 这些假设都指向"命令路径/通信/编译器"方向, 而真因是**算法效率**。
+下次遇到类似问题, 先用二分法确诊是不是 ISR 耗时, 再看算法循环次数。
+
+---
 
 ### 最终 gb.c 关键参数
+
 ```
 GB_CLOCK     = 4194304 Hz
 GB_GETA_BITS = 24
-GB_BASE_INCR = 3191326266  (4194304 × 2^24 / 22050)
+GB_BASE_INCR = 3191326266  (4194304 × 2^24 / 22050, 超 LONG_MAX 但 u32 内)
 每采样 incr  ≈ 190 GB cycles
-wave period  = 2 × (0x800 - frequency) GB cycles
-wave 循环次数 ≈ 190 / period ≈ 5-10 次 (可控)
-noise period = 8 ~ 32768 GB cycles
-noise 循环次数 ≈ 190 / 8 = 24 次 (最坏, guard=32 保底)
+
+wave 通道 (NES 风格 phaseacc):
+  period     = 2 × (0x800 - frequency) GB cycles
+  循环次数   ≈ 190 / period ≈ 5-10 次 (原 libvgm 逐 cycle = 95 次)
+  guard      = 32
+
+noise 通道 (保留 LFSR 逐次移位):
+  period     = divisor[reg&7] << (reg>>4)  = 8 ~ 32768 GB cycles
+  循环次数   ≈ 190 / 8 = 24 次 (最坏)
+  guard      = 32
+
+square 通道 (公式法, 无循环):
+  distance   = 0x800 - frequency_counter
+  counter    = 1 + cycles / distance   (一次除法)
+  每采样调用 = 1 次 (无循环)
 ```
 
 ### 产物
-- `src/build/MAIN.hex` — GB 出声版本
-- `tools/gb_sim.py` — Python GB 仿真器 (排查工具, 不参与编译)
+- `src/build/MAIN.hex` — GB 出声版本 (48270 bytes)
+- `tools/gb_sim.py` — Python GB 仿真器 (排查 Bug 2 的工具, 不参与编译)
+- 本文档 §12 — 完整诊断推理流程 (供后续移植其他音源参考)
