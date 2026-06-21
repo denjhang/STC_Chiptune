@@ -207,7 +207,8 @@ py -3 tools\vgm_player.py 1 --vgm-dir ..\..\vgm\gb
   STC32G144K246/docs/GB_INTEGRATION_STATUS.md   ← 本文件
 
 工具:
-  STC32G144K246/usb_cdc_test/tools/vgm_player.py ← 暂未改 GB 相关
+  STC32G144K246/usb_cdc_test/tools/vgm_player.py ← GB 相关已完善 (0xB3 透传/0xF0 reset/GD3+clock 显示, 见 §14)
+  STC32G144K246/usb_cdc_test/tools/gb_sim.py     ← Python GB 仿真器 (排查工具)
 
 参考:
   Reference_Project/vgm_libs/libvgm-master/emu/cores/gb.c  ← libvgm 原版
@@ -653,22 +654,117 @@ GB_BASE_INCR = 3191326266  (4194304 × 2^24 / 22050, 超 LONG_MAX 但 u32 内)
 每采样 incr  ≈ 190 GB cycles
 
 wave 通道 (NES 风格 phaseacc):
-  period     = 2 × (0x800 - frequency) GB cycles
+  period     = 2 × distance = 2 × (0x800 - frequency) GB cycles
   循环次数   ≈ 190 / period ≈ 5-10 次 (原 libvgm 逐 cycle = 95 次)
   guard      = 32
 
-noise 通道 (保留 LFSR 逐次移位):
-  period     = divisor[reg&7] << (reg>>4)  = 8 ~ 32768 GB cycles
+noise 通道 (AY 风格 Galois LFSR, 单次异或移位):
+  period     = noise_div[reg&7] << (reg>>4)  = 8 ~ 32768 GB cycles
   循环次数   ≈ 190 / 8 = 24 次 (最坏)
-  guard      = 32
+  guard      = 8 (循环体极轻, 不需大 guard)
 
 square 通道 (公式法, 无循环):
-  distance   = 0x800 - frequency_counter
-  counter    = 1 + cycles / distance   (一次除法)
+  distance   = 0x800 - frequency (切频时预计算存结构)
+  counter    = 1 + (cyc - distance) / distance   (一次 u16 除法)
   每采样调用 = 1 次 (无循环)
 ```
 
 ### 产物
-- `src/build/MAIN.hex` — GB 出声版本 (48270 bytes)
-- `tools/gb_sim.py` — Python GB 仿真器 (排查 Bug 2 的工具, 不参与编译)
+- `src/build/MAIN.hex` — GB ISR 优化后版本 (47806 bytes, 较优化前 -794)
+- `tools/gb_sim.py` — Python GB 仿真器 (排查 Bug 2/3 + 优化验证工具, 不参与编译)
+
+---
+
+## 14. py 端 GD3/clock 显示完善 (2026-06-22)
+
+GB ISR 优化完成后, 实机播放时发现 py 端显示信息有问题:
+- GD3 只显示 `? - title` (字段大量错位)
+- 纯 GB 曲目误显 `NES clock: 1789773 Hz (NTSC)` (该曲根本没 NES 音源)
+
+### Bug 6: GD3 字段错位 (漏读 magic+version, 过滤空字段)
+
+**症状**: tales/03 Harmonious Moment.vgm 显示成
+```
+  Track: ?  [Harmonious Moment]      ← title 错, game 跑到 title
+  System: Game Boy                    ← system 跑到 game 位对了一半
+  Author: 2000-11-10                  ← date 跑到 author
+  Date: gbs2vgm by Claude & Denjhang  ← comment 跑到 date
+```
+
+**根因 (两个 bug 叠加)**:
+
+1. **漏读 GD3 tag 头的 8 字节**: GD3 tag 结构是 `[magic 'Gd3 '][version u32][tag_len u32][utf16 数据]`,
+   数据从 offset+12 开始。之前代码 `struct.unpack_from('<I', data, gd3_off)[0]` 直接读 offset 处的 4 字节
+   当 tag_len, 实际读到的是 magic `'Gd3 '` = `0x47643320`, 被当成 5 亿字节的 tag_len,
+   字段解析从完全错误的位置开始。
+
+2. **过滤空字段导致索引错位**: jp 字段经常是空字符串, `if f.strip('\x00')` 把它们全过滤掉,
+   后面的字段往前挪, 索引全错。
+
+**修复** (对齐 libvgm `vgmplayer.cpp` GetTagData, line 428-467):
+```python
+if magic == b'Gd3 ':                           # 检查 magic
+    tag_ver = struct.unpack_from('<I', data, gd3_off+4)[0]
+    if 0x100 <= tag_ver < 0x200:               # version 校验 (libvgm 要求)
+        tag_len = struct.unpack_from('<I', data, gd3_off+8)[0]
+        text = data[gd3_off+12:gd3_off+12+tag_len].decode('utf-16-le')
+        fields = text.split('\x00')            # 不过滤空! jp 字段常空
+```
+
+**GD3 标准 11 字段** (libvgm `_TAG_TYPE_LIST`, `_TAG_COUNT=11`):
+```
+0/1: TITLE / TITLE-JPN        (曲名 英/日)
+2/3: GAME / GAME-JPN          (游戏名 英/日)
+4/5: SYSTEM / SYSTEM-JPN      (系统名 英/日)
+6/7: ARTIST / ARTIST-JPN      (作曲 英/日)
+8:   DATE                     (发布日期 YYYY.MM.DD)
+9:   ENCODED_BY               (VGM 作者/ripper)
+10:  COMMENT                  (注释/备注, 如 gbs2vgm 转换信息)
+```
+之前以为只有 10 字段, 漏了最后的 COMMENT (gbs2vgm 转换信息就在这里)。
+
+**验证** (标准 tales 文件):
+```
+title  : 'Harmonious Moment'
+game   : 'Tales of Phantasia - Narikiri Dungeon'
+system : 'Game Boy'
+author : 'M. Sakuraba, S. Tamura, T. Aida'
+date   : '2000-11-10'
+ripper : 'CaitSith2'                         ← ENCODED_BY
+comment: 'gbs2vgm by Claude & Denjhang'      ← COMMENT
+```
+
+### Bug 7: clock 误显 (NES clock 强制默认 + 不按命令过滤)
+
+**症状**: 纯 GB 曲目显示 `NES clock: 1789773 Hz (NTSC)`, 误导用户以为有 NES 音源。
+
+**根因**:
+1. NES clock 解析时 `if nes_clock == 0: nes_clock = 1789773` — header 0x84=0 时强制填 NTSC 默认
+2. 显示时无条件打印 NES clock, 不检查该曲是否真有 NES 命令
+
+**修复** (按命令统计过滤):
+```python
+nes_clk = hdr.get('nes_clock') or 0
+if stats['nes'] > 0:                    # 仅当有 NES 命令时才显示/下发
+    if nes_clk == 0: nes_clk = 1789773  # 无 header clock 才默认 NTSC
+    ser.write(bytes([0xB5]) + ...)      # 0xB5 也只在 NES 曲发
+
+gb_clk = hdr.get('gb_clock') or 0
+if stats['gb'] > 0 and gb_clk:          # 仅当有 GB 命令时显示
+    print(f"  GB clock: {gb_clk} Hz (DMG)")
+```
+
+附带: header 偏移加 VGM version 守护 (`ver >= 0x161` 才读 0x80 GB clock,
+`ver >= 0x160` 才读 0x84 NES clock), 避免低版本 VGM 越界读 GD3 数据。
+
+### 教训
+
+1. **文件格式解析必须对照官方实现**: GD3 结构 libvgm `vgmplayer.cpp` 写得清清楚楚,
+   自己猜结构 (漏 magic+version) 必错。下次涉及 VGM/SF2/IT 等格式, 第一时间查参考实现。
+2. **不要过滤分隔符产生的空字段**: `\x00` 分隔的字段里空值是合法的 (jp 经常空),
+   `if f.strip()` 过滤会破坏索引对齐。
+3. **别自己造术语**: GD3 字段名 libvgm `_TAG_TYPE_LIST` 有标准 (TITLE/.../COMMENT),
+   照着叫, 不要把 COMMENT 说成"工具签名"这种非标准词。
+4. **条件显示要基于实际内容**: clock 显示前先检查命令统计 (`stats['nes'] > 0`),
+   不要无条件显示某个字段 (尤其当它有"默认值"时, 默认值会伪装成真实数据)。
 - 本文档 §12 — 完整诊断推理流程 (供后续移植其他音源参考)
