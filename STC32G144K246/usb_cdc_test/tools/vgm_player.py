@@ -83,15 +83,23 @@ def parse_vgm_header(data):
     loop_samples = struct.unpack_from('<I', data, 0x20)[0] if len(data) > 0x20 else 0
     total_samples = struct.unpack_from('<I', data, 0x18)[0] if len(data) > 0x18 else 0
     gd3_off = struct.unpack_from('<I', data, 0x14)[0] + 0x14 if len(data) > 0x14 else 0
-    gd3 = ""
+    # GD3 标签 10 字段 (VGM spec):
+    # 0/1 = 曲名英/日, 2/3 = 游戏名英/日, 4/5 = 系统名英/日,
+    # 6/7 = 作者英/日, 8 = 发布日期, 9 = VGM 作者(ripper)
+    gd3 = {'title_en': '', 'title_jp': '', 'game_en': '', 'game_jp': '',
+           'system_en': '', 'system_jp': '', 'author_en': '', 'author_jp': '',
+           'date': '', 'vgm_author': '', 'raw': []}
     if gd3_off and gd3_off < len(data):
         try:
             tag_len = struct.unpack_from('<I', data, gd3_off)[0]
             tag_data = data[gd3_off+4:gd3_off+4+tag_len]
             text = tag_data.decode('utf-16-le', errors='replace')
             fields = [f.strip('\x00') for f in text.split('\x00') if f.strip('\x00')]
-            if len(fields) >= 4:
-                gd3 = f"{fields[0]} - {fields[2]}"
+            gd3['raw'] = fields
+            keys = ['title_en','title_jp','game_en','game_jp','system_en','system_jp',
+                    'author_en','author_jp','date','vgm_author']
+            for i, f in enumerate(fields[:10]):
+                gd3[keys[i]] = f
         except Exception:
             pass
     # SN76489 变体检测 (header 0x0C=SN clock, 0x28=taps, 0x2A=SRWidth, 0x2B=flags)
@@ -112,14 +120,17 @@ def parse_vgm_header(data):
         else:
             sn_variant = 1  # Sega VDP (default)
 
-    # NES APU 时钟 (header 0x84, vgm 1.60+), bit31=逆位, 低位为实际 Hz
-    # NTSC: 1789773, PAL: 1662607, 部分野 VGM 用 1652098
+    # NES APU 时钟 (header 0x84, vgm 1.60+), bit31=逆位, 低位为实际 Hz.
+    # 不再强制默认 NTSC — clock=0 表示该 VGM 不含 NES 音源, 显示时按命令统计过滤.
+    # NTSC=1789773, PAL=1662607, 部分野 VGM 用 1652098
     nes_clock = 0
     if ver >= 0x160 and len(data) > 0x87:
-        raw = struct.unpack_from('<I', data, 0x84)[0]
-        nes_clock = raw & 0x7FFFFFFF  # 去掉可能的 chip flag bit
-        if nes_clock == 0:
-            nes_clock = 1789773  # 默认 NTSC
+        nes_clock = struct.unpack_from('<I', data, 0x84)[0] & 0x7FFFFFFF
+
+    # GB DMG 时钟 (header 0x80, vgm 1.61+). DMG 固定 4194304 Hz.
+    gb_clock = 0
+    if ver >= 0x161 and len(data) > 0x83:
+        gb_clock = struct.unpack_from('<I', data, 0x80)[0] & 0x7FFFFFFF
 
     # 扫 0x67 data block, 提取 type=0xC2 NES APU RAM write 的 DMC 采样数据
     # 格式: [0x67][0x66][0xC2][size:4][addr_lo][addr_hi][data...]
@@ -152,7 +163,7 @@ def parse_vgm_header(data):
         'version': ver, 'eof': eof, 'data_offset': data_off,
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
-        'sn_variant': sn_variant, 'nes_clock': nes_clock,
+        'sn_variant': sn_variant, 'nes_clock': nes_clock, 'gb_clock': gb_clock,
         'nes_dmc_blocks': nes_dmc_blocks,
     }
 
@@ -289,22 +300,58 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     ser.write(bytes([0xF0]))
     time.sleep(0.02)
 
-    gd3_text = hdr['gd3'].encode('gbk', errors='replace').decode('gbk')
-    print(f"  GD3: {gd3_text}")
-    print(f"  Duration: {stats['duration']:.1f}s @44100Hz")
-    print(f"  Data: {end - pos} bytes")
-    print(f"  SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} SAA:{stats['saa']} YM:{stats['ym']} Wait:{stats['wait']}")
-    # SN76489 变体自动检测
+    # GD3 完整显示 (英文优先, 日文做补充; 部分 ripper 英/日标反, 取较短/可打印的那个)
+    gd3 = hdr['gd3']
+    def gbk(s):
+        return s.encode('gbk', errors='replace').decode('gbk')
+    # 字段选择: 如果英文是乱码 (含非 ASCII 控制符), 用日文版
+    def pick(en, jp):
+        if not en: return jp or ''
+        if not jp: return en
+        # 都有时, 优先英文 (除非英文含明显非 ASCII 字符, 说明是日语被标到 en 位)
+        try:
+            en.encode('ascii')
+            return en
+        except UnicodeEncodeError:
+            return jp if len(jp) <= len(en) * 2 else en
+    title = pick(gd3.get('title_en'), gd3.get('title_jp'))
+    game = pick(gd3.get('game_en'), gd3.get('game_jp'))
+    system = pick(gd3.get('system_en'), gd3.get('system_jp'))
+    author = pick(gd3.get('author_en'), gd3.get('author_jp'))
+    date = gd3.get('date', '')
+    vgm_author = gd3.get('vgm_author', '')
+    if title or game:
+        line = f"  Track: {gbk(title)}" if title else "  Track:"
+        if game: line += f"  [{gbk(game)}]"
+        print(line)
+    if system:
+        print(f"  System: {gbk(system)}")
+    if author:
+        print(f"  Author: {gbk(author)}")
+    extras = []
+    if date: extras.append(f"Date: {date}")
+    if vgm_author: extras.append(f"Rip: {gbk(vgm_author)}")
+    if extras:
+        print(f"  " + "  ".join(extras))
+    print(f"  Duration: {stats['duration']:.1f}s @44100Hz  (data {end - pos} bytes)")
+    print(f"  CMD: SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} SAA:{stats['saa']} YM:{stats['ym']} Wait:{stats['wait']}")
+    # SN76489 变体自动检测 (仅当有 SN 命令时)
     sn_var = hdr.get('sn_variant')
     sn_names = {0: 'SN76489(15bit)', 1: 'SegaVDP(16bit)', 2: 'SN76489A(17bit)'}
-    if sn_var is not None:
+    if sn_var is not None and stats['sn'] > 0:
         print(f"  SN variant: {sn_names.get(sn_var, '?')}")
         ser.write(bytes([0x52, sn_var]))
-    # NES APU 时钟下发 (NTSC=1789773, PAL=1662607, 野档 1652098)
-    nes_clk = hdr.get('nes_clock') or 1789773
-    region = 'NTSC' if nes_clk > 1700000 else 'PAL'
-    print(f"  NES clock: {nes_clk} Hz ({region})")
-    ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
+    # NES APU 时钟下发 (仅当有 NES 命令时, 避免对纯 GB/AY 曲发无关 NES clock)
+    nes_clk = hdr.get('nes_clock') or 0
+    if stats['nes'] > 0:
+        if nes_clk == 0: nes_clk = 1789773   # 无 header clock, 默认 NTSC
+        region = 'NTSC' if nes_clk > 1700000 else 'PAL'
+        print(f"  NES clock: {nes_clk} Hz ({region})")
+        ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
+    # GB DMG 时钟显示 (仅当有 GB 命令时; GB clock 固定不下发, 固件硬编码 4194304)
+    gb_clk = hdr.get('gb_clock') or 0
+    if stats['gb'] > 0 and gb_clk:
+        print(f"  GB clock: {gb_clk} Hz (DMG)")
     # NES DMC 采样数据下发 (0x67 type=0xC2 RAM write 块)
     # 分片发送, 每包 [0xB6][addr_lo][addr_hi][len<=32][data...]
     dmc_blocks = hdr.get('nes_dmc_blocks') or []

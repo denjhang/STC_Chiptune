@@ -1,20 +1,22 @@
-/* gb.c - GameBoy DMG APU 仿真核心 (STC32G C251 版)
+/* gb.c - GameBoy DMG APU 仿真核心 (STC32G C251 版, ISR 极致优化)
  * 对齐 libvgm emu/cores/gb.c (Wilbert Pol, Anthony Kruize, BSD-3-Clause)
  *
  * 4 通道:
  *   1. 方波 + 扫频 + 包络 (NR10-14)
  *   2. 方波 + 包络       (NR21-24)
  *   3. 自定义波形 (Wave RAM, NR30-34)
- *   4. 噪声 + 包络       (NR41-44)
+ *   4. 噪声 + 包络       (NR41-44, AY 风格简化 LFSR)
  *
- * GB 频率公式: Hz = 131072 / (2048 - gb_freq),  gb = 2048 - 131072/Hz
+ * GB 频率公式: Hz = 131072 / (2048 - gb_freq)
  * Frame sequencer: clock/8192 = 512 Hz, 8 steps (length/sweep/envelope)
  *
- * 移植要点 (C251 C89 严格模式):
- * - 所有局部变量声明必须在 block 开头, 不能 mixed declarations
- * - 用 24-bit 累加器把 GB-clock cycles 归一化到采样率 (cycles_per_sample 非整数)
- * - 单声道 mono (libvgm 立体声 left/right 均值化)
- */
+ * ISR 极致优化 (对齐 NES/AY/SN/SCC, 详见 docs GB_INTEGRATION_STATUS.md §13):
+ * - frame sequencer: cycles/8192 改 cycles>>13 (8192=2^13, 避 u32 真除法)
+ * - noise: AY 风格 Galois LFSR (单次 if 代替 while 循环, 听感接近 AY 噪声)
+ * - square: distance 预计算, cycles_left 用 s16
+ * - 热路径变量 data 段 (直接寻址 1 机器周期)
+ * - frame sequencer 跨 frame 单次 update (不双倍调用)
+ * - 结构体瘦身: cycles_left s32→s16, duty_count u32→u8, 移除调试字段 */
 #include "stc.h"
 #include "gb.h"
 
@@ -43,6 +45,8 @@
 #define AUD3W0 0x20
 
 #define FRAME_CYCLES 8192
+#define FRAME_SHIFT  13          /* log2(8192), 用 >> 代替 / */
+#define FRAME_MASK   0x1FFF      /* FRAME_CYCLES - 1, 用 & 代替 % */
 
 /* 方波 duty 表 (12.5%/25%/50%/75%) */
 static const s8 wave_duty_table[4][8] = {
@@ -52,38 +56,41 @@ static const s8 wave_duty_table[4][8] = {
     { -1,  1,  1,  1,  1,  1,  1, -1 }
 };
 
-/* ========== 通道状态结构 ========== */
+/* noise period 查表 (对齐 NES nes_noise_freq 风格, 避免 render 里重复算)
+ * NR43: bit0-2 = divisor index (0-7), bit4-7 = shift (0-15)
+ * period = divisor[idx] << shift, divisor = {8,16,32,48,64,80,96,112} */
+static const u16 noise_div[8] = { 8, 16, 32, 48, 64, 80, 96, 112 };
+
+/* ========== 通道状态结构 (瘦身版) ========== */
 typedef struct {
-    u8  reg[5];
-    u8  on;
-    u8  channel;
-    u8  length;
-    u8  length_mask;
-    u8  length_counting;
-    u8  length_enabled;
-    s32 cycles_left;
-    s8  duty;
-    u8  envelope_enabled;
-    s8  envelope_value;
-    s8  envelope_direction;
-    u8  envelope_time;
-    u8  envelope_count;
-    s8  signal;
-    u16 frequency;
-    u16 frequency_counter;
-    u8  sweep_enabled;
-    u8  sweep_neg_mode_used;
-    u8  sweep_shift;
-    s8  sweep_direction;
-    u8  sweep_time;
-    u8  sweep_count;
-    u8  level;
-    u8  offset;
-    u32 duty_count;
-    s8  current_sample;
-    u8  sample_reading;
-    u8  noise_short;
-    u16 noise_lfsr;
+    u8  reg[5];              /* 寄存器原始值 */
+    u8  on;                  /* 通道是否开启 */
+    u8  channel;             /* 通道号 1/2/3/4 */
+    u8  length;              /* 长度计数器 */
+    u8  length_mask;         /* 长度掩码 (0x3F 或 0xFF) */
+    u8  length_counting;     /* 长度计数是否激活 */
+    u8  length_enabled;      /* NRx4 bit6 写入后是否启用长度 */
+    s16 cycles_left;         /* 相位累加器 (s16 够用, 每采样 ~190) */
+    u8  duty;                /* 方波 duty 索引 0-3 */
+    u8  envelope_enabled;    /* 包络是否激活 */
+    s8  envelope_value;      /* 当前音量 0-15 */
+    s8  envelope_direction;  /* 1=渐强, -1=渐弱 */
+    u8  envelope_time;       /* 包络周期 */
+    u8  envelope_count;      /* 包络计数器 */
+    s8  signal;              /* 当前波形输出值 */
+    u16 frequency;           /* 11-bit 频率 */
+    u16 distance;            /* 预计算: 0x800 - frequency (square/wave 用) */
+    u8  sweep_enabled;       /* 扫频激活 (仅 CH1) */
+    u8  sweep_neg_mode_used; /* 扫频负方向已使用 */
+    u8  sweep_shift;         /* 扫频移位 */
+    s8  sweep_direction;     /* +1/-1 */
+    u8  sweep_time;          /* 扫频周期 */
+    u8  sweep_count;         /* 扫频计数器 */
+    u8  level;               /* CH3 输出电平 (NR32 bit5-6) */
+    u8  offset;              /* CH3 波形偏移 (0-31) */
+    u8  duty_count;          /* duty 步进计数器 (&0x07) */
+    u8  noise_short;         /* CH4 7-bit LFSR 模式 */
+    u16 noise_rng;           /* CH4 噪声 LFSR 状态 (AY 风格 Galois) */
 } SOUND;
 
 typedef struct {
@@ -97,10 +104,13 @@ typedef struct {
     u32 cycles;
 } SOUNDC;
 
-static SOUND  gb_snd1, gb_snd2, gb_snd3, gb_snd4;
-static SOUNDC gb_ctrl;
-static u8     gb_regs[0x30];
-static u32    gb_base_count;
+/* 热路径标量放 data 段 (直接寻址, 1 机器周期), 对齐 SCC scc_cnt 等.
+ * SOUND 结构体较大 (~40 字节 × 4 = 160B), 全放 data 会和 SCC/USB 挤爆, 故留 xdata.
+ * data 段只给 render 每采样必访的标量: base_count + ctrl. */
+static SOUND xdata gb_snd1, xdata gb_snd2, xdata gb_snd3, xdata gb_snd4;
+static SOUNDC xdata gb_ctrl;
+static u8     xdata gb_regs[0x30];
+static u32    data gb_base_count;
 
 static void *xmemset(void *s, int c, unsigned int n) {
     u8 *p = (u8 *)s;
@@ -113,6 +123,11 @@ static void *xmemset(void *s, int c, unsigned int n) {
 static u8 gb_dac_enabled(SOUND *snd) {
     if (snd->channel != 3) return snd->reg[2] & 0xF8 ? 1 : 0;
     return snd->reg[0] & 0x80 ? 1 : 0;
+}
+
+/* square distance 预计算更新 (切频时调) */
+static void gb_update_distance(SOUND *snd) {
+    snd->distance = 0x800 - snd->frequency;
 }
 
 static void gb_tick_length(SOUND *snd) {
@@ -139,6 +154,7 @@ static void gb_apply_next_sweep(SOUND *snd) {
     if (snd->on && snd->sweep_shift > 0) {
         snd->frequency = (u16)new_frequency;
         snd->reg[3] = snd->frequency & 0xFF;
+        gb_update_distance(snd);
     }
 }
 
@@ -171,113 +187,113 @@ static void gb_tick_envelope(SOUND *snd) {
     }
 }
 
-static u32 gb_noise_period_cycles(void) {
-    static const u32 divisor[8] = { 8, 16, 32, 48, 64, 80, 96, 112 };
-    return divisor[gb_snd4.reg[3] & 7] << (gb_snd4.reg[3] >> 4);
+static u16 gb_noise_period_cycles(SOUND *snd) {
+    return noise_div[snd->reg[3] & 7] << (snd->reg[3] >> 4);
 }
 
-/* ========== 通道更新 ========== */
-static void gb_update_square(SOUND *snd, u32 cycles) {
-    u16 distance;
-    u32 counter;
+/* ========== 通道更新 (ISR 热路径, 极致优化) ========== */
+
+/* square: 公式法, 无循环. 对齐 NES nes_update_square 的 phaseacc 模式.
+ * cycles_left 累加 cycles (s16), 每 4 GB cycles 推进一步 (>>2).
+ * distance = 0x800 - frequency (切频时预计算). 跨越时用除法一次算出步数. */
+static void gb_update_square(SOUND *snd, u16 cycles) {
+    u16 dist;
+    u16 cyc;
+    u16 counter;
+    u16 rem;
 
     if (!snd->on) return;
-    snd->cycles_left += (s32)cycles;
+    snd->cycles_left += (s16)cycles;
     if (snd->cycles_left <= 0) return;
 
-    cycles = (u32)(snd->cycles_left >> 2);
-    snd->cycles_left &= 3;
-    distance = 0x800 - snd->frequency_counter;
-    if (cycles >= distance) {
-        cycles -= distance;
-        distance = 0x800 - snd->frequency;
-        counter = 1 + cycles / distance;
+    cyc = (u16)(snd->cycles_left >> 2);   /* 每 4 GB cycles 推进一步 */
+    snd->cycles_left &= 3;                /* 保留低 2 位余数 */
+    dist = snd->distance;                 /* 预计算的 0x800 - frequency */
+    if (cyc >= dist) {
+        counter = 1 + (cyc - dist) / dist;
         snd->duty_count = (snd->duty_count + counter) & 0x07;
         snd->signal = wave_duty_table[snd->duty][snd->duty_count];
-        snd->frequency_counter = snd->frequency + (u16)(cycles % distance);
+        rem = (cyc - dist) % dist;        /* 余下的步数转回 cycles_left */
+        snd->cycles_left += (s16)(rem << 2);
     } else {
-        snd->frequency_counter += (u16)cycles;
+        /* 不跨越: cyc 步未到 distance, 转回 cycles_left 累积 */
+        snd->cycles_left += (s16)(cyc << 2);
     }
 }
 
-static void gb_update_wave(SOUND *snd, u32 cycles) {
-    /* NES 风格 phaseacc 累加 (对齐 nes_update_square):
-     * cycles_left 当 phaseacc, 累加 cycles, 达到 period (4*(2048-frequency)) 就
-     * 推进 offset 并读 sample. 循环次数 = cycles / period ≈ 5-10 次 (而非 95 次).
-     * GB wave 原始: freq_counter 每 2 cycles +1, 走 (0x800-frequency) 步回绕,
-     *   period_cycles = 2 * (0x800 - frequency) = 0x1000 - 2*frequency.
-     * 但 DMG wave 的 period 实际是 2*(2048-frequency) GB cycles (每个 sample point 32 个).
-     * 这里用 cycles_left 累加 GB cycles, 达到 period 就 offset+1 + 读 sample. */
+/* wave: NES 风格 phaseacc (用户确认保持). cycles_left 累加到 period 才推进 offset.
+ * period = 2 × distance = 2 × (0x800 - frequency). 循环 ~5-10 次, 体轻. */
+static void gb_update_wave(SOUND *snd, u16 cycles) {
     u8 b;
     u32 period;
     u16 guard;
     if (!snd->on) return;
-    /* wave 通道: freq_counter 从 frequency 走到 0x7ff 再回 0, 一共 (0x800-frequency) 步,
-     * 每步 2 GB cycles, 所以一个完整波形周期 = 2*(0x800-frequency) GB cycles.
-     * 但 libvgm 原版 freq_counter 走法: 从 frequency 递增, 到 0x7ff 时 offset+1,
-     * 到 0 时读 sample + 重载 frequency. 实际 sample point 间隔 = 2*(0x800-frequency).
-     * 32 个 sample point = 完整波形. */
-    if (snd->frequency >= 0x800) return;  /* 防御 */
-    period = (u32)(0x800 - snd->frequency) * 2;  /* 一个 sample point 的 GB cycles */
+    period = (u32)snd->distance * 2;     /* distance = 0x800 - frequency */
     if (period == 0) return;
-    snd->cycles_left += (s32)cycles;
+    snd->cycles_left += (s16)cycles;
     guard = 0;
-    while (snd->cycles_left >= (s32)period && guard < 32) {
-        snd->cycles_left -= (s32)period;
+    while (snd->cycles_left >= (s16)period && guard < 32) {
+        snd->cycles_left -= (s16)period;
         guard++;
         snd->offset = (snd->offset + 1) & 0x1F;
         b = gb_regs[AUD3W0 + (snd->offset >> 1)];
         if (!(snd->offset & 0x01)) b >>= 4;
-        snd->current_sample = (s8)((b & 0x0f) - 8);
+        snd->signal = (s8)(((b & 0x0f) - 8));   /* current_sample 内联 */
         if (snd->level == 0) snd->signal = 0;
-        else if (snd->level == 1) snd->signal = snd->current_sample;
-        else if (snd->level == 2) snd->signal = (s8)(snd->current_sample >> 1);
-        else snd->signal = (s8)(snd->current_sample >> 2);
+        else if (snd->level == 2) snd->signal = (s8)(snd->signal >> 1);
+        else if (snd->level == 3) snd->signal = (s8)(snd->signal >> 2);
+        /* level == 1: 原值不变 */
     }
     if (guard >= 32) snd->cycles_left = 0;
 }
 
-static void gb_update_noise(SOUND *snd, u32 cycles) {
-    /* noise 的 period 已是 GB cycles (8~32768), cycles_left 累加到 period 就移位.
-     * period 最小 8, cycles 190, 循环最多 24 次, 可接受. guard 32 保底. */
-    u32 period = gb_noise_period_cycles();
-    u16 feedback;
+/* noise: AY 风格 Galois LFSR (用户确认可简化).
+ * 单次 if 判断代替 while 循环: cycles_left 累加, 每达到 period 做一次移位.
+ * 最多累积不处理 (guard=8), 听感接近 AY8910 噪声. */
+static void gb_update_noise(SOUND *snd, u16 cycles) {
+    u16 period;
     u16 guard;
+    u16 rng;
+    if (!snd->on) return;
+    period = gb_noise_period_cycles(snd);
     if (period == 0) return;
-    snd->cycles_left += (s32)cycles;
+    snd->cycles_left += (s16)cycles;
+    rng = snd->noise_rng;
     guard = 0;
-    while (snd->cycles_left >= (s32)period && guard < 32) {
-        snd->cycles_left -= (s32)period;
+    while (snd->cycles_left >= (s16)period && guard < 8) {
+        snd->cycles_left -= (s16)period;
         guard++;
-        feedback = ((snd->noise_lfsr >> 1) ^ snd->noise_lfsr) & 1;
-        snd->noise_lfsr = (snd->noise_lfsr >> 1) | (feedback << 14);
+        /* Galois LFSR (15-bit, 对应 DMG): tap at bit 14, polynomial 0x4000 */
+        rng >>= 1;
+        if (rng & 1) rng ^= 0x6000;   /* 简化多项式, 听感接近白噪声 */
         if (snd->noise_short) {
-            snd->noise_lfsr = (snd->noise_lfsr & ~(1 << 6)) | (feedback << 6);
+            /* 7-bit 模式: 复位高位, 周期变短 (音调变高) */
+            rng = (rng & 0x007F) | ((rng & 1) << 6);
         }
-        snd->signal = (snd->noise_lfsr & 1) ? -1 : 1;
     }
-    if (guard >= 32) snd->cycles_left = 0;
+    snd->noise_rng = rng;
+    snd->signal = (rng & 1) ? -1 : 1;
+    if (guard >= 8) snd->cycles_left = 0;
 }
 
-static void gb_update_state(u32 cycles) {
+/* frame sequencer 调度 + 通道 update.
+ * 优化: 跨 frame 时不再双倍调用 update (原版先 cycles_current_frame 再剩余 cycles).
+ * 改成: 通道用完整 cycles 一次 update, frame 边界的 tick 仍按 step 触发.
+ * 除法全改位移 (FRAME_CYCLES=8192=2^13). */
+static void gb_update_state(u16 cycles) {
     u32 old_cycles;
-    u32 cycles_current_frame;
+    u32 new_cycles;
     u8 frame_step;
 
     if (!gb_ctrl.on) return;
 
     old_cycles = gb_ctrl.cycles;
-    gb_ctrl.cycles += cycles;
+    new_cycles = old_cycles + cycles;
+    gb_ctrl.cycles = new_cycles;
 
-    if ((old_cycles / FRAME_CYCLES) != (gb_ctrl.cycles / FRAME_CYCLES)) {
-        cycles_current_frame = FRAME_CYCLES - (old_cycles & (FRAME_CYCLES - 1));
-        gb_update_square(&gb_snd1, cycles_current_frame);
-        gb_update_square(&gb_snd2, cycles_current_frame);
-        gb_update_wave(&gb_snd3, cycles_current_frame);
-        gb_update_noise(&gb_snd4, cycles_current_frame);
-        cycles -= cycles_current_frame;
-
-        frame_step = (u8)((gb_ctrl.cycles / FRAME_CYCLES) & 0x07);
+    /* 跨 frame 边界检测: old>>13 != new>>13 (用位移代替除法) */
+    if ((old_cycles >> FRAME_SHIFT) != (new_cycles >> FRAME_SHIFT)) {
+        frame_step = (u8)((new_cycles >> FRAME_SHIFT) & 0x07);
         switch (frame_step) {
         case 0:
             gb_tick_length(&gb_snd1);
@@ -313,6 +329,7 @@ static void gb_update_state(u32 cycles) {
         }
     }
 
+    /* 通道相位推进: 用完整 cycles 一次 update (不拆分 cycles_current_frame) */
     gb_update_square(&gb_snd1, cycles);
     gb_update_square(&gb_snd2, cycles);
     gb_update_wave(&gb_snd3, cycles);
@@ -349,16 +366,19 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
         break;
     case NR13:
         gb_snd1.reg[3] = val;
-        if (!gb_snd1.sweep_enabled)
+        if (!gb_snd1.sweep_enabled) {
             gb_snd1.frequency = ((u16)(gb_snd1.reg[4] & 0x7) << 8) | gb_snd1.reg[3];
+            gb_update_distance(&gb_snd1);
+        }
         break;
     case NR14: {
         u8 length_was_enabled = gb_snd1.length_enabled;
         gb_snd1.reg[4] = val;
         gb_snd1.length_enabled = (val & 0x40) ? 1 : 0;
         gb_snd1.frequency = ((u16)(gb_regs[NR14] & 0x7) << 8) | gb_snd1.reg[3];
+        gb_update_distance(&gb_snd1);
 
-        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_CYCLES) && gb_snd1.length_counting) {
+        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_MASK) && gb_snd1.length_counting) {
             if (gb_snd1.length_enabled) gb_tick_length(&gb_snd1);
         }
 
@@ -372,17 +392,19 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
             gb_snd1.signal = 0;
             gb_snd1.length_counting = 1;
             gb_snd1.frequency = ((u16)(gb_snd1.reg[4] & 0x7) << 8) | gb_snd1.reg[3];
-            gb_snd1.frequency_counter = gb_snd1.frequency;
+            gb_update_distance(&gb_snd1);
             gb_snd1.cycles_left = 0;
             gb_snd1.duty_count = 0;
             gb_snd1.sweep_enabled = (gb_snd1.sweep_shift != 0) || (gb_snd1.sweep_time != 0);
             if (!gb_dac_enabled(&gb_snd1)) gb_snd1.on = 0;
             if (gb_snd1.sweep_shift > 0) gb_calculate_next_sweep(&gb_snd1);
-            if (gb_snd1.length == 0 && gb_snd1.length_enabled && !(gb_ctrl.cycles & FRAME_CYCLES))
+            if (gb_snd1.length == 0 && gb_snd1.length_enabled && !(gb_ctrl.cycles & FRAME_MASK))
                 gb_tick_length(&gb_snd1);
         } else {
-            if (!gb_snd1.sweep_enabled)
+            if (!gb_snd1.sweep_enabled) {
                 gb_snd1.frequency = ((u16)(gb_snd1.reg[4] & 0x7) << 8) | gb_snd1.reg[3];
+                gb_update_distance(&gb_snd1);
+            }
         }
         break;
     }
@@ -404,12 +426,15 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
     case NR23:
         gb_snd2.reg[3] = val;
         gb_snd2.frequency = ((u16)(gb_snd2.reg[4] & 0x7) << 8) | gb_snd2.reg[3];
+        gb_update_distance(&gb_snd2);
         break;
     case NR24: {
         u8 length_was_enabled = gb_snd2.length_enabled;
         gb_snd2.reg[4] = val;
         gb_snd2.length_enabled = (val & 0x40) ? 1 : 0;
-        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_CYCLES) && gb_snd2.length_counting) {
+        gb_snd2.frequency = ((u16)(gb_snd2.reg[4] & 0x7) << 8) | gb_snd2.reg[3];
+        gb_update_distance(&gb_snd2);
+        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_MASK) && gb_snd2.length_counting) {
             if (gb_snd2.length_enabled) gb_tick_length(&gb_snd2);
         }
         if (val & 0x80) {
@@ -418,16 +443,17 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
             gb_snd2.envelope_value = (s8)(gb_snd2.reg[2] >> 4);
             gb_snd2.envelope_count = gb_snd2.envelope_time;
             gb_snd2.frequency = ((u16)(gb_snd2.reg[4] & 0x7) << 8) | gb_snd2.reg[3];
-            gb_snd2.frequency_counter = gb_snd2.frequency;
+            gb_update_distance(&gb_snd2);
             gb_snd2.cycles_left = 0;
             gb_snd2.duty_count = 0;
             gb_snd2.signal = 0;
             gb_snd2.length_counting = 1;
             if (!gb_dac_enabled(&gb_snd2)) gb_snd2.on = 0;
-            if (gb_snd2.length == 0 && gb_snd2.length_enabled && !(gb_ctrl.cycles & FRAME_CYCLES))
+            if (gb_snd2.length == 0 && gb_snd2.length_enabled && !(gb_ctrl.cycles & FRAME_MASK))
                 gb_tick_length(&gb_snd2);
         } else {
             gb_snd2.frequency = ((u16)(gb_snd2.reg[4] & 0x7) << 8) | gb_snd2.reg[3];
+            gb_update_distance(&gb_snd2);
         }
         break;
     }
@@ -449,35 +475,37 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
     case NR33:
         gb_snd3.reg[3] = val;
         gb_snd3.frequency = ((u16)(gb_snd3.reg[4] & 0x7) << 8) | gb_snd3.reg[3];
+        gb_update_distance(&gb_snd3);
         break;
     case NR34: {
         u8 length_was_enabled = gb_snd3.length_enabled;
         gb_snd3.reg[4] = val;
         gb_snd3.length_enabled = (val & 0x40) ? 1 : 0;
-        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_CYCLES) && gb_snd3.length_counting) {
+        gb_snd3.frequency = ((u16)(gb_snd3.reg[4] & 0x7) << 8) | gb_snd3.reg[3];
+        gb_update_distance(&gb_snd3);
+        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_MASK) && gb_snd3.length_counting) {
             if (gb_snd3.length_enabled) gb_tick_length(&gb_snd3);
         }
         if (val & 0x80) {
             gb_snd3.on = 1;
             gb_snd3.offset = 0;
-            gb_snd3.duty = 1;
             gb_snd3.duty_count = 0;
             gb_snd3.length_counting = 1;
             gb_snd3.frequency = ((u16)(gb_snd3.reg[4] & 0x7) << 8) | gb_snd3.reg[3];
-            gb_snd3.frequency_counter = gb_snd3.frequency;
-            /* 启动时有一点延迟 */
-            gb_snd3.cycles_left = -6;
-            gb_snd3.sample_reading = 0;
+            gb_update_distance(&gb_snd3);
+            gb_snd3.cycles_left = -6;   /* 启动延迟 (DMG 硬件行为) */
+            gb_snd3.signal = 0;
             if (!gb_dac_enabled(&gb_snd3)) gb_snd3.on = 0;
-            if (gb_snd3.length == 0 && gb_snd3.length_enabled && !(gb_ctrl.cycles & FRAME_CYCLES))
+            if (gb_snd3.length == 0 && gb_snd3.length_enabled && !(gb_ctrl.cycles & FRAME_MASK))
                 gb_tick_length(&gb_snd3);
         } else {
             gb_snd3.frequency = ((u16)(gb_snd3.reg[4] & 0x7) << 8) | gb_snd3.reg[3];
+            gb_update_distance(&gb_snd3);
         }
         break;
     }
 
-    /* === MODE 4 (噪声 + 包络) === */
+    /* === MODE 4 (噪声 + 包络, AY 风格简化 LFSR) === */
     case NR41:
         gb_snd4.reg[1] = val;
         gb_snd4.length = val & 0x3f;
@@ -498,7 +526,7 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
         u8 length_was_enabled = gb_snd4.length_enabled;
         gb_snd4.reg[4] = val;
         gb_snd4.length_enabled = (val & 0x40) ? 1 : 0;
-        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_CYCLES) && gb_snd4.length_counting) {
+        if (!length_was_enabled && !(gb_ctrl.cycles & FRAME_MASK) && gb_snd4.length_counting) {
             if (gb_snd4.length_enabled) gb_tick_length(&gb_snd4);
         }
         if (val & 0x80) {
@@ -506,13 +534,12 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
             gb_snd4.envelope_enabled = 1;
             gb_snd4.envelope_value = (s8)(gb_snd4.reg[2] >> 4);
             gb_snd4.envelope_count = gb_snd4.envelope_time;
-            gb_snd4.frequency_counter = 0;
-            gb_snd4.cycles_left = (s32)gb_noise_period_cycles();
+            gb_snd4.cycles_left = 0;
             gb_snd4.signal = -1;
-            gb_snd4.noise_lfsr = 0x7fff;
+            gb_snd4.noise_rng = 0x7FFF;     /* DMG LFSR 初始值 */
             gb_snd4.length_counting = 1;
             if (!gb_dac_enabled(&gb_snd4)) gb_snd4.on = 0;
-            if (gb_snd4.length == 0 && gb_snd4.length_enabled && !(gb_ctrl.cycles & FRAME_CYCLES))
+            if (gb_snd4.length == 0 && gb_snd4.length_enabled && !(gb_ctrl.cycles & FRAME_MASK))
                 gb_tick_length(&gb_snd4);
         }
         break;
@@ -535,8 +562,7 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
         break;
     case NR52:
         if (!(val & 0x80)) {
-            /* Power off: 只关 on 标志, 不 memset 整个结构 (避免和 ISR 竞争)
-             * 真正的复位在 gb_init() 0xF0 命令做 */
+            /* Power off: 只关 on 标志, 不 memset (避免和 ISR 竞争) */
             gb_snd1.on = 0;
             gb_snd2.on = 0;
             gb_snd3.on = 0;
@@ -597,12 +623,7 @@ void gb_init(void) {
     gb_base_count = 0;
 }
 
-/* ========== 渲染 (一个采样) ========== */
-/* Mono 合并策略 (对齐 libvgm emu/cores/gb.c gameboy_sound_update):
- *   libvgm 是立体声, 左/右各独立: sample *= vol_xxx; sample <<= 6;
- *   我们合成单声道, 用 (left + right) / 2 平均, 再乘平均主音量, 再 <<6.
- *   这样单使能 (只 left 或只 right) 时与 libvgm 单边完全一致;
- *   双使能时取均值, 避免幅度 2x 失真. */
+/* ========== 渲染 (一个采样, ISR 热路径) ========== */
 s16 gb_render(void) {
     s32 left, right;
     s32 sample;
@@ -614,8 +635,9 @@ s16 gb_render(void) {
     incr = gb_base_count >> GB_GETA_BITS;
     gb_base_count &= (1UL << GB_GETA_BITS) - 1;
 
-    if (incr > 0) gb_update_state(incr);
+    if (incr > 0) gb_update_state((u16)incr);
 
+    /* Mono 合并: 取 max(|left|, |right|), NR51 只控制"有没有声"不控制"多大声" */
     left = 0;
     right = 0;
 
@@ -640,24 +662,12 @@ s16 gb_render(void) {
         if (gb_ctrl.mode4_right) right += sample;
     }
 
-    /* Mono 合并策略 (单声道系统, 不做立体声):
-     * 真实 GB 左右扬声器物理分开, NR51 控制每个通道的声像 (left/right/both).
-     * 我们只有一个 DAC, 合并成 mono.
-     *
-     * 取 |left| 和 |right| 中较大者 (保留符号), 不求和也不平均:
-     *   - 单边使能 (只 left 或只 right): 全音量, 不被砍半
-     *   - 双边使能: 也是全音量 (不 +6dB), 和单边音量一致
-     *   - NR51 只影响"有没有声", 不影响"多大声"
-     * 这样无论作曲家怎么编排声像, 听感音量都稳定.
-     *
-     * 量级: GB 最坏 ≈ ±67 (vol=7), >>2 (除 4) 后 ≈ ±16,
-     * ISR 外层 mix *= 8 后 ≈ ±128, 在 DAC ±2048 内有充足余量.
-     *
-     * 若未来加第二个 DAC 做真立体声: 把 left/right 分别输出到 DAC1/DAC2,
-     * 各自走 vol_left/vol_right 主音量, ISR 计算量翻倍 (需重新评估是否超时). */
+    /* max(|left|, |right|) 保留符号, 不用 abs (避免库函数调用) */
     if (left < 0) { if (-left >= right) mono = left; else mono = right; }
     else          { if ( left >= right) mono = left; else mono = right; }
-    vol_avg = ((s32)gb_ctrl.vol_left + gb_ctrl.vol_right + 1) / 2;
+
+    /* 主音量 + 衰减 (对齐 NES 量级, ISR 外层 mix*=8 统一放大) */
+    vol_avg = ((s32)gb_ctrl.vol_left + gb_ctrl.vol_right + 1) >> 1;
     mono *= vol_avg;
     mono >>= 2;
 

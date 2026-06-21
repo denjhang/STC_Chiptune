@@ -33,21 +33,20 @@ class SOUND:
     __slots__ = ['reg','on','channel','length','length_mask','length_counting',
                  'length_enabled','cycles_left','duty','envelope_enabled',
                  'envelope_value','envelope_direction','envelope_time',
-                 'envelope_count','signal','frequency','frequency_counter',
+                 'envelope_count','signal','frequency','distance',
                  'sweep_enabled','sweep_neg_mode_used','sweep_shift',
                  'sweep_direction','sweep_time','sweep_count','level','offset',
-                 'duty_count','current_sample','sample_reading','noise_short','noise_lfsr']
+                 'duty_count','noise_short','noise_rng']
     def __init__(self, channel, length_mask):
         self.reg=[0,0,0,0,0]; self.on=0; self.channel=channel
         self.length=0; self.length_mask=length_mask; self.length_counting=0
         self.length_enabled=0; self.cycles_left=0; self.duty=0
         self.envelope_enabled=0; self.envelope_value=0; self.envelope_direction=0
         self.envelope_time=0; self.envelope_count=0; self.signal=0
-        self.frequency=0; self.frequency_counter=0; self.sweep_enabled=0
+        self.frequency=0; self.distance=0x800; self.sweep_enabled=0
         self.sweep_neg_mode_used=0; self.sweep_shift=0; self.sweep_direction=0
         self.sweep_time=0; self.sweep_count=0; self.level=0; self.offset=0
-        self.duty_count=0; self.current_sample=0; self.sample_reading=0
-        self.noise_short=0; self.noise_lfsr=0
+        self.duty_count=0; self.noise_short=0; self.noise_rng=0
 
 def mask32(x):  return x & 0xFFFFFFFF
 
@@ -138,67 +137,65 @@ class GB:
         return divisor[self.snd4.reg[3] & 7] << (self.snd4.reg[3] >> 4)
 
     def update_square(self, snd, cycles):
+        # 对齐优化版 gb.c: distance 预计算, s16 cycles_left, 公式法无循环
         if not snd.on: return
         snd.cycles_left += cycles
         if snd.cycles_left <= 0: return
-        cycles = snd.cycles_left >> 2
+        cyc = snd.cycles_left >> 2
         snd.cycles_left &= 3
-        distance = 0x800 - snd.frequency_counter
-        if cycles >= distance:
-            cycles -= distance
-            distance = 0x800 - snd.frequency
-            counter = 1 + cycles // distance
+        dist = snd.distance
+        if cyc >= dist:
+            counter = 1 + (cyc - dist) // dist
             snd.duty_count = (snd.duty_count + counter) & 0x07
             snd.signal = WAVE_DUTY[snd.duty][snd.duty_count]
-            snd.frequency_counter = snd.frequency + (cycles % distance)
+            rem = (cyc - dist) % dist
+            snd.cycles_left += rem << 2
         else:
-            snd.frequency_counter += cycles
+            snd.cycles_left += cyc << 2
 
     def update_wave(self, snd, cycles):
+        # 对齐优化版 gb.c: phaseacc 风格, period = 2 × distance
         if not snd.on: return
-        snd.cycles_left += cycles
-        guard = 0
-        while snd.cycles_left >= 2 and guard < 4096:
-            snd.cycles_left -= 2; guard += 1
-            snd.frequency_counter = (snd.frequency_counter + 1) & 0x7ff
-            snd.sample_reading = 0
-            if snd.frequency_counter == 0x7ff:
-                snd.offset = (snd.offset + 1) & 0x1F
-            if snd.frequency_counter == 0:
-                snd.sample_reading = 1
-                b = self.regs[AUD3W0 + (snd.offset // 2)]
-                if not (snd.offset & 1): b >>= 4
-                snd.current_sample = (b & 0x0f) - 8
-                snd.signal = (snd.current_sample // (1 << (snd.level - 1))) if snd.level else 0
-                snd.frequency_counter = snd.frequency
-        if guard >= 4096: snd.cycles_left = 0
-
-    def update_noise(self, snd, cycles):
-        period = self.noise_period_cycles()
+        period = snd.distance * 2
         if period == 0: return
         snd.cycles_left += cycles
         guard = 0
-        while snd.cycles_left >= period and guard < 4096:
+        while snd.cycles_left >= period and guard < 32:
             snd.cycles_left -= period; guard += 1
-            feedback = ((snd.noise_lfsr >> 1) ^ snd.noise_lfsr) & 1
-            snd.noise_lfsr = (snd.noise_lfsr >> 1) | (feedback << 14)
+            snd.offset = (snd.offset + 1) & 0x1F
+            b = self.regs[AUD3W0 + (snd.offset >> 1)]
+            if not (snd.offset & 1): b >>= 4
+            sig = (b & 0x0f) - 8
+            if snd.level == 0: snd.signal = 0
+            elif snd.level == 1: snd.signal = sig
+            elif snd.level == 2: snd.signal = sig >> 1
+            else: snd.signal = sig >> 2
+        if guard >= 32: snd.cycles_left = 0
+
+    def update_noise(self, snd, cycles):
+        # 对齐优化版 gb.c: AY 风格 Galois LFSR, guard=8
+        period = self.noise_period_cycles()
+        if period == 0: return
+        snd.cycles_left += cycles
+        rng = snd.noise_rng
+        guard = 0
+        while snd.cycles_left >= period and guard < 8:
+            snd.cycles_left -= period; guard += 1
+            rng >>= 1
+            if rng & 1: rng ^= 0x6000
             if snd.noise_short:
-                snd.noise_lfsr = (snd.noise_lfsr & ~(1 << 6)) | (feedback << 6)
-            snd.signal = -1 if (snd.noise_lfsr & 1) else 1
-        if guard >= 4096: snd.cycles_left = 0
+                rng = (rng & 0x007F) | ((rng & 1) << 6)
+        snd.noise_rng = rng
+        snd.signal = -1 if (rng & 1) else 1
+        if guard >= 8: snd.cycles_left = 0
 
     def update_state(self, cycles):
+        # 对齐优化版 gb.c: 位移代替除法, 不双倍调用 update
         if not self.ctrl_on: return
         old_cycles = self.cycles
         self.cycles = mask32(self.cycles + cycles)
-        if (old_cycles // FRAME_CYCLES) != (self.cycles // FRAME_CYCLES):
-            cur = FRAME_CYCLES - (old_cycles & (FRAME_CYCLES - 1))
-            self.update_square(self.snd1, cur)
-            self.update_square(self.snd2, cur)
-            self.update_wave(self.snd3, cur)
-            self.update_noise(self.snd4, cur)
-            cycles -= cur
-            frame_step = (self.cycles // FRAME_CYCLES) & 0x07
+        if (old_cycles >> 13) != (self.cycles >> 13):
+            frame_step = (self.cycles >> 13) & 0x07
             if frame_step in (0,2,4,6):
                 self.tick_length(self.snd1)
                 self.tick_length(self.snd2)
@@ -210,11 +207,11 @@ class GB:
                 self.tick_envelope(self.snd1)
                 self.tick_envelope(self.snd2)
                 self.tick_envelope(self.snd4)
-            if cycles > 0:
-                self.update_square(self.snd1, cycles)
-                self.update_square(self.snd2, cycles)
-                self.update_wave(self.snd3, cycles)
-                self.update_noise(self.snd4, cycles)
+        # 通道相位推进: 完整 cycles 一次 update (不拆分)
+        self.update_square(self.snd1, cycles)
+        self.update_square(self.snd2, cycles)
+        self.update_wave(self.snd3, cycles)
+        self.update_noise(self.snd4, cycles)
 
     def sound_w_internal(self, offset, val):
         old = self.regs[offset]
@@ -246,12 +243,14 @@ class GB:
             self.snd1.reg[3]=val
             if not self.snd1.sweep_enabled:
                 self.snd1.frequency=((self.snd1.reg[4]&0x7)<<8)|self.snd1.reg[3]
+                self.snd1.distance=0x800-self.snd1.frequency
         elif offset == NR14:
             lwe=self.snd1.length_enabled
             self.snd1.reg[4]=val
             self.snd1.length_enabled=1 if (val&0x40) else 0
             self.snd1.frequency=((self.regs[NR14]&0x7)<<8)|self.snd1.reg[3]
-            if not lwe and not (self.cycles & FRAME_CYCLES) and self.snd1.length_counting:
+            self.snd1.distance=0x800-self.snd1.frequency
+            if not lwe and not (self.cycles & 0x1FFF) and self.snd1.length_counting:
                 if self.snd1.length_enabled: self.tick_length(self.snd1)
             if val&0x80:
                 self.snd1.on=1; self.snd1.envelope_enabled=1
@@ -261,16 +260,17 @@ class GB:
                 self.snd1.sweep_neg_mode_used=0; self.snd1.signal=0
                 self.snd1.length_counting=1
                 self.snd1.frequency=((self.snd1.reg[4]&0x7)<<8)|self.snd1.reg[3]
-                self.snd1.frequency_counter=self.snd1.frequency
+                self.snd1.distance=0x800-self.snd1.frequency
                 self.snd1.cycles_left=0; self.snd1.duty_count=0
                 self.snd1.sweep_enabled = (self.snd1.sweep_shift!=0) or (self.snd1.sweep_time!=0)
                 if not self.dac_enabled(self.snd1): self.snd1.on=0
                 if self.snd1.sweep_shift>0: self.calculate_next_sweep(self.snd1)
-                if self.snd1.length==0 and self.snd1.length_enabled and not (self.cycles & FRAME_CYCLES):
+                if self.snd1.length==0 and self.snd1.length_enabled and not (self.cycles & 0x1FFF):
                     self.tick_length(self.snd1)
             else:
                 if not self.snd1.sweep_enabled:
                     self.snd1.frequency=((self.snd1.reg[4]&0x7)<<8)|self.snd1.reg[3]
+                    self.snd1.distance=0x800-self.snd1.frequency
         elif offset == NR21:
             self.snd2.reg[1]=val
             if self.ctrl_on: self.snd2.duty=(val&0xc0)>>6
@@ -284,31 +284,34 @@ class GB:
         elif offset == NR23:
             self.snd2.reg[3]=val
             self.snd2.frequency=((self.snd2.reg[4]&0x7)<<8)|self.snd2.reg[3]
+            self.snd2.distance=0x800-self.snd2.frequency
         elif offset == NR24:
             lwe=self.snd2.length_enabled
             self.snd2.reg[4]=val
             self.snd2.length_enabled=1 if (val&0x40) else 0
-            if not lwe and not (self.cycles & FRAME_CYCLES) and self.snd2.length_counting:
+            self.snd2.frequency=((self.snd2.reg[4]&0x7)<<8)|self.snd2.reg[3]
+            self.snd2.distance=0x800-self.snd2.frequency
+            if not lwe and not (self.cycles & 0x1FFF) and self.snd2.length_counting:
                 if self.snd2.length_enabled: self.tick_length(self.snd2)
             if val&0x80:
                 self.snd2.on=1; self.snd2.envelope_enabled=1
                 self.snd2.envelope_value=self.snd2.reg[2]>>4
                 self.snd2.envelope_count=self.snd2.envelope_time
                 self.snd2.frequency=((self.snd2.reg[4]&0x7)<<8)|self.snd2.reg[3]
-                self.snd2.frequency_counter=self.snd2.frequency
+                self.snd2.distance=0x800-self.snd2.frequency
                 self.snd2.cycles_left=0; self.snd2.duty_count=0; self.snd2.signal=0
                 self.snd2.length_counting=1
                 if not self.dac_enabled(self.snd2): self.snd2.on=0
-                if self.snd2.length==0 and self.snd2.length_enabled and not (self.cycles & FRAME_CYCLES):
+                if self.snd2.length==0 and self.snd2.length_enabled and not (self.cycles & 0x1FFF):
                     self.tick_length(self.snd2)
             else:
                 self.snd2.frequency=((self.snd2.reg[4]&0x7)<<8)|self.snd2.reg[3]
+                self.snd2.distance=0x800-self.snd2.frequency
         elif offset == NR30:
             self.snd3.reg[0]=val
             if not self.dac_enabled(self.snd3): self.snd3.on=0
         elif offset == NR31:
             self.snd3.reg[1]=val
-            if self.ctrl_on: self.snd3.duty=(val&0xc0)>>6
             self.snd3.length=val&0xff; self.snd3.length_counting=1
         elif offset == NR32:
             self.snd3.reg[2]=val
@@ -316,29 +319,31 @@ class GB:
         elif offset == NR33:
             self.snd3.reg[3]=val
             self.snd3.frequency=((self.snd3.reg[4]&0x7)<<8)|self.snd3.reg[3]
+            self.snd3.distance=0x800-self.snd3.frequency
         elif offset == NR34:
             lwe=self.snd3.length_enabled
             self.snd3.reg[4]=val
             self.snd3.length_enabled=1 if (val&0x40) else 0
-            if not lwe and not (self.cycles & FRAME_CYCLES) and self.snd3.length_counting:
+            self.snd3.frequency=((self.snd3.reg[4]&0x7)<<8)|self.snd3.reg[3]
+            self.snd3.distance=0x800-self.snd3.frequency
+            if not lwe and not (self.cycles & 0x1FFF) and self.snd3.length_counting:
                 if self.snd3.length_enabled: self.tick_length(self.snd3)
             if val&0x80:
                 self.snd3.on=1
                 self.snd3.frequency=((self.snd3.reg[4]&0x7)<<8)|self.snd3.reg[3]
-                self.snd3.frequency_counter=self.snd3.frequency
-                self.snd3.cycles_left=0
+                self.snd3.distance=0x800-self.snd3.frequency
+                self.snd3.cycles_left=-6
                 self.snd3.offset=0
                 self.snd3.signal=0
-                self.snd3.sample_reading=0
                 self.snd3.length_counting=1
                 if not self.dac_enabled(self.snd3): self.snd3.on=0
-                if self.snd3.length==0 and self.snd3.length_enabled and not (self.cycles & FRAME_CYCLES):
+                if self.snd3.length==0 and self.snd3.length_enabled and not (self.cycles & 0x1FFF):
                     self.tick_length(self.snd3)
             else:
                 self.snd3.frequency=((self.snd3.reg[4]&0x7)<<8)|self.snd3.reg[3]
+                self.snd3.distance=0x800-self.snd3.frequency
         elif offset == NR41:
             self.snd4.reg[1]=val
-            if self.ctrl_on: self.snd4.duty=(val&0xc0)>>6
             self.snd4.length=val&0x3f; self.snd4.length_counting=1
         elif offset == NR42:
             self.snd4.reg[2]=val
@@ -353,17 +358,17 @@ class GB:
             lwe=self.snd4.length_enabled
             self.snd4.reg[4]=val
             self.snd4.length_enabled=1 if (val&0x40) else 0
-            if not lwe and not (self.cycles & FRAME_CYCLES) and self.snd4.length_counting:
+            if not lwe and not (self.cycles & 0x1FFF) and self.snd4.length_counting:
                 if self.snd4.length_enabled: self.tick_length(self.snd4)
             if val&0x80:
                 self.snd4.on=1; self.snd4.envelope_enabled=1
                 self.snd4.envelope_value=self.snd4.reg[2]>>4
                 self.snd4.envelope_count=self.snd4.envelope_time
-                self.snd4.noise_lfsr=0x7FFF
-                self.snd4.cycles_left=0; self.snd4.signal=0
+                self.snd4.noise_rng=0x7FFF
+                self.snd4.cycles_left=0; self.snd4.signal=-1
                 self.snd4.length_counting=1
                 if not self.dac_enabled(self.snd4): self.snd4.on=0
-                if self.snd4.length==0 and self.snd4.length_enabled and not (self.cycles & FRAME_CYCLES):
+                if self.snd4.length==0 and self.snd4.length_enabled and not (self.cycles & 0x1FFF):
                     self.tick_length(self.snd4)
         elif offset == NR50:
             self.vol_left=val&0x7
