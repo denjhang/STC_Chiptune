@@ -14,6 +14,7 @@ static void *xmemset(void *s, int c, unsigned int n) {
 
 static u8  ay_reg[16];
 static u16 ay_count[AY_CHANS];
+
 static u8  ay_freq_lo[AY_CHANS];
 static u8  ay_freq_hi[AY_CHANS];
 static u8  ay_edge[AY_CHANS];
@@ -102,12 +103,16 @@ void ay_wr(u8 reg, u8 val) {
         ay_env_freq = ((u16)ay_reg[12] << 8) + ay_reg[11];
         break;
     case 13:
+        /* 对齐 libvgm ay8910.c case AY_ESHAPE:
+         * attack = 0x0F (attack bit=1) 或 0x00 (attack bit=0), 不是单 bit
+         * env_volume = env_step ^ attack, 4-bit XOR 决定渐强/渐弱方向
+         * env_step 总是从 0x0F 开始递减 */
         ay_env_continue = (val >> 3) & 1;
-        ay_env_attack   = (val >> 2) & 1;
+        ay_env_attack   = (val & 0x04) ? 0x0F : 0x00;
         ay_env_alternate= (val >> 1) & 1;
         ay_env_hold     = val & 1;
         ay_env_pause    = 0;
-        ay_env_step     = ay_env_attack ? 0 : 0x0F;
+        ay_env_step     = 0x0F;
         break;
     }
 }
