@@ -8,7 +8,7 @@
 #define NES_RATE        22050.0   /* 采样率, 用于 set_clock 计算 base_incr */
 
 /* DMC 采样缓冲: 对应 NES CPU memory $C000-$FFFF (16KB) */
-#define NES_DMC_BUF_SIZE 4096
+#define NES_DMC_BUF_SIZE 16384
 
 void nes_init(void);
 void nes_wr(u8 reg, u8 val);

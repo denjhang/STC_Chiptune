@@ -3,7 +3,7 @@
 #include "sn76489.h"
 
 #define SN_GETA_BITS 24
-#define SN_BASE_INCR  212779193UL
+#define SN_BASE_INCR  170223354UL
 
 static u16 sn_reg[8];
 static u8  sn_last_reg;

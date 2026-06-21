@@ -264,7 +264,15 @@ for _i in range(0xE0, 0xF0): VGM_CMD_LEN[_i] = 5
 for _i in range(0xF0, 0x100): VGM_CMD_LEN[_i] = 5
 
 
-def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
+def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
+    global _kb_cmd
+    """
+    loop: 循环次数
+      0 = 不循环 (播完一次即停)
+      1+ = 循环 N 次 (即总共播 N+1 遍, 第一遍后还要 N 遍 loop 段)
+    allow_interrupt: True 时检查全局 _kb_cmd, 收到 n/b/q 返回 ('next'/'back'/'quit')
+    返回值: None (正常播完) 或 'next'/'back'/'quit' (被中断)
+    """
     """
     Python 控制节拍 (perf_counter 累积模式):
     - perf_counter 记录实际流逝时间 → 转为 VGM samples budget
@@ -305,17 +313,28 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
             ofs += len(chunk)
             ram_addr += len(chunk)
             time.sleep(0.002)  # 防止 RX1_Buffer 溢出
-    print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
+    loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
+    if loop_remaining > 0 and hdr['loop_offset'] > 0:
+        print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
+    else:
+        print(f"  Speed: {speed:.1f}x")
     print()
 
     last_time = time.perf_counter()
     samples_budget = 0.0  # 累积的 VGM samples budget
     current_samples = 0
     iteration = 0
+    interrupt_cmd = None
 
     while True:
         # 1ms 轮询
         time.sleep(0.001)
+
+        # 播放列表模式下检查键盘命令
+        if allow_interrupt and _kb_cmd in ('n', 'b', 'q'):
+            interrupt_cmd = _kb_cmd
+            _kb_cmd = ''
+            break
 
         now = time.perf_counter()
         elapsed_sec = now - last_time
@@ -330,7 +349,8 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
             pos += 1
 
             if b == 0x66:
-                if loop and hdr['loop_offset'] > 0:
+                if loop_remaining > 0 and hdr['loop_offset'] > 0:
+                    loop_remaining -= 1
                     pos = hdr['loop_offset']
                     continue
                 else:
@@ -429,7 +449,122 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
             break
 
     real_sec = current_samples / SAMPLES_PER_SEC / speed
-    print(f"  [END] {real_sec:.1f}s")
+    if interrupt_cmd:
+        print(f"  [CUT {interrupt_cmd.upper()}] {real_sec:.1f}s")
+    else:
+        print(f"  [END] {real_sec:.1f}s")
+    return interrupt_cmd
+
+
+def list_song_files(vgm_dir):
+    """返回去重后的 VGM 文件路径列表"""
+    files = sorted(glob.glob(os.path.join(vgm_dir, '*.vgz')))
+    files += sorted(glob.glob(os.path.join(vgm_dir, '*.vgm')))
+    seen = set(); unique = []
+    for f in files:
+        name = os.path.basename(f)
+        if name not in seen:
+            seen.add(name); unique.append(f)
+    return unique
+
+
+# 全局键盘状态 (主线程读, 后台线程写)
+_kb_cmd = ''      # 'n' next, 'b' back, 'q' quit, '' idle
+_kb_lock = False  # 简单 flag, 不用 threading.Lock 避免依赖
+
+
+def _kb_watcher():
+    """后台线程: 读按键, 设置全局命令"""
+    global _kb_cmd
+    try:
+        import msvcrt
+        while True:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode('ascii', errors='ignore').lower()
+                if ch in ('n', 'b', 'q'):
+                    _kb_cmd = ch
+            time.sleep(0.05)
+    except ImportError:
+        # 非 Windows: 用 select 轮询 stdin
+        try:
+            import select, sys
+            while True:
+                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if r:
+                    ch = sys.stdin.readline().strip().lower()[:1]
+                    if ch in ('n', 'b', 'q'):
+                        _kb_cmd = ch
+        except Exception:
+            pass
+
+
+def play_playlist(ser, vgm_dir, speed=1.0, loop=0, start_idx=0):
+    """顺序播放整个目录
+    按键: n=下一曲, b=上一曲, q=退出
+    loop: 每首歌循环次数 (0=不循环)
+    """
+    global _kb_cmd
+    files = list_song_files(vgm_dir)
+    if not files:
+        print(f"No .vgm/.vgz in {vgm_dir}/"); return
+
+    # 启动键盘监听线程
+    import threading
+    watcher = threading.Thread(target=_kb_watcher, daemon=True)
+    watcher.start()
+
+    print(f"\n=== Playlist mode: {len(files)} tracks ===")
+    print("Keys: [n] next  [b] back  [q] quit\n")
+
+    idx = start_idx
+    global _kb_cmd
+
+    def mute_all_chips():
+        """切换曲目前复位所有芯片
+        0xF0 = 固件调用 sn_init/ay_init/scc_init/nes_init, 清除所有残留状态
+        (相位累加器/步进值/波表/key 状态), 这是从根上解决切歌第一音音高错误"""
+        ser.write(bytes([0xF0]))
+        time.sleep(0.05)
+
+    while 0 <= idx < len(files):
+        filepath = files[idx]
+        name = os.path.basename(filepath)
+        print(f"[{idx+1}/{len(files)}] {name}")
+        cmd = None
+        try:
+            data = load_vgm(filepath)
+            hdr = parse_vgm_header(data)
+            stats = scan_vgm_stats(data, hdr)
+            cmd = play_vgm(data, hdr, stats, ser=ser, speed=speed, loop=loop, allow_interrupt=True)
+        except KeyboardInterrupt:
+            cmd = 'q'
+        except Exception as e:
+            print(f"  Skip (error: {e})")
+
+        # 切换曲目前静音所有芯片
+        mute_all_chips()
+        # 短歌之间留 0.3 秒间隔
+        time.sleep(0.3)
+
+        # 命令可能来自 play_vgm 返回值, 也可能来自 sleep 期间按下
+        if not cmd:
+            cmd = _kb_cmd
+            _kb_cmd = ''
+
+        if cmd == 'q':
+            print("\n[QUIT]")
+            break
+        elif cmd == 'n':
+            print("[NEXT]\n")
+            idx += 1
+        elif cmd == 'b':
+            idx = max(0, idx - 1)
+            print(f"[BACK to {idx+1}]\n")
+        else:
+            idx += 1
+
+    if idx >= len(files):
+        print("\n=== Playlist end ===")
 
 
 def list_songs(vgm_dir):
@@ -902,7 +1037,8 @@ def main():
     parser.add_argument('--port', default='COM24', help='Serial port (default COM24)')
     parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--speed', type=float, default=1.0)
-    parser.add_argument('--loop', action='store_true')
+    parser.add_argument('--loop', type=int, nargs='?', const=2, default=0, metavar='N',
+                        help='Loop N times (default 2 if --loop without value)')
     parser.add_argument('--dump', action='store_true')
     parser.add_argument('--vgm-dir', default=None)
     parser.add_argument('--fm-note', nargs=2, type=int, metavar=('VOICE', 'NOTE'),
@@ -1003,20 +1139,6 @@ def main():
 
     if args.list:
         list_songs(vgm_dir); return
-    if not args.song:
-        parser.print_help(); sys.exit(1)
-
-    filepath = resolve_song(args.song, vgm_dir)
-    if not filepath:
-        print(f"Song not found: '{args.song}'"); sys.exit(1)
-
-    print(f"Loading: {os.path.basename(filepath)}")
-    data = load_vgm(filepath)
-    hdr = parse_vgm_header(data)
-    stats = scan_vgm_stats(data, hdr)
-
-    if args.dump:
-        dump_vgm(data, hdr); return
 
     if not HAS_SERIAL:
         print("Error: pyserial required"); sys.exit(1)
@@ -1033,30 +1155,40 @@ def main():
     except Exception as e:
         print(f"Error: {e}"); sys.exit(1)
 
-    try:
-        play_vgm(data, hdr, stats, ser=ser, speed=args.speed, loop=args.loop)
-    except KeyboardInterrupt:
-        print("\n  Stopped.")
-    finally:
+    def mute_all():
         # 全局静音: FM 16 voice off
         for v in range(16):
             uart_send(ser, [0x51, 0x20 | v, 0], ack=False)
-        # AY8910: ch0-2 volume = 0
-        for reg in (8, 9, 10):
-            ser.write(bytes([0xA0, reg, 0x00]))
-        # SN76489: 4 ch silence
-        for d in (0x9F, 0xBF, 0xDF, 0xFF):
-            ser.write(bytes([0x50, d]))
-        # SCC: key register 写 0 (全 keyoff), 模仿真实 VGM 结尾序列
-        # 真实 VGM 结尾: d2 03 00 00 (port=3 key bank, reg=0, data=0)
-        ser.write(bytes([0xD2, 0x03, 0x00, 0x00]))
-        # NES APU: status reg 0x15 写 0, 关闭所有通道
-        ser.write(bytes([0xB4, 0x15, 0x00]))
+        # 复位所有音源芯片 (清相位/步进/key/波表状态)
+        ser.write(bytes([0xF0]))
         # GT: 4 ch note off
         for ch in range(4):
             addr = 0x10 + ch
             ser.write(bytes([0xB0, addr, 0, 0xB0 ^ addr]))
-        time.sleep(0.01)
+        time.sleep(0.02)
+
+    try:
+        if not args.song:
+            # 无歌曲参数: 播放列表模式 (顺序播放整个目录)
+            play_playlist(ser, vgm_dir, speed=args.speed, loop=args.loop)
+        else:
+            # 单曲模式
+            filepath = resolve_song(args.song, vgm_dir)
+            if not filepath:
+                print(f"Song not found: '{args.song}'"); sys.exit(1)
+            if args.dump:
+                data = load_vgm(filepath)
+                hdr = parse_vgm_header(data)
+                dump_vgm(data, hdr); return
+            print(f"Loading: {os.path.basename(filepath)}")
+            data = load_vgm(filepath)
+            hdr = parse_vgm_header(data)
+            stats = scan_vgm_stats(data, hdr)
+            play_vgm(data, hdr, stats, ser=ser, speed=args.speed, loop=args.loop)
+    except KeyboardInterrupt:
+        print("\n  Stopped.")
+    finally:
+        mute_all()
         ser.close()
 
 

@@ -298,7 +298,8 @@ static void nes_update_square(NES_SQUARE *chan, u16 cycles, u8 do_frame) {
 
     freq = ((chan->regs[3] & 7) << 8) + chan->regs[2] + 1;
 
-    if (chan == &nes_squ[0] && (chan->regs[1] & 0x80) && (chan->regs[1] & 7)) {
+    /* Sweep: 两个方波都跑 (对齐 libvgm apu_square) */
+    if ((chan->regs[1] & 0x80) && (chan->regs[1] & 7)) {
         u8 sweep_delay = ((chan->regs[1] >> 4) & 7) + 1;
         if (do_frame) {
             chan->sweep_phase++;
@@ -312,9 +313,15 @@ static void nes_update_square(NES_SQUARE *chan, u16 cycles, u8 do_frame) {
         }
     }
 
-    if (freq < 4 || freq > nes_freq_limit[chan->regs[1] & 7]) {
-        chan->output = 0;
-        return;
+    /* freq_limit 选择 (Delek 修复, 对齐 libvgm):
+     * sweep 启用时用 regs[1]&7, 禁用时用 index 7 (最大限制, 几乎不限制)
+     * 否则 sweep 关闭的方波会被 freq_limit[0]=8 卡死所有正常音 */
+    {
+        u8 freq_index = (chan->regs[1] & 0x80) ? (chan->regs[1] & 7) : 7;
+        if (freq < 4 || freq > nes_freq_limit[freq_index]) {
+            chan->output = 0;
+            return;
+        }
     }
 
     chan->phaseacc += cycles;

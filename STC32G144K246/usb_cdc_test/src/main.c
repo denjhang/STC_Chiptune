@@ -283,6 +283,21 @@ void process_uart(void)
             nes_dmc_load(addr, k, tmp);
             isp_match = 0;
         }
+        else if (b == 0xF0)
+        {
+            /* Reset all chips: 重新初始化所有音源, 清除残留状态
+             * 用于 playlist 模式切歌时避免上一首的相位/步进/波表残留
+             * 导致下一首第一音音高错误 */
+            sn_init();
+            ay_init();
+            scc_init();
+            nes_init();
+            ay_active = 0;
+            sn_active = 0;
+            scc_active = 0;
+            nes_active = 0;
+            isp_match = 0;
+        }
         else
         {
             isp_match = 0;

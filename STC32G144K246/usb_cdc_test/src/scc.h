@@ -9,7 +9,7 @@
 #define SCC_FREQ_BITS   16
 #define SCC_CLOCK       3579545UL
 #define SCC_HALF_CLK    1789772UL
-#define SCC_RATE        17640
+#define SCC_RATE        22050
 #define SCC_SHIFT       (SCC_FREQ_BITS + 1)
 
 void scc_init(void);
