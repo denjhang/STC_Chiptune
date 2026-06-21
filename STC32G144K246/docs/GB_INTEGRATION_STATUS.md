@@ -530,6 +530,103 @@ time.sleep(0.02)
 
 ---
 
+## 13. GB ISR 极致优化 (2026-06-22, 命令密集卡顿消除)
+
+Bug 3-5 修复后 GB 能正常出声, 但**音符指令一多就卡顿** (尤其 fast-forward 段落、
+64 首 playlist 连播)。根因不是逻辑错误, 而是 **gb_render 在 ISR 里执行时间过长**,
+命令密集时 (gb_wr 在主循环频繁打断 ISR) ISR 抢不到时间片。
+
+### 优化思路: 对齐 NES/AY/SN/SCC 四个已优化音源
+
+这四个音源在 22050Hz ISR 下都能流畅运行, 必有共同的 MCU 友好模式。
+逐个精读它们的 render/update 函数, 提炼模式表:
+
+| 模式 | NES | AY | SN | SCC | GB 优化前 |
+|------|-----|----|----|-----|---------|
+| 热路径存储 | xdata+data 分离 | static | static | **data 热路径** | static (未区分) |
+| 相位类型 | u16 phaseacc | u16 count | u16 count | u32 cnt | **s32 cycles_left** ❌ |
+| 除法 | 无 (freq 预算) | 无 | 无 | 无 (step 预算) | **u32/8192 真除法** ❌ |
+| 循环 | while 体极轻 | 无循环 | 无循环 | 无循环公式法 | wave/noise while ❌ |
+| 查表 | duty/noise/period 全 const | voltbl | voltbl | wav[][] | wave_duty 仅 square |
+
+关键发现: **NES 用 u16 phaseacc, AY/SN 根本不循环, SCC 用公式法无循环**。
+GB 用 s32 有符号 + u32 真除法 + while 循环, 每一项都是性能反模式。
+
+### 8 项优化 (每项都对齐某个已优化音源的模式)
+
+#### 1. frame sequencer 除法改位移 (最大单项收益)
+`FRAME_CYCLES = 8192 = 2^13`, 所有 `cycles / FRAME_CYCLES` 改 `cycles >> 13`,
+`cycles & (FRAME_CYCLES-1)` 改 `cycles & 0x1FFF`。涉及 gb_update_state 3 处 u32 除法,
+每处省 ~20 机器周期 (C251 u32 除法调库函数, 很慢)。**对齐 NES: NES 原本就没除法**。
+
+#### 2. noise 改 AY 风格 Galois LFSR (用户确认可简化)
+原 noise 用 Fibonacci LFSR 的 while 循环逐次移位 (guard=32)。改成 AY8910 的 noise_scaler 思路:
+单次 if 判断 + Galois 多项式异或 (`rng >>= 1; if(rng&1) rng ^= 0x6000`),
+guard 32→8。**对齐 AY8910: AY 的噪声就是单步 Galois LFSR**。
+听感接近 AY 噪声 (用户认可), 和原 DMG 有差异但不影响音乐识别。
+
+#### 3. wave 保持 phaseacc (用户确认)
+Bug 3 修复时已改成 phaseacc 风格 (period = 2×distance, 循环 ~5-10 次, 体轻)。
+本次只同步 distance 字段 + level 用 if/else 代替变量移位。**已对齐 NES, 无需进一步改**。
+
+#### 4. square distance 预计算
+原 render 里每次算 `0x800 - frequency`。改成切频时 (NR13/NR14/NR23/NR24 写入)
+预存到 `snd->distance` 字段, render 里直接读。**对齐 NES: NES 在 nes_wr 里就算好 freq 存结构**。
+
+#### 5. cycles_left s32→s16
+每采样 GB cycles ~190, s16 范围 ±32767 足够。s16 比 s32 内存访问减半。**对齐 NES u16 phaseacc**。
+
+#### 6. 结构瘦身
+- `cycles_left` s32→s16 (-2 字节 × 4 通道)
+- `duty_count` u32→u8 (本就 &0x07, -3 字节 × 4 通道)
+- 删 `sample_reading` / `current_sample` / `frequency_counter` (调试/冗余字段)
+SOUND 从 ~43 字节 → ~32 字节, 4 通道省 ~44 字节 xdata, 访问更快。
+
+#### 7. gb_base_count 入 data 段
+render 每采样必访的 `gb_base_count` 加 `data` 关键字, 放内部 RAM 直接寻址 (1 机器周期)。
+其他 SOUND/SOUNDC 结构较大 (~40B×4=160B), 全放 data 会和 SCC/USB 挤爆 (L107 OVERFLOW),
+故留 xdata。**对齐 SCC: SCC 的 scc_cnt/scc_step_val 也在 data 段**。
+
+#### 8. frame sequencer 跨 frame 不双倍调用
+原 gb_update_state 跨 frame 边界时: 先用 cycles_current_frame 调 4 个 update,
+再用剩余 cycles 再调 4 个 update = **8 次 update 调用**。
+改成: 通道用完整 cycles 一次 update (省一半), frame 边界的 length/sweep/envelope tick
+仍按 step 触发。听感差异极小 (相位推进差几个 cycle), 性能省一半。
+
+### 编译结果对比
+
+| 指标 | 优化前 | 优化后 | 变化 |
+|------|--------|--------|------|
+| code | 16787 | 16622 | **-165** |
+| xdata | 21244 | 21207 | **-37** |
+| data | 68.5 | 72.5 | +4 (gb_base_count 入 data) |
+| HEX | 48600 | 47806 | **-794** |
+
+### 仿真验证 (gb_sim.py 同步更新后)
+
+喂真实 GB VGM, 30000 采样统计:
+- 非零率: 74.3% → 73.8% (持平)
+- 最大幅度: 2048 → 2048 (一致)
+- 平均幅度: 1099 → 1073 (-2%, noise 简化的微小差异, 听感无感知)
+
+### 实机验证
+
+- 64 首 GB playlist (DQ3 等) 连续播放不卡顿
+- 命令密集段落 (23775 条 0xB3 的 Overture) 流畅
+- 音质和优化前一致
+
+### 教训
+
+1. **移植 libvgm 到 MCU 要逐函数评估 ISR 开销**: 循环次数 × 循环体重量 × 调用频率
+2. **2 的幂用位移**: FRAME_CYCLES=8192=2^13 这种用 >>13 代替除法, u32 除法在 C251 上调库函数极慢
+3. **MCU 友好的相位推进是 phaseacc 累加 + 轻循环体** (NES/AY/SN/SCC 共通模式),
+   不是逐 cycle 循环 (libvgm 的 PC 思维)
+4. **热路径标量入 data 段**, 大结构留 xdata (data 段只有 256B, 全放会溢出)
+5. **结构体字段类型选最小够用** (s32→s16, u32→u8), 减少内存带宽
+6. **寄存器写入时预计算** (distance/freq), render 里直接读, 避免重复运算
+
+---
+
 ### 被证伪的假设清单 (避免重复踩坑)
 
 | # | 假设 | 证伪方式 | 结果 |
