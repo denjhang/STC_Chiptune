@@ -40,6 +40,35 @@ DAC1_CR  = 0x41       // 使能 + 触发输出
 - **PLL 切换必须在 usb_init() 之前**，否则冲击 USB 模块
 - USB 走独立 IRC48M，与主时钟无关
 
+### 采样率与 incr 计算公式
+
+全局采样率 **22050Hz**（Timer0 ISR + DAC 输出频率）。曾尝试 44100Hz 但音质提升不明显（受限于 12-bit DAC 精度），且 ISR 压力大容易卡音，故回退。
+
+各音源用 24-bit 定点小数累加器（`base_count += base_incr; incr = base_count >> 24`）把芯片时钟归一化到采样率。**修改采样率时必须同步更新 incr 常量**，否则音调会变。
+
+计算公式：
+
+```
+base_incr = chip_clock × 2^24 / sample_rate
+```
+
+| 音源 | chip_clock | sample_rate | base_incr | 定义位置 |
+|------|-----------|-------------|-----------|---------|
+| AY8910 | 1789772 Hz (NTSC) | 22050 | 170223307 | `ay8910.h` AY_BASE_INCR (硬编码) |
+| NES APU | 1789773 (NTSC) / 1662607 (PAL) | 22050 | 运行时算 | `nes.c` nes_set_clock() 用 NES_RATE |
+| SCC | (vgm_player 下发) | — | — | scc.c 内部 step |
+| SN76489 | (vgm_player 下发) | — | — | sn76489.c 内部 |
+
+**修改采样率的完整步骤**（例如 22050 → X）：
+
+1. `main.c`: `SAMPLE_RATE` → X
+2. `main.c`: `BOOT_NOTE_TICKS` = X × 2（保持 2 秒开机音）
+3. `main.c`: `led_tick >= 22050` → `>= X`（保持 1 秒 LED 翻转）
+4. `ay8910.h`: `AY_BASE_INCR` = `1789772 × 2^24 / X`
+5. `nes.h`: `NES_RATE` → `X.0`
+6. `nes.c`: `nes_frame_div >= 92` → `>= X/240`（NES frame counter 240Hz）
+7. Python 验证：`py -3 -c "print(int(1789772 * (1<<24) / X))"`
+
 ### usb_cdc_test 文件结构
 
 | 文件 | 作用 |
