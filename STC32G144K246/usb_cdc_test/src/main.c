@@ -9,6 +9,7 @@
 #include "sn76489.h"
 #include "scc.h"
 #include "nes.h"
+#include "gb.h"
 
 char *USER_DEVICEDESC = 0;
 char *USER_PRODUCTDESC = 0;
@@ -26,6 +27,7 @@ static u8 ay_active = 0;
 static u8 sn_active = 0;
 static u8 scc_active = 0;
 static u8 nes_active = 0;
+static u8 gb_active = 0;
 #define BOOT_NOTE_TICKS 44100  /* 2 秒 (22050 * 2) */
 
 static u8 isp_match = 0;
@@ -103,6 +105,7 @@ void tm0_isr() interrupt 1
     if (sn_active) mix += sn_render();
     if (scc_active) mix += (s16)(scc_render() / 2);
     if (nes_active) mix += nes_render();
+    if (gb_active)  mix += gb_render();
 
     mix *= 8;
     if (mix > 2047) mix = 2047;
@@ -292,10 +295,25 @@ void process_uart(void)
             ay_init();
             scc_init();
             nes_init();
+            gb_init();
             ay_active = 0;
             sn_active = 0;
             scc_active = 0;
             nes_active = 0;
+            gb_active = 0;
+            isp_match = 0;
+        }
+        else if (b == 0xB3)
+        {
+            /* GB DMG: [0xB3][reg][data] */
+            if (TX1_Cnt == RX1_Cnt) break;
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            gb_active = 1;
+            gb_wr(r, d);
             isp_match = 0;
         }
         else
@@ -314,6 +332,7 @@ void main(void)
     ay_init();
     scc_init();
     nes_init();
+    gb_init();
     test_start();
     timer0_init();
     usb_init();

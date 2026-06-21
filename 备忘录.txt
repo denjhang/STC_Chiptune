@@ -1,4 +1,27 @@
 
+
+D:\working\vscode-projects\Reference_Project\vgm_libs\libvgm-master\player\vgmplayer_cmdhandler.cpp
+
+D:\working\vscode-projects\Reference_Project\vgm_libs\libvgm-master\player\vgmplayer.cpp
+
+
+py -3 tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/ay8910 --port COM24 8
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/sn76489 --port COM24 19
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/scc --port COM24 1
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 1
+
+cd /d/working/vscode-projects/STC_Chiptune/STC32G144K246/usb_cdc_test 
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/gb --port COM24 1
+
+
+
+
+
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes/kirby --port COM24 
+
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 
+
+
 $ py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 --list
 
   #  File                                       
@@ -99,9 +122,11 @@ D:\working\vscode-projects\Reference_Project\STC-MCU\STC8H8K64核心板资料\ST
 
 cd /d/working/vscode-projects/STC_Chiptune/STC32G144K246/usb_cdc_test 
 py -3 tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/ay8910 --port COM24 8
-py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/sn76489 --port COM24 16
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/sn76489 --port COM24 19
 py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/scc --port COM24 1
 py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 1
+
+
 
 cd "d:/working/vscode-projects/STC_Chiptune" && py -3 STC32G144K246/usb_cdc_test/tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes 13 2>&1 | head -15
 

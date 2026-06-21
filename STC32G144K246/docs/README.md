@@ -11,8 +11,8 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
 2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
 3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-4. **AY8910 + SN76489 + SCC(K051649) + NES APU 五音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
-5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2)/NES(0xB4)/NES-DMC(0xB6)/Reset(0xF0) 命令，vgm_player.py 通过 COM24 播放
+4. **AY8910 + SN76489 + SCC(K051649) + NES APU + GB DMG 六音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
+5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2)/NES(0xB4)/NES-DMC(0xB6)/GB(0xB3)/Reset(0xF0) 命令，vgm_player.py 通过 COM24 播放
 6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，续命匹配优先避免和 0x50 冲突
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
@@ -82,6 +82,7 @@ base_incr = chip_clock × 2^24 / sample_rate
 |------|-----------|-------------|-----------|---------|
 | AY8910 | 1789772 Hz (NTSC) | 22050 | 170223307 | `ay8910.h` AY_BASE_INCR (硬编码) |
 | NES APU | 1789773 (NTSC) / 1662607 (PAL) | 22050 | 运行时算 | `nes.c` nes_set_clock() 用 NES_RATE |
+| GB DMG | 4194304 Hz | 22050 | 3191326266 | `gb.h` GB_BASE_INCR (硬编码, 超 LONG_MAX 但 u32 内) |
 | SCC | (vgm_player 下发) | — | — | scc.c 内部 step |
 | SN76489 | (vgm_player 下发) | — | — | sn76489.c 内部 |
 
@@ -104,6 +105,7 @@ base_incr = chip_clock × 2^24 / sample_rate
 | `src/sn76489.c/h` | SN76489 (SegaVDP 变体) 仿真核心 + render |
 | `src/scc.c/h` | SCC (K051649) 仿真核心 (对齐 RPFM, 双精度 step) + render |
 | `src/nes.c/h` | NES APU 仿真核心 (4 通道: 2x方波+三角+噪声) + PAL/NTSC 双时钟 |
+| `src/gb.c/h` | GameBoy DMG 仿真核心 (对齐 libvgm gb.c, 4 通道: 2x方波+波形+噪声) |
 | `src/usb.c` | USB 寄存器操作 + ISR + EP4 OUT 环形缓冲写入 |
 | `src/usb_desc.c/h` | USB 描述符（CDC 单串口, VID=34BF PID=FF0A） |
 | `src/usb_req_class.c` | CDC 类请求 (LineCoding / SerialState) |
@@ -180,6 +182,7 @@ STC8H/STC32G12K 老版 SCC 仿真音高不准，直接参考 RPFM (github RPFM �
 | 0xA0 | AY8910 | `[0xA0][reg][data]` |
 | 0x50 | SN76489 | `[0x50][data]` |
 | 0xD2 | SCC K051649 | `[0xD2][port][reg][data]` |
+| 0xB3 | GB DMG | `[0xB3][reg][data]` |
 | 0xB4 | NES APU | `[0xB4][reg][data]` |
 | 0xB5 | NES 时钟下发 | `[0xB5][clk0..3]` (LE u32, NTSC=1789773/PAL=1662607) |
 
@@ -237,4 +240,51 @@ mix *= 4   ← 总放大后和 AY/SN/SCC 量级匹配
 
 ### NES APU 已知限制
 
-当前版本不含 DPCM (采样回放) 通道，只支持方波+三角+噪声。下一步加 DMC 通道可回放 NES 的鼓组/人声采样。
+NES APU 已完整支持 5 通道 (含 DMC 16KB 采样缓冲), 无已知限制。
+
+### GB DMG 实现要点 (对齐 libvgm gb.c)
+
+参考 libvgm `emu/cores/gb.c` (Wilbert Pol, Anthony Kruize, BSD-3-Clause) 完整重写。原 `STC32G12K128/gb.c` 未经验证, 弃用。4 通道:
+
+1. **方波 1 (CH1)** — duty + 包络 + 频率扫频 (NR10-14), 唯一带 sweep 的通道
+2. **方波 2 (CH2)** — duty + 包络 (NR21-24)
+3. **波形 CH3** — 32 个 4-bit 自定义采样, 从 Wave RAM (AUD3W0-0xF) 读 (NR30-34)
+4. **噪声 CH4** — 15-bit LFSR, 多项式分频器 + 包络 (NR41-44)
+
+**核心数据**:
+- GB 主时钟 4.194304 MHz, 64 cycles/sample 归一化
+- Frame sequencer: `clock/8192 = 512 Hz`, 8 步循环 (length/sweep/envelope)
+- 频率公式: `Hz = 131072 / (2048 - gb_freq)` (与 AY/NES 不同的换算)
+- 方波周期: `(2048 - freq) << 2` cycles, 每周期 8 个 duty 采样
+
+**GB_BASE_INCR 计算**: `4194304 × 2^24 / 22050 = 3191326266` (超 LONG_MAX 但 u32 范围内)
+
+**混音系数** (main.c ISR): `mix += gb_render()` 直接累加, gb_render() 内部已做主音量+均值+钳位。
+
+**VGM 协议**: `[0xB3][reg][data]` 直接透传 GB 寄存器写。reg 字段是 GB IO 偏移 (NR10=0x00, NR52=0x16, AUD3W0=0x20..0x2F)。
+
+**GB 静音**: `[0xB3, 0x16, 0x00]` 即 NR52=0 关闭 APU (DMG 模式下复位所有通道寄存器)。
+
+**混音公式** (对齐 libvgm `gameboy_update`, mono 合并):
+- `mono = (left + right) / 2` (左右平均, 避免双使能通道 2x 失真)
+- `mono *= (vol_left + vol_right + 1) / 2` (NR50 平均主音量)
+- `mono <<= 6` (pump up, 同 libvgm `left <<= 6`)
+- ⚠️ 之前误抄成 `>>= 4` (缩小 16 倍) 导致几乎无声, 修正后幅度正常
+
+**ISR 性能优化 (关键! 72MHz STC32G 上 GB 出声的核心)**:
+- **问题**: libvgm 原版 `gb_update_wave` 用 `while(cycles_left >= 2)` 逐 GB cycle 推进 freq_counter,
+  22050Hz 下每采样 cycles=190 → **95 次循环**; 每次循环体有 `offset/2` 除法 + level 缩放 → ISR 严重超时
+  (45μs 预算超 3-4 倍), 饿死 USB CDC 中断 → py `ser.write()` 永久阻塞 (不响应 Ctrl+C)
+- **对比 NES**: `nes_update_square` 循环体只有 `phaseacc -= freq; adder++` (无除法/表查找),
+  循环次数 = `cycles/freq` ≈ 10 次, 所以 NES 5 通道不卡
+- **修复**: wave 改 NES 风格 phaseacc — `cycles_left` 累加到 `period = 2×(0x800-frequency)` 才推进 offset,
+  循环次数从 95 降到 ~10 次; 循环体用 `>>1` 代替 `/2`, level 用 if/else 代替变量移位
+- **noise**: period 已是 GB cycles (8~32768), 循环最多 ~24 次, guard=32 保底
+- **square**: 本来就是公式法 (一次除法, 无循环), 不卡
+- **混音**: main.c ISR `mix += gb_render()`, 外层 `mix *= 8` 统一增益 (GB 已做 `<<6`, 削顶由钳位处理)
+
+**移植注意 (C251 C89)**:
+- 所有局部变量声明必须在 block 开头 (C251 默认 C89, 不支持 mixed declarations)
+- `data` 是 C251 保留字 (内部 RAM 段), 参数名必须用 `val`
+- mono 简化: libvgm 拆 left/right 是因为 GB 扬声器双声道, 我们没有, 直接 left+right 累加后用 NR50 平均主音量
+- 简化 DMG-only: 不实现 CGB-04 波形 RAM corrupt 和 mute mask
