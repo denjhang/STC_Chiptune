@@ -5,7 +5,7 @@
 /* 不 include stc.h, 由 nes.c 的 #include "stc.h" 提供 u8/u16/s16/s32 */
 
 #define NES_GETA_BITS   24
-#define NES_RATE        17640.0   /* 采样率, 用于 set_clock 计算 base_incr */
+#define NES_RATE        22050.0   /* 采样率, 用于 set_clock 计算 base_incr */
 
 /* DMC 采样缓冲: 对应 NES CPU memory $C000-$FFFF (16KB) */
 #define NES_DMC_BUF_SIZE 4096

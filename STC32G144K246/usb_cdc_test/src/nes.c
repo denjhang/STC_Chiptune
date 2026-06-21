@@ -497,7 +497,7 @@ s16 nes_render(void) {
     nes_base_count &= (1UL << NES_GETA_BITS) - 1;
 
     nes_frame_div++;
-    if (nes_frame_div >= 74) {
+    if (nes_frame_div >= 92) {  /* 22050/240 ≈ 91.875, NES frame counter 240Hz */
         nes_frame_div = 0;
         do_frame = 1;
     }
@@ -516,6 +516,6 @@ s16 nes_render(void) {
     /* DMC 输出范围 ±64, 降一半避免削顶, 与其他通道量级匹配 */
     mix += (s16)(nes_dpcm.output >> 1);
 
-    mix = mix * 4;
+    mix = mix * 1;
     return mix;
 }

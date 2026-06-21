@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------*/
-/* DAC1 12-bit + Timer0 ISR 17640Hz + USB 单 CDC + AY 开机音 */
+/* DAC1 12-bit + Timer0 ISR 22050Hz + USB 单 CDC + AY 开机音 */
 /*---------------------------------------------------------------------*/
 
 #include "stc.h"
@@ -15,7 +15,7 @@ char *USER_PRODUCTDESC = 0;
 char *USER_STCISPCMD = "@STCISP#";
 
 unsigned long MAIN_Fosc = 72000000L;  /* 72MHz HPLL */
-#define SAMPLE_RATE 17640
+#define SAMPLE_RATE 22050
 
 u8 led_val = 0xFE;
 static u16 led_tick = 0;
@@ -26,7 +26,7 @@ static u8 ay_active = 0;
 static u8 sn_active = 0;
 static u8 scc_active = 0;
 static u8 nes_active = 0;
-#define BOOT_NOTE_TICKS 35280  /* 2 秒 (17640 * 2) */
+#define BOOT_NOTE_TICKS 44100  /* 2 秒 (22050 * 2) */
 
 static u8 isp_match = 0;
 
@@ -111,7 +111,7 @@ void tm0_isr() interrupt 1
     DAC1_DAT = out;
     DAC1_CR = 0x41;
 
-    if (++led_tick >= 17640)
+    if (++led_tick >= 22050)
     {
         led_tick = 0;
         P2 = led_val;
