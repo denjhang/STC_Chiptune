@@ -4,20 +4,33 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 
 ## 当前状态 (2026-06-21)
 
-### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 四音源 (里程碑) ✅
+### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 五音源 (NES 完美) ✅
 
 **usb_cdc_test 目录** — 独立可运行的完整固件：
 
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
 2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
 3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-4. **AY8910 + SN76489 + SCC(K051649) + NES APU 四音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
-5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2)/NES(0xB4) 命令，vgm_player.py 通过 COM24 播放
+4. **AY8910 + SN76489 + SCC(K051649) + NES APU 五音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
+5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2)/NES(0xB4)/NES-DMC(0xB6)/Reset(0xF0) 命令，vgm_player.py 通过 COM24 播放
 6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，续命匹配优先避免和 0x50 冲突
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
 9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
-10. **NES APU 4 通道** — 2x 方波(包络+扫频)+三角+噪声，PAL/NTSC 双时钟自动适配
+10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF)
+11. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
+12. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
+
+### NES APU 完美播放要点
+
+- **5 通道**: 2x 方波（包络+扫频）+ 三角波 + 噪声 + DMC（1-bit delta 调制）
+- **DMC 采样缓冲 16KB** — 覆盖 NES CPU memory $C000-$FFFF 完整范围
+  - kirby / kkstar 等 VGM 的采样常存 $F000+，4KB buffer 会丢弃
+- **方波 freq_limit (Delek 修复)** — sweep 关闭时用 `freq_limit[7]`（不限制）
+  - 原实现直接用 `regs[1]&7`，导致 sweep 关闭的方波被 `freq_limit[0]=8` 卡死 → 低音无声
+- **Sweep 两个方波都跑** — 对齐 libvgm，不区分 channel
+- **PAL/NTSC 双时钟自动适配** — vgm_player 读 header 0x84 下发 0xB5
+- **frame_div = 92** — `22050/240 ≈ 91.875`，NES frame counter 保持 240Hz
 
 ### DAC1 + PGA1 Buffer 配置
 
