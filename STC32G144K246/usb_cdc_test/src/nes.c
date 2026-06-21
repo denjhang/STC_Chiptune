@@ -1,5 +1,5 @@
 /* nes.c - NES APU 仿真核心 (STC32G C251 版)
- * 4 通道: 2x 方波(包络+扫频), 1x 三角波, 1x 噪声(包络)
+ * 5 通道: 2x 方波(包络+扫频), 1x 三角波, 1x 噪声(包络), 1x DPCM
  */
 #include "stc.h"
 #include "nes.h"
@@ -15,6 +15,11 @@ static const u16 nes_freq_limit[8] = {
 
 static const u16 nes_noise_freq[16] = {
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+};
+
+/* DPCM 速率表 (NTSC): 每个 bit 占用的 CPU 周期数, 对应 reg0 低 4 位 */
+static const u16 nes_dpcm_periods[16] = {
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54
 };
 
 static const u8 nes_duty_lut[4] = { 0x40, 0x60, 0x78, 0x9F };
@@ -56,25 +61,44 @@ typedef struct {
     s8  output;
 } NES_NOISE;
 
+typedef struct {
+    u8  regs[4];          /* $4010-4013 */
+    u16 address;          /* 当前读地址 (NES CPU memory $C000+) */
+    u16 length;           /* 剩余字节数 */
+    u8  cur_byte;         /* 当前字节缓冲 */
+    u8  bits_left_int;    /* bits-left 内部计数 (length*8 减到 0) */
+    u8  bit_pos;          /* 当前 bit 在 byte 内的位置 0-7 */
+    u16 phaseacc;         /* 位周期累加 */
+    u8  enabled;          /* 由 $4015 bit4 控制 */
+    u8  active;           /* DMC 正在播 (内部状态) */
+    s16 vol;              /* 7-bit DAC 累积 (0..127) */
+    s8  output;
+} NES_DPCM;
+
 static NES_SQUARE xdata nes_squ[2];
 static NES_TRI xdata nes_tri;
 static NES_NOISE xdata nes_noi;
+static NES_DPCM xdata nes_dpcm;
 static u8  xdata nes_regs[0x18];
+
+/* DMC 采样缓冲: 对应 NES CPU memory $C000-$FFFF (16KB) */
+u8 xdata nes_dmc_buf[NES_DMC_BUF_SIZE];
+
 static u32 data nes_base_count;
-static u32 data nes_base_incr;   /* set_clock 时按 NES_CLOCK*2^24/rate 算出 */
+static u32 data nes_base_incr;
 static u16 data nes_frame_div;
 
 void nes_set_clock(u32 clock_hz) {
-    /* base_incr = clock * 2^24 / rate, 用 double 保证精度 */
     nes_base_incr = (u32)(((double)clock_hz * (double)(1UL << NES_GETA_BITS)) / NES_RATE);
 }
 
 void nes_init(void) {
     u8 i, j;
+    u16 k;
     for (i = 0; i < 0x18; i++) nes_regs[i] = 0;
     nes_base_count = 0;
     nes_frame_div = 0;
-    nes_set_clock(1789773UL);  /* 默认 NTSC, vgm_player 可覆盖 */
+    nes_set_clock(1789773UL);
 
     for (i = 0; i < 2; i++) {
         for (j = 0; j < 4; j++) nes_squ[i].regs[j] = 0;
@@ -108,6 +132,33 @@ void nes_init(void) {
     nes_noi.vbl_length = 0;
     nes_noi.enabled = 0;
     nes_noi.output = 0;
+
+    /* DMC 初始化 */
+    for (j = 0; j < 4; j++) nes_dpcm.regs[j] = 0;
+    nes_dpcm.address = 0;
+    nes_dpcm.length = 0;
+    nes_dpcm.cur_byte = 0;
+    nes_dpcm.bits_left_int = 0;
+    nes_dpcm.bit_pos = 0;
+    nes_dpcm.phaseacc = 0;
+    nes_dpcm.enabled = 0;
+    nes_dpcm.active = 0;
+    nes_dpcm.vol = 0;
+    nes_dpcm.output = 0;
+
+    /* 清空 DMC 缓冲 */
+    for (k = 0; k < NES_DMC_BUF_SIZE; k++) nes_dmc_buf[k] = 0;
+}
+
+void nes_dmc_load(u16 cpu_addr, u8 len, u8 *buf) {
+    /* 把 PC 下发的采样数据写到 nes_dmc_buf[cpu_addr - 0xC000] */
+    u16 offset = cpu_addr - 0xC000;
+    u8 i;
+    for (i = 0; i < len; i++) {
+        if (offset + i < NES_DMC_BUF_SIZE) {
+            nes_dmc_buf[offset + i] = buf[i];
+        }
+    }
 }
 
 void nes_wr(u8 reg, u8 val) {
@@ -179,6 +230,21 @@ void nes_wr(u8 reg, u8 val) {
         }
         break;
 
+    /* === DMC 寄存器 ($4010-4013) === */
+    case 0x10:
+        nes_dpcm.regs[0] = val;   /* IRQ/loop/rate */
+        break;
+    case 0x11:
+        nes_dpcm.regs[1] = val & 0x7F;  /* 7-bit DAC direct load */
+        nes_dpcm.vol = val & 0x7F;
+        break;
+    case 0x12:
+        nes_dpcm.regs[2] = val;   /* sample addr: CPU = 0xC000 + val*64 */
+        break;
+    case 0x13:
+        nes_dpcm.regs[3] = val;   /* sample len = val*16 + 1 */
+        break;
+
     case 0x15:
         nes_squ[0].enabled = (val & 0x01) ? 1 : 0;
         if (!(val & 0x01)) nes_squ[0].vbl_length = 0;
@@ -188,6 +254,24 @@ void nes_wr(u8 reg, u8 val) {
         if (!(val & 0x04)) { nes_tri.vbl_length = 0; nes_tri.linear_length = 0; nes_tri.counter_started = 0; }
         nes_noi.enabled = (val & 0x08) ? 1 : 0;
         if (!(val & 0x08)) nes_noi.vbl_length = 0;
+
+        /* DMC 启停: bit4=1 启动一次 DMA, 仅在当前未活跃时触发 */
+        if (val & 0x10) {
+            if (!nes_dpcm.active) {
+                /* 重置 DMC 状态 */
+                nes_dpcm.address = 0xC000 + (nes_dpcm.regs[2] << 6);
+                nes_dpcm.length = ((u16)nes_dpcm.regs[3] << 4) + 1;
+                nes_dpcm.bits_left_int = nes_dpcm.length;  /* 字节计数 */
+                nes_dpcm.bit_pos = 0;
+                nes_dpcm.cur_byte = 0;
+                nes_dpcm.phaseacc = 0;
+                nes_dpcm.active = 1;
+                nes_dpcm.enabled = 1;
+            }
+        } else {
+            nes_dpcm.enabled = 0;
+            nes_dpcm.active = 0;
+        }
         break;
 
     case 0x17:
@@ -339,6 +423,70 @@ static void nes_update_noise(NES_NOISE *chan, u16 cycles, u8 do_frame) {
     chan->output = (chan->lfsr & 1) ? vol : -vol;
 }
 
+/* DMC 更新: 参考 libvgm nes_apu.c apu_dpcm
+ * 每个 NES 周期减 phaseacc, <0 时消耗一个 bit:
+ *   - bit_pos == 7 (新字节开头): 从 nes_dmc_buf 读一字节
+ *   - bit=1 vol+=2, bit=0 vol-=2
+ *   - vol 钳位 [0..127]
+ *   - 字节读完 length--, ==0 时: 如果 loop 重启, 否则 active=0
+ */
+static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
+    u16 period;
+
+    if (!chan->active) { chan->output = (s8)(chan->vol - 64); return; }
+
+    period = nes_dpcm_periods[chan->regs[0] & 0x0F];
+
+    /* cycles 是本采样的 CPU 周期数, 减到 phaseacc */
+    {
+        s32 acc = (s32)chan->phaseacc - (s32)cycles;
+        while (acc <= 0) {
+            acc += period;
+
+            if (chan->length == 0) {
+                chan->active = 0;
+                chan->enabled = 0;
+                if (chan->regs[0] & 0x40) {
+                    /* loop: 重启 */
+                    chan->address = 0xC000 + (chan->regs[2] << 6);
+                    chan->length = ((u16)chan->regs[3] << 4) + 1;
+                    chan->active = 1;
+                    chan->enabled = 1;
+                } else {
+                    break;
+                }
+            }
+
+            /* 读 bit_pos == 7 (新字节) 时, 先取 byte */
+            if (chan->bit_pos == 0) {
+                u16 ofs = chan->address - 0xC000;
+                if (ofs < NES_DMC_BUF_SIZE) {
+                    chan->cur_byte = nes_dmc_buf[ofs];
+                } else {
+                    chan->cur_byte = 0;
+                }
+                chan->address++;
+                /* NES 硬件: address 溢出 $FFFF 后回到 $8000 */
+                if (chan->address > 0xFFFF) chan->address = 0x8000;
+                chan->length--;
+            }
+
+            /* 处理当前 bit: MSB first */
+            if (chan->cur_byte & (1 << (7 - chan->bit_pos))) {
+                if (chan->vol < 127) chan->vol += 2;
+            } else {
+                if (chan->vol > 0) chan->vol -= 2;
+            }
+
+            chan->bit_pos = (chan->bit_pos + 1) & 7;
+        }
+        chan->phaseacc = (u16)acc;
+    }
+
+    /* DMC 输出: 7-bit unsigned DAC, libvgm 转 signed (-64) */
+    chan->output = (s8)(chan->vol - 64);
+}
+
 s16 nes_render(void) {
     u16 cycles;
     s16 mix;
@@ -359,11 +507,14 @@ s16 nes_render(void) {
         nes_update_square(&nes_squ[1], cycles, do_frame);
         nes_update_tri(&nes_tri, cycles, do_frame);
         nes_update_noise(&nes_noi, cycles, do_frame);
+        nes_update_dpcm(&nes_dpcm, cycles);
     }
 
     mix = (s16)nes_squ[0].output + nes_squ[1].output;
     mix += (s16)(nes_tri.output * 3 >> 2);
     mix += (s16)(nes_noi.output * 3 >> 2);
+    /* DMC 输出范围 ±64, 降一半避免削顶, 与其他通道量级匹配 */
+    mix += (s16)(nes_dpcm.output >> 1);
 
     mix = mix * 4;
     return mix;

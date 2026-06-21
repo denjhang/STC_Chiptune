@@ -256,6 +256,33 @@ void process_uart(void)
             }
             isp_match = 0;
         }
+        else if (b == 0xB6)
+        {
+            /* NES DMC 采样数据下发: [0xB6][addr_lo][addr_hi][len][data...]
+             * cpu_addr 是 NES CPU 地址 ($C000+), MCU 内部映射到 nes_dmc_buf[addr - 0xC000]
+             * len 最大 32 (避免一次过长), vgm_player 分片下发
+             */
+            u16 addr;
+            u8 len, k;
+            u8 tmp[32];
+            if (TX1_Cnt == RX1_Cnt) break;
+            addr = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            addr |= ((u16)RX1_Buffer[TX1_Cnt]) << 8;
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (TX1_Cnt == RX1_Cnt) break;
+            len = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            if (len > 32) len = 32;
+            for (k = 0; k < len; k++) {
+                if (TX1_Cnt == RX1_Cnt) break;
+                tmp[k] = RX1_Buffer[TX1_Cnt];
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            }
+            nes_dmc_load(addr, k, tmp);
+            isp_match = 0;
+        }
         else
         {
             isp_match = 0;

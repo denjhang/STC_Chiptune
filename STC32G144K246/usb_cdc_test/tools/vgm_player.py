@@ -121,11 +121,39 @@ def parse_vgm_header(data):
         if nes_clock == 0:
             nes_clock = 1789773  # 默认 NTSC
 
+    # 扫 0x67 data block, 提取 type=0xC2 NES APU RAM write 的 DMC 采样数据
+    # 格式: [0x67][0x66][0xC2][size:4][addr_lo][addr_hi][data...]
+    # addr 是 NES CPU 地址 ($C000+), data 是采样字节
+    nes_dmc_blocks = []  # list of (cpu_addr, bytes)
+    scan_pos = data_off
+    while scan_pos < eof and scan_pos + 7 < len(data):
+        b = data[scan_pos]
+        if b == 0x66: break
+        if b == 0x67:
+            second = data[scan_pos + 1]  # 固定 0x66
+            tp = data[scan_pos + 2]
+            sz = struct.unpack_from('<I', data, scan_pos + 3)[0]
+            chip_id_bit = (sz >> 31) & 1
+            sz &= 0x7FFFFFFF
+            if tp == 0xC2 and sz >= 2 and scan_pos + 7 + sz <= len(data):
+                ram_addr = struct.unpack_from('<H', data, scan_pos + 7)[0]
+                payload = data[scan_pos + 9: scan_pos + 7 + sz]
+                nes_dmc_blocks.append((ram_addr, payload))
+            scan_pos += 7 + sz
+        elif b in (0xA0, 0x51, 0xB3, 0xB4, 0xBD, 0x52): scan_pos += 3
+        elif b == 0x50: scan_pos += 2
+        elif b == 0xD2: scan_pos += 4
+        elif b == 0x61: scan_pos += 3
+        elif b in (0x62, 0x63): scan_pos += 1
+        elif 0x70 <= b <= 0x9F: scan_pos += 1
+        else: scan_pos += 1
+
     return {
         'version': ver, 'eof': eof, 'data_offset': data_off,
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
         'sn_variant': sn_variant, 'nes_clock': nes_clock,
+        'nes_dmc_blocks': nes_dmc_blocks,
     }
 
 
@@ -137,6 +165,14 @@ def scan_vgm_stats(data, hdr):
     while pos < end:
         b = data[pos]
         if b == 0x66: break
+        if b == 0x67:
+            # [0x67][0x66][type][size:4 LE][data]
+            if pos + 7 <= end:
+                sz = struct.unpack_from('<I', data, pos + 3)[0]
+                pos += 7 + sz
+            else:
+                break
+            continue
         if b == 0xD2: scc += 1; pos += 4
         elif b == 0xA0: ay += 1; pos += 3
         elif b == 0x50: sn += 1; pos += 2
@@ -254,6 +290,21 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
     region = 'NTSC' if nes_clk > 1700000 else 'PAL'
     print(f"  NES clock: {nes_clk} Hz ({region})")
     ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
+    # NES DMC 采样数据下发 (0x67 type=0xC2 RAM write 块)
+    # 分片发送, 每包 [0xB6][addr_lo][addr_hi][len<=32][data...]
+    dmc_blocks = hdr.get('nes_dmc_blocks') or []
+    total_dmc_bytes = sum(len(p) for _, p in dmc_blocks)
+    if dmc_blocks:
+        print(f"  NES DMC samples: {len(dmc_blocks)} block(s), {total_dmc_bytes} bytes")
+    for ram_addr, payload in dmc_blocks:
+        ofs = 0
+        while ofs < len(payload):
+            chunk = payload[ofs: ofs + 32]
+            hdr_bytes = bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)])
+            ser.write(hdr_bytes + bytes(chunk))
+            ofs += len(chunk)
+            ram_addr += len(chunk)
+            time.sleep(0.002)  # 防止 RX1_Buffer 溢出
     print(f"  Speed: {speed:.1f}x" + (" [LOOP]" if loop else ""))
     print()
 
@@ -360,10 +411,11 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=False):
                 current_samples += n
 
             elif b == 0x67:
-                # Data block: skip
-                if pos + 3 <= end:
-                    sz = data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16)
-                    pos += 3 + sz
+                # Data block: [0x67][0x66][type][size:4 LE][data]
+                # pos 已 +1 指向 0x66, type 在 pos+1, size 在 pos+2..pos+5
+                if pos + 6 <= end:
+                    sz = struct.unpack_from('<I', data, pos + 2)[0]
+                    pos += 6 + sz
                 else:
                     break
 

@@ -1,4 +1,111 @@
 
+$ py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 --list
+
+  #  File                                       
+            Size  Duration  Info
+--------------------------------------------------------------------------------------------------------------
+  1  01 Title Screen.vgm                        
+          169887    114.7s  SCC:0 PSG:0 SN:0 GB:0 NES:41261 SAA:0 YM:0
+  2  03 Act 1 - The Forest.vgm                  
+           96853     70.0s  SCC:0 PSG:0 SN:0 GB:0 NES:23209 SAA:0 YM:0
+  3  04 Act 2 - The River Smurf ~ Act 8 - The Sledge Race.vgm    56136     38.4s  SCC:0 PSG:0 SN:0 GB:0 NES:13695 SAA:0 YM:0
+  4  05 Act 3 - The Swamps ~ Act 10 - Gargamel's Manor.vgm   136135     98.0s  SCC:0 PSG:0 SN:0 GB:0 NES:32889 SAA:0 YM:0
+  5  06 Act 4 - The Sarsaparilla Fields ~ Act 9 - The Bridge.vgm    87598     61.1s  SCC:0 PSG:0 SN:0 GB:0 NES:21476 SAA:0 YM:0
+  6  07 Act 5 - The Flight on a Stork.vgm                  41186     30.5s  SCC:0 PSG:0 SN:0 GB:0 NES:9797 SAA:0 YM:0
+  7  08 Act 6 - The Mountains.vgm               
+          137948    103.4s  SCC:0 PSG:0 SN:0 GB:0 NES:33289 SAA:0 YM:0
+  8  09 Act 7 - The Old Gold Mine.vgm           
+          149903     95.7s  SCC:0 PSG:0 SN:0 GB:0 NES:36889 SAA:0 YM:0
+  9  FSTRUCKS_01_trimmed.vgm                    
+           48249     29.6s  SCC:0 PSG:0 SN:0 GB:0 NES:10990 SAA:0 YM:0
+ 10  KMDK_01_trimmed.vgm                        
+           76315     51.1s  SCC:0 PSG:0 SN:0 GB:0 NES:16702 SAA:0 YM:0
+ 11  N001_01_trimmed.vgm                        
+           85067     54.3s  SCC:0 PSG:0 SN:0 GB:0 NES:17902 SAA:0 YM:0
+ 12  N002_01_trimmed.vgm                        
+           58480     45.4s  SCC:0 PSG:0 SN:0 GB:0 NES:12634 SAA:0 YM:0
+ 13  N003_01_trimmed.vgm                        
+          123024     70.3s  SCC:0 PSG:0 SN:0 GB:0 NES:28362 SAA:0 YM:0
+ 14  N004_01_trimmed.vgm                        
+          202693    160.8s  SCC:0 PSG:0 SN:0 GB:0 NES:46704 SAA:0 YM:0
+ 15  NLC_01_trimmed.vgm                         
+           82290     47.9s  SCC:0 PSG:0 SN:0 GB:0 NES:18128 SAA:0 YM:0
+ 16  RMMDK_01_trimmed.vgm                       
+           85060     63.9s  SCC:0 PSG:0 SN:0 GB:0 NES:19258 SAA:0 YM:0
+ 17  ROKWINF_01_trimmed.vgm                     
+          102968     96.7s  SCC:0 PSG:0 SN:0 GB:0 NES:22683 SAA:0 YM:0
+ 18  TORATRY_01_trimmed.vgm                     
+           78495     38.3s  SCC:0 PSG:0 SN:0 GB:0 NES:16831 SAA:0 YM:0
+ 19  aibomb_01_trimmed.vgm                      
+          237821    152.9s  SCC:0 PSG:0 SN:0 GB:0 NES:55333 SAA:0 YM:0
+ 20  naruto_01_trimmed.vgm                      
+          257087    123.0s  SCC:0 PSG:0 SN:0 GB:0 NES:58697 SAA:0 YM:0
+ 21  naruto_02_trimmed.vgm                      
+           98879     44.7s  SCC:0 PSG:0 SN:0 GB:0 NES:22744 SAA:0 YM:0
+ 22  naruto_03_trimmed.vgm                      
+          131224     63.9s  SCC:0 PSG:0 SN:0 GB:0 NES:30186 SAA:0 YM:0
+
+
+
+
+$ py -3 tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/ay8910 --port COM24 --list
+
+  #  File                           
+                        Size  Duration  Info
+--------------------------------------------------------------------------------------------------------------
+  1  Add-Astra-act-2-act-3-speccy.pl-party-2023.1-.vgm     39224     66.4s  SCC:0 PSG:11903 SN:0 GB:0 NES:0 SAA:0 YM:0
+  2  Add-Astra-prologue-speccy.pl-party-2023.1-.vgm        20872     42.1s  SCC:0 PSG:6082 SN:0 GB:0 NES:0 SAA:0 YM:0
+  3  Ascendant-Xenium-2023-2-.vgm                         110692    191.8s  SCC:0 PSG:33639 SN:0 GB:0 NES:0 SAA:0 YM:0
+  4  Demodulation-Demoduljacija-2023-1-.vgm                81664    130.2s  SCC:0 PSG:24896 SN:0 GB:0 NES:0 SAA:0 YM:0
+  5  DiHalt-Fragment-19-DiHalt-2019-2-.vgm                 79568    103.7s  SCC:0 PSG:24643 SN:0 GB:0 NES:0 SAA:0 YM:0
+  6  Digital-Espresso-Revision-2023-12-.vgm               107826    171.4s  SCC:0 PSG:32922 SN:0 GB:0 NES:0 SAA:0 YM:0
+  7  Galaktika-speccy.pl-party-2023.1-1-.vgm               94472    170.0s  SCC:0 PSG:28449 SN:1 GB:0 NES:0 SAA:0 YM:0
+  8  IdontCare.vgm                  
+                       85582    147.2s  SCC:0 PSG:25953 SN:0 GB:0 NES:0 SAA:0 YM:0
+  9  Last-Minute-Accident-speccy.pl-party-2023.1-1-.vgm   433520    124.5s  SCC:0 PSG:142248 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 10  Mizerna-Cicha.vgm              
+                       78254    142.5s  SCC:0 PSG:23546 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 11  NeXt-dAy-DiHalt-2007-4-.vgm                           80353    142.3s  SCC:0 PSG:24253 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 12  Nme.vgm                        
+                        7306     20.5s  SCC:0 PSG:1973 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 13  Not-Yet-Time-Chaos-Constructions-2017-3-.vgm          82223    141.9s  SCC:0 PSG:24880 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 14  Parallel-Visions.vgm           
+                       48133     88.5s  SCC:0 PSG:14505 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 15  PrObA-10.vgm                   
+                       49361     76.8s  SCC:0 PSG:15010 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 16  Recollection-DiHalt-2015-1-.vgm                      103452    172.8s  SCC:0 PSG:31443 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 17  Reko7-Xenium-2022-.vgm         
+                       56872    126.7s  SCC:0 PSG:16703 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 18  She-Stole-My-Cat.vgm           
+                       97335    152.0s  SCC:0 PSG:29711 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 19  Solitude-Lost-Party-2024-1-.vgm                       90397    175.0s  SCC:0 PSG:26906 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 20  Spectrumizer-Lost-Party-2023-3-.vgm                   80988    162.1s  SCC:0 PSG:24174 SN:1 GB:0 NES:0 SAA:0 YM:0
+ 21  Sunny-Days-3BM-OpenAir-2014-2-.vgm                    94891    166.0s  SCC:0 PSG:28702 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 22  TrafOfD.vgm                    
+                      309881    380.2s  SCC:0 PSG:95532 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 23  UckA_la.vgm                    
+                      124340    190.0s  SCC:0 PSG:38117 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 24  d-fr4gmEnt-re4Lt-me-DiHalt-Lite-2019-2-.vgm           69074    103.7s  SCC:0 PSG:21135 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 25  dh16inv-Multimatograf-2016-.vgm                       34913     54.2s  SCC:0 PSG:10580 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 26  di-stream-nom-nom-DiHalt-Lite-2019-1-.vgm             61004     96.1s  SCC:0 PSG:18577 SN:0 GB:0 NES:0 SAA:0 YM:0
+ 27  what-if-god-was-one-of-us-Joan-Osborne-cover-.vgm     66661    193.7s  SCC:0 PSG:18831 SN:0 GB:0 NES:0 SAA:0 YM:0
+
+
+
+
+
+D:\working\vscode-projects\Reference_Project\STC-MCU\STC8H8K64核心板资料\STC8H8K64U-DEMO-CODE-V9.6\72-USB-CDC转双串口-根据串口波特率自动调整主频
+
+
+cd /d/working/vscode-projects/STC_Chiptune/STC32G144K246/usb_cdc_test 
+py -3 tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/ay8910 --port COM24 8
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/sn76489 --port COM24 16
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/scc --port COM24 1
+py -3 tools/vgm_player.py  --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes --port COM24 1
+
+cd "d:/working/vscode-projects/STC_Chiptune" && py -3 STC32G144K246/usb_cdc_test/tools/vgm_player.py --vgm-dir /d/working/vscode-projects/STC_Chiptune/vgm/nes 13 2>&1 | head -15
+
+
 D:\working\vscode-projects\Reference_Project\STC-MCU\STC32G144K246开发板\4 STC厂方_USB库_LIBRARY\范例程序
 
 D:\working\vscode-projects\Reference_Project\STC-MCU\STC32G144K246开发板\3 CDC虚拟串口通信写法例子
