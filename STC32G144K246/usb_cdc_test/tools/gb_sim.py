@@ -36,7 +36,7 @@ class SOUND:
                  'envelope_count','signal','frequency','distance',
                  'sweep_enabled','sweep_neg_mode_used','sweep_shift',
                  'sweep_direction','sweep_time','sweep_count','level','offset',
-                 'duty_count','noise_short','noise_rng']
+                 'frequency_counter','duty_count','noise_short','noise_rng']
     def __init__(self, channel, length_mask):
         self.reg=[0,0,0,0,0]; self.on=0; self.channel=channel
         self.length=0; self.length_mask=length_mask; self.length_counting=0
@@ -46,7 +46,7 @@ class SOUND:
         self.frequency=0; self.distance=0x800; self.sweep_enabled=0
         self.sweep_neg_mode_used=0; self.sweep_shift=0; self.sweep_direction=0
         self.sweep_time=0; self.sweep_count=0; self.level=0; self.offset=0
-        self.duty_count=0; self.noise_short=0; self.noise_rng=0
+        self.frequency_counter=0; self.duty_count=0; self.noise_short=0; self.noise_rng=0
 
 def mask32(x):  return x & 0xFFFFFFFF
 
@@ -66,6 +66,8 @@ class GB:
         self.mode4_left=0; self.mode4_right=0
         self.cycles = 0
         self.base_count = 0
+        self.hp_y = 0
+        self.hp_x = 0
         self.gb_init()
 
     def gb_init(self):
@@ -87,6 +89,8 @@ class GB:
         self.ctrl_on = 1
         self.cycles = 0
         self.base_count = 0
+        self.hp_y = 0                # RC 高通滤波器状态
+        self.hp_x = 0
 
     def dac_enabled(self, snd):
         if snd.channel != 3:
@@ -137,21 +141,22 @@ class GB:
         return divisor[self.snd4.reg[3] & 7] << (self.snd4.reg[3] >> 4)
 
     def update_square(self, snd, cycles):
-        # 对齐优化版 gb.c: distance 预计算, s16 cycles_left, 公式法无循环
+        # 对齐 libvgm gb_update_square_channel: 双 distance + frequency_counter
         if not snd.on: return
         snd.cycles_left += cycles
         if snd.cycles_left <= 0: return
         cyc = snd.cycles_left >> 2
         snd.cycles_left &= 3
-        dist = snd.distance
-        if cyc >= dist:
-            counter = 1 + (cyc - dist) // dist
+        distance = 0x800 - snd.frequency_counter
+        if cyc >= distance:
+            cyc -= distance
+            distance = snd.distance      # 0x800 - frequency (预计算)
+            counter = 1 + cyc // distance
             snd.duty_count = (snd.duty_count + counter) & 0x07
             snd.signal = WAVE_DUTY[snd.duty][snd.duty_count]
-            rem = (cyc - dist) % dist
-            snd.cycles_left += rem << 2
+            snd.frequency_counter = snd.frequency + (cyc % distance)
         else:
-            snd.cycles_left += cyc << 2
+            snd.frequency_counter += cyc
 
     def update_wave(self, snd, cycles):
         # 对齐优化版 gb.c: phaseacc 风格, period = 2 × distance
@@ -262,6 +267,7 @@ class GB:
                 self.snd1.frequency=((self.snd1.reg[4]&0x7)<<8)|self.snd1.reg[3]
                 self.snd1.distance=0x800-self.snd1.frequency
                 self.snd1.cycles_left=0; self.snd1.duty_count=0
+                self.snd1.frequency_counter=self.snd1.frequency
                 self.snd1.sweep_enabled = (self.snd1.sweep_shift!=0) or (self.snd1.sweep_time!=0)
                 if not self.dac_enabled(self.snd1): self.snd1.on=0
                 if self.snd1.sweep_shift>0: self.calculate_next_sweep(self.snd1)
@@ -300,6 +306,7 @@ class GB:
                 self.snd2.frequency=((self.snd2.reg[4]&0x7)<<8)|self.snd2.reg[3]
                 self.snd2.distance=0x800-self.snd2.frequency
                 self.snd2.cycles_left=0; self.snd2.duty_count=0; self.snd2.signal=0
+                self.snd2.frequency_counter=self.snd2.frequency
                 self.snd2.length_counting=1
                 if not self.dac_enabled(self.snd2): self.snd2.on=0
                 if self.snd2.length==0 and self.snd2.length_enabled and not (self.cycles & 0x1FFF):
@@ -418,10 +425,20 @@ class GB:
             sample = self.snd4.signal * self.snd4.envelope_value
             if self.mode4_left:  left  += sample
             if self.mode4_right: right += sample
-        mono = (left + right) // 2
+        # 对齐 gb.c: max(|left|,|right|) 保留符号, vol_avg, >>3 衰减
+        if left < 0:
+            mono = left if -left >= right else right
+        else:
+            mono = left if left >= right else right
         vol_avg = (self.vol_left + self.vol_right + 1) // 2
         mono *= vol_avg
-        mono <<= 6
+        mono >>= 3
+        # RC 高通滤波器 (Q16 定点, 避免 small-signal 截断)
+        in_q16 = mono << 16
+        y_q16 = (65254 * (self.hp_y + in_q16 - self.hp_x)) >> 16
+        self.hp_x = in_q16
+        self.hp_y = y_q16
+        mono = y_q16 >> 16
         if mono > 2047: mono = 2047
         if mono < -2048: mono = -2048
         return mono

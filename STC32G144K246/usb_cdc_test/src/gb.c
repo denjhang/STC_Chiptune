@@ -88,6 +88,7 @@ typedef struct {
     u8  sweep_count;         /* 扫频计数器 */
     u8  level;               /* CH3 输出电平 (NR32 bit5-6) */
     u8  offset;              /* CH3 波形偏移 (0-31) */
+    u16 frequency_counter;   /* square 当前相位位置 (libvgm 原版字段, duty 推进用) */
     u8  duty_count;          /* duty 步进计数器 (&0x07) */
     u8  noise_short;         /* CH4 7-bit LFSR 模式 */
     u16 noise_rng;           /* CH4 噪声 LFSR 状态 (AY 风格 Galois) */
@@ -111,6 +112,16 @@ static SOUND xdata gb_snd1, xdata gb_snd2, xdata gb_snd3, xdata gb_snd4;
 static SOUNDC xdata gb_ctrl;
 static u8     xdata gb_regs[0x30];
 static u32    data gb_base_count;
+
+/* RC 高通滤波器状态 (模拟 DMG 硬件隔直电容):
+ * DMG 真机 CPU 输出经 1μF 电容 + 510Ω + 10KΩ 电位器到放大器, 截止 15.14Hz.
+ * 这个硬件高通: 1) 隔直消除 duty 不对称的直流 (12.5% duty 的 -0.75×env)
+ *              2) 衰减次声波. 是 gbsplay 比 libvgm 音质干净的根本原因.
+ * 标准一阶 RC 高通差分方程: y[n] = α × (y[n-1] + x[n] - x[n-1])
+ * α = RC/(RC+dt) = 0.99570436 (fc=15.14Hz, fs=22050Hz), Q16 定点 = 65254. */
+static s32    data gb_hp_y;       /* 上一次输出 y[n-1] */
+static s32    data gb_hp_x;       /* 上一次输入 x[n-1] */
+#define GB_HP_ALPHA     65254     /* Q16 定点的 α 系数 */
 
 static void *xmemset(void *s, int c, unsigned int n) {
     u8 *p = (u8 *)s;
@@ -193,31 +204,32 @@ static u16 gb_noise_period_cycles(SOUND *snd) {
 
 /* ========== 通道更新 (ISR 热路径, 极致优化) ========== */
 
-/* square: 公式法, 无循环. 对齐 NES nes_update_square 的 phaseacc 模式.
- * cycles_left 累加 cycles (s16), 每 4 GB cycles 推进一步 (>>2).
- * distance = 0x800 - frequency (切频时预计算). 跨越时用除法一次算出步数. */
+/* square: 公式法, 无循环. 严格对齐 libvgm gb_update_square_channel (line 957-986).
+ * 关键: 用 frequency_counter 记录当前相位位置, 不跨越时累加它, 跨越时重载.
+ * distance 第一次用 0x800-frequency_counter (当前到边界), 跨越后换 0x800-frequency.
+ * 之前为省一字段删了 frequency_counter, 导致相位推进错误 (duty_count 几乎不动,
+ * 12.5% duty 通道永远停在 -1 步, 音质极差). */
 static void gb_update_square(SOUND *snd, u16 cycles) {
-    u16 dist;
+    u16 distance;
     u16 cyc;
     u16 counter;
-    u16 rem;
 
     if (!snd->on) return;
     snd->cycles_left += (s16)cycles;
     if (snd->cycles_left <= 0) return;
 
-    cyc = (u16)(snd->cycles_left >> 2);   /* 每 4 GB cycles 推进一步 */
-    snd->cycles_left &= 3;                /* 保留低 2 位余数 */
-    dist = snd->distance;                 /* 预计算的 0x800 - frequency */
-    if (cyc >= dist) {
-        counter = 1 + (cyc - dist) / dist;
+    cyc = (u16)(snd->cycles_left >> 2);
+    snd->cycles_left &= 3;
+    distance = 0x800 - snd->frequency_counter;
+    if (cyc >= distance) {
+        cyc -= distance;
+        distance = snd->distance;              /* 0x800 - frequency (预计算) */
+        counter = 1 + cyc / distance;
         snd->duty_count = (snd->duty_count + counter) & 0x07;
         snd->signal = wave_duty_table[snd->duty][snd->duty_count];
-        rem = (cyc - dist) % dist;        /* 余下的步数转回 cycles_left */
-        snd->cycles_left += (s16)(rem << 2);
+        snd->frequency_counter = snd->frequency + (cyc % distance);
     } else {
-        /* 不跨越: cyc 步未到 distance, 转回 cycles_left 累积 */
-        snd->cycles_left += (s16)(cyc << 2);
+        snd->frequency_counter += cyc;
     }
 }
 
@@ -395,6 +407,7 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
             gb_update_distance(&gb_snd1);
             gb_snd1.cycles_left = 0;
             gb_snd1.duty_count = 0;
+            gb_snd1.frequency_counter = gb_snd1.frequency;   /* libvgm: trigger 重置相位 */
             gb_snd1.sweep_enabled = (gb_snd1.sweep_shift != 0) || (gb_snd1.sweep_time != 0);
             if (!gb_dac_enabled(&gb_snd1)) gb_snd1.on = 0;
             if (gb_snd1.sweep_shift > 0) gb_calculate_next_sweep(&gb_snd1);
@@ -446,6 +459,7 @@ static void gb_sound_w_internal(u8 offset, u8 val) {
             gb_update_distance(&gb_snd2);
             gb_snd2.cycles_left = 0;
             gb_snd2.duty_count = 0;
+            gb_snd2.frequency_counter = gb_snd2.frequency;   /* libvgm: trigger 重置相位 */
             gb_snd2.signal = 0;
             gb_snd2.length_counting = 1;
             if (!gb_dac_enabled(&gb_snd2)) gb_snd2.on = 0;
@@ -621,6 +635,8 @@ void gb_init(void) {
 
     gb_ctrl.on = 1;
     gb_base_count = 0;
+    gb_hp_y = 0;               /* RC 高通滤波器状态 */
+    gb_hp_x = 0;
 }
 
 /* ========== 渲染 (一个采样, ISR 热路径) ========== */
@@ -666,10 +682,25 @@ s16 gb_render(void) {
     if (left < 0) { if (-left >= right) mono = left; else mono = right; }
     else          { if ( left >= right) mono = left; else mono = right; }
 
-    /* 主音量 + 衰减 (对齐 NES 量级, ISR 外层 mix*=8 统一放大) */
+    /* 主音量 + 衰减 (对齐 NES 量级, ISR 外层 mix*=8 统一放大).
+     * >>3 (除 8) 而非 >>2: Pokemon 等高密度曲目 4 通道全开时幅度接近上限,
+     * >>2 会偶发破音, 减半到 >>3 留 6dB 余量. */
     vol_avg = ((s32)gb_ctrl.vol_left + gb_ctrl.vol_right + 1) >> 1;
     mono *= vol_avg;
-    mono >>= 2;
+    mono >>= 3;
+
+    /* RC 高通滤波器 (模拟 DMG 硬件隔直电容, 对齐 gbsplay 思路):
+     * 标准一阶 RC 高通: y[n] = α × (y[n-1] + x[n] - x[n-1])
+     * 消除 duty 不对称直流 (12.5% duty 的 -0.75×env) + 衰减 <15Hz 次声波.
+     * α=0.99570436 (fc=15.14Hz @ 22050Hz).
+     * 信号放大到 Q16 再滤波 (否则小信号整数截断导致衰减失效). */
+    {
+        s32 in_q16 = mono << 16;
+        s32 y_q16 = (GB_HP_ALPHA * (gb_hp_y + in_q16 - gb_hp_x)) >> 16;
+        gb_hp_x = in_q16;
+        gb_hp_y = y_q16;
+        mono = y_q16 >> 16;     /* 还原到原始幅度 */
+    }
 
     if (mono > 2047)  mono = 2047;
     if (mono < -2048) mono = -2048;
