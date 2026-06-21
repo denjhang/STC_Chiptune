@@ -7,7 +7,7 @@
 #define AY_CHANS    3
 #define AY_CLK      1789772UL
 #define AY_GETA_BITS 24
-#define AY_BASE_INCR   212779134UL
+#define AY_BASE_INCR   170223307UL
 
 void ay_init(void);
 void ay_wr(unsigned char reg, unsigned char val);
