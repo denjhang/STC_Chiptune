@@ -640,11 +640,26 @@ s16 gb_render(void) {
         if (gb_ctrl.mode4_right) right += sample;
     }
 
-    /* Mono = (left + right) / 2, 然后乘平均主音量, 再 <<6 (pump up, 同 libvgm) */
-    mono = (left + right) / 2;
+    /* Mono 合并策略 (单声道系统, 不做立体声):
+     * 真实 GB 左右扬声器物理分开, NR51 控制每个通道的声像 (left/right/both).
+     * 我们只有一个 DAC, 合并成 mono.
+     *
+     * 取 |left| 和 |right| 中较大者 (保留符号), 不求和也不平均:
+     *   - 单边使能 (只 left 或只 right): 全音量, 不被砍半
+     *   - 双边使能: 也是全音量 (不 +6dB), 和单边音量一致
+     *   - NR51 只影响"有没有声", 不影响"多大声"
+     * 这样无论作曲家怎么编排声像, 听感音量都稳定.
+     *
+     * 量级: GB 最坏 ≈ ±67 (vol=7), >>2 (除 4) 后 ≈ ±16,
+     * ISR 外层 mix *= 8 后 ≈ ±128, 在 DAC ±2048 内有充足余量.
+     *
+     * 若未来加第二个 DAC 做真立体声: 把 left/right 分别输出到 DAC1/DAC2,
+     * 各自走 vol_left/vol_right 主音量, ISR 计算量翻倍 (需重新评估是否超时). */
+    if (left < 0) { if (-left >= right) mono = left; else mono = right; }
+    else          { if ( left >= right) mono = left; else mono = right; }
     vol_avg = ((s32)gb_ctrl.vol_left + gb_ctrl.vol_right + 1) / 2;
     mono *= vol_avg;
-    mono <<= 6;
+    mono >>= 2;
 
     if (mono > 2047)  mono = 2047;
     if (mono < -2048) mono = -2048;

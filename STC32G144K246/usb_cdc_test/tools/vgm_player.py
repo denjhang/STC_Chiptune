@@ -282,6 +282,13 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     pos = hdr['data_offset']
     end = min(hdr['eof'], len(data))
 
+    # 开播前复位所有音源芯片: 清除上一首残留的相位/步进/cycles_left/lfsr 状态.
+    # 必须发, 否则单曲模式第二次播放时下位机 GB 带着脏状态 (wave/noise cycles_left 残留),
+    # 第一组 trigger 命令进来后循环爆 guard → ISR 超时 → 卡死.
+    # playlist 模式 mute_all_chips 已发, 这里再发一次幂等无害.
+    ser.write(bytes([0xF0]))
+    time.sleep(0.02)
+
     gd3_text = hdr['gd3'].encode('gbk', errors='replace').decode('gbk')
     print(f"  GD3: {gd3_text}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz")

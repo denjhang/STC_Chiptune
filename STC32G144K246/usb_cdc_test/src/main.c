@@ -290,17 +290,19 @@ void process_uart(void)
         {
             /* Reset all chips: 重新初始化所有音源, 清除残留状态
              * 用于 playlist 模式切歌时避免上一首的相位/步进/波表残留
-             * 导致下一首第一音音高错误 */
-            sn_init();
-            ay_init();
-            scc_init();
-            nes_init();
-            gb_init();
+             * 导致下一首第一音音高错误.
+             * 必须先清 active 标志再 init: 否则 init 期间 ISR 打断会读到
+             * 半清零的结构 (cycles_left 垃圾值 → wave/noise 循环爆 guard → 卡死) */
             ay_active = 0;
             sn_active = 0;
             scc_active = 0;
             nes_active = 0;
             gb_active = 0;
+            sn_init();
+            ay_init();
+            scc_init();
+            nes_init();
+            gb_init();
             isp_match = 0;
         }
         else if (b == 0xB3)
