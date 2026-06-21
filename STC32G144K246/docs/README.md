@@ -18,8 +18,21 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
 9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
 10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF)
-11. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
-12. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
+11. **AY8910 envelope 对齐 libvgm** — env_step 从 0x0F 递减 + attack 用 4-bit mask (0x00/0x0F)，修复渐强/渐弱反向导致的漏音
+12. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
+13. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
+
+### AY8910 Envelope 修复要点
+
+对齐 libvgm ay8910.c 的两个关键点：
+
+1. **env_step 初始值** — 写 reg 13 时总是设 0x0F（不管 attack/decay），attack 位只控制方向
+   - 原代码 `attack ? 0 : 0x0F` 导致 attack 模式第一个周期从 0 开始，方向反向
+2. **attack 类型** — 4-bit mask（0x00 或 0x0F），不是单 bit
+   - `env_volume = env_step ^ attack`，attack=0x0F 时 XOR 翻转 4 位实现渐强
+   - 原代码 attack=0/1，`0x0F ^ 1 = 0x0E`（错），渐强渐弱方向都错
+
+漏音根因：envelope 模式（reg8/9/10 bit4=1）的通道，attack 第一周期从静音反向跳到大音量，听起来像"漏了音头"。
 
 ### NES APU 完美播放要点
 
