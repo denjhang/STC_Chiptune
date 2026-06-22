@@ -17,10 +17,11 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
 9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
-10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF)
+10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF, 预存/流式混合策略自动选择)
 11. **AY8910 envelope 对齐 libvgm** — env_step 从 0x0F 递减 + attack 用 4-bit mask (0x00/0x0F)，修复渐强/渐弱反向导致的漏音
 12. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
 13. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
+14. **命令流防错位** — `process_uart()` peek+wait 模式, 多字节命令数据未到齐不消费命令头, 避免命令流错位导致 NES 偶发无声
 
 ### AY8910 Envelope 修复要点
 
@@ -312,23 +313,47 @@ USB 中断和主循环异步, DMC 数据量大时 (0xB6 每次 4+32 字节) 极�
 这样**永远不会在命令中间打断**, 从根本上消除错位. 同时对齐 STM32 硬件 NES 播放器
 (player_with_extsnd_test) 的思路: 先校验完整包再处理.
 
-### DMC 流式下发 (2026-06-22)
+### DMC 采样下发: 预存/流式混合策略 (2026-06-22)
 
-**方案演进**:
-1. ~~预下载 (2867633 稳定版)~~: 开播前一次性发所有 0xC2 块到 nes_dmc_buf, sleep 0.3ms.
-   问题: 同地址多块互相覆盖, 后到的覆盖先到的, 时序不可控.
-2. **流式下发 (当前)**: 主循环遇到 0x67 type=0xC2 块时, 实时分片 0xB6 发送到 MCU.
-   - VGM 的 0xC2 块按时间顺序写, 后写覆盖先写, 符合真实 NES 语义
-   - 每 512 字节 yield 1ms, 让 MCU process_uart 消化 RX buffer (避免 2048B 溢出)
-   - 传输期间持续重置 `last_time`, 传输耗时不计入 samples_budget (避免 VGM 追跑)
+**核心约束**: MCU `nes_dmc_buf` 固定 16KB, 对应 NES CPU memory $C000-$FFFF.
+但部分 VGM (如 Gimmick) 的 0xC2 块总量可达几十 KB 到几百 KB, 远超 16KB.
+
+**自动选择模式** (vgm_player.py 按 0xC2 块总字节数判断):
+
+| 总大小 | 模式 | 行为 |
+|--------|------|------|
+| ≤ 16KB | **预存** | 开播前一次性发完所有 0xC2 块, 主循环遇 0x67 直接跳过 |
+| > 16KB | **流式** | 主循环遇 0x67 0xC2 实时分片下发 0xB6 到 MCU |
+
+```python
+DMC_PRELOAD_LIMIT = 16384
+dmc_stream_mode = total_dmc_bytes > DMC_PRELOAD_LIMIT
+```
+
+**为什么需要两种模式**:
+- 预存不占用播放循环的 `samples_budget`, 节拍稳定 (流式在内层 while 里传输,
+  会挤掉主循环节拍导致速度变慢)
+- 流式必要: Gimmick 03 (33块/132KB)、11 (63块/256KB)、17 (71块/288KB) 等
+  单曲 0xC2 总量远超 16KB, 预存装不下, 必须按时序覆盖
+
+**实测覆盖** (vgm/nes/ 全目录扫描):
+- 预存: Kirby 全套 (4K)、SMB3 全套 (4-8K)、Contra 全套 (16K)、Gimmick 08/10/14 (≤8K)
+- 流式: Gimmick 大部分曲目 (20K~288K)、Gimmick 06/09/13/16/20 (20-36K)
+
+**同地址覆盖语义**: VGM 的 0xC2 块按时间顺序写, 后写覆盖先写 — 符合真实 NES 语义
+(Gimmick 33 块都写 $C000/$D000, 每次 trigger 前覆盖). 预存按出现顺序逐块下发即
+自然实现 "后到的覆盖先到的"; 流式在主循环时间点下发, 时序更精确.
+
+**流式时序安全**:
+- 0xC2 LOAD 总在 $4015 TRIG 之前到达 (VGM 标准要求), 写时 DMC 还在播旧地址
+- 每 512 字节 yield 1ms, 让 MCU `process_uart` 消化 RX buffer (避免 2048B 溢出)
+- 传输期间持续重置 `last_time`, 传输耗时不计入 samples_budget (避免 VGM 追跑)
 
 **参考其他硬件 NES 播放器** (都是驱动真实 2A03 芯片, 非软件模拟):
-- NESDriver7132 (ESP32): 通过 HC595 SPI 驱动 2A03, DMC 硬件自动读 $C000-$FFFF
-- player_with_extsnd_test (ESP32+PSRAM): VGM 解析在 MCU, 64KB PSRAM 存所有 DMC 块,
-  播放时逐字节 SPI 写真实 NES. **不存在 bank 冲突** (真实 NES DMC 地址空间线性可见)
-
-**我们的方案** (软件模拟): nes_dmc_buf 16KB 对应 $C000-$FFFF, PC 端流式下发按 VGM
-时间顺序覆盖, ISR 在 $4015 trigger 后从新数据读取, 无 bank 冲突.
+- NESDriver7132 (ESP32): HC595 SPI 驱动 2A03, DMC 硬件自动读 $C000-$FFFF
+- player_with_extsnd_test (ESP32+PSRAM): 64KB PSRAM 存所有 DMC 块, 逐字节 SPI 写真实 NES.
+  **不存在 bank 冲突** (真实 NES DMC 地址空间线性可见), 但需要大 RAM.
+- 我们的方案 (软件模拟, 16KB buffer + 混合策略): 在有限 RAM 下实现等效效果.
 
 ### GB DMG 实现要点 (对齐 libvgm gb.c)
 

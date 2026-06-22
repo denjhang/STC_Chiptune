@@ -40,6 +40,36 @@ SAMPLES_PER_SEC = 44100
 ACK_OK = 0xAA
 ACK_ERR = 0xFF
 
+
+def fmt_bytes(n):
+    """字节数格式化: <1024 用 B, 否则 KB 保留 1 位小数"""
+    if n < 1024:
+        return f"{n}B"
+    return f"{n/1024:.1f}KB"
+
+
+def progress_bar(cur, total, width=24):
+    """生成 ASCII 进度条: [████████████░░░░░░░░░░] 50%"""
+    if total <= 0:
+        return '[' + ' ' * width + '] 0%'
+    pct = min(cur / total, 1.0)
+    filled = int(pct * width)
+    bar = '█' * filled + '░' * (width - filled)
+    return f'[{bar}] {pct*100:3.0f}%'
+
+
+def dmc_send_block(ser, addr, payload):
+    """把一个 DMC 块分片发到 MCU (0xB6 命令). 每 512B yield 1ms 防 RX 溢出."""
+    o = 0
+    while o < len(payload):
+        chunk = payload[o: o + 32]
+        ser.write(bytes([0xB6, addr & 0xFF, (addr >> 8) & 0xFF, len(chunk)]) + bytes(chunk))
+        o += len(chunk)
+        addr += len(chunk)
+        if o % 512 == 0:
+            time.sleep(0.001)
+
+
 def uart_send(ser, data, ack=True):
     """发送带 XOR 校验的命令包
     ack=True: 等待 ACK, 超时重发 (最多3次), 用于 FM/直接命令
@@ -388,12 +418,38 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     gb_clk = hdr.get('gb_clock') or 0
     if stats['gb'] > 0 and gb_clk:
         print(f"  GB clock: {gb_clk} Hz (DMG)")
-    # NES DMC 采样: 流式下发 (主循环遇 0xC2 块时实时发 0xB6 到 MCU 16K buffer).
-    # 同地址多块按 VGM 时间顺序覆盖, TRIG 后 ISR 从新数据读取, 无 bank 冲突.
+    # NES DMC 采样: 按总大小自动选模式 (MCU nes_dmc_buf = 16KB).
+    #   ≤ 16KB → 预存 (开播前一次性发完, 不占 samples_budget, 节拍稳)
+    #   > 16KB → 流式 (主循环遇 0x67 0xC2 实时下发, 否则 16KB 装不下, 如 Gimmick 132KB)
+    # 同地址多块按时序覆盖 (符合真实 NES 语义: 后写覆盖先写).
+    DMC_PRELOAD_LIMIT = 16384
     dmc_blocks = hdr.get('nes_dmc_blocks') or []
     total_dmc_bytes = sum(len(p) for _, p in dmc_blocks)
+    dmc_stream_mode = total_dmc_bytes > DMC_PRELOAD_LIMIT
+    dmc_stream_sent = 0  # 流式已发送累计字节 (主循环用)
+    dmc_stream_seq = 0   # 流式块序号 (主循环用)
     if dmc_blocks:
-        print(f"  NES DMC samples: {len(dmc_blocks)} block(s), {total_dmc_bytes} bytes (stream on 0xC2)")
+        mode_label = 'STREAM ' if dmc_stream_mode else 'PRELOAD'
+        total_str = fmt_bytes(total_dmc_bytes)
+        if not dmc_stream_mode:
+            # 预存: 按出现顺序逐块下发, 后到的覆盖先到的. 带进度条.
+            print(f"  DMC [{mode_label}] {len(dmc_blocks)} blocks, {total_str} total")
+            sent = 0
+            t0 = time.perf_counter()
+            for i, (blk_addr, blk_data) in enumerate(dmc_blocks):
+                dmc_send_block(ser, blk_addr, blk_data)
+                sent += len(blk_data)
+                # 同行刷新进度条 (每块或每 512B 更新一次)
+                line = (f"\r  DMC [{mode_label}] {progress_bar(sent, total_dmc_bytes)} "
+                        f"{fmt_bytes(sent)} / {total_str}  blk{i+1}/{len(dmc_blocks)}")
+                print(line, end='', flush=True)
+            time.sleep(0.02)
+            dt = time.perf_counter() - t0
+            print(f"\r  DMC [{mode_label}] {progress_bar(total_dmc_bytes, total_dmc_bytes)} "
+                  f"{total_str} / {total_str}  {len(dmc_blocks)} blocks  {dt*1000:.0f}ms  OK")
+        else:
+            # 流式: 主循环遇 0x67 0xC2 实时下发. 开播前只显示计划.
+            print(f"  DMC [{mode_label}] {len(dmc_blocks)} blocks, {total_str} total (>16KB, on-the-fly)")
     loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
     if loop_remaining > 0 and hdr['loop_offset'] > 0:
         print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
@@ -513,30 +569,31 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
 
             elif b == 0x67:
                 # Data block: [0x67][0x66][type][size:4 LE][data]
-                # NES DMC type=0xC2: 流式分片下发 0xB6 写到 16K nes_dmc_buf.
-                # 时序安全: 0xC2 LOAD 总在 $4015 TRIG 之前到达, 写时 DMC 还在播旧地址.
-                # 重置 last_time 让传输耗时不计入 samples_budget (避免追跑).
+                # 预存模式 (≤16KB): 开播前已发, 这里只跳过.
+                # 流式模式 (>16KB): 遇 0xC2 NES DMC 块实时分片下发 0xB6 到 MCU 16K buffer.
+                #   时序安全: 0xC2 LOAD 总在 $4015 TRIG 之前到达.
+                #   重置 last_time 让传输耗时不计入 samples_budget (避免追跑).
                 if pos + 6 <= end:
                     tp = data[pos + 1]
                     sz = struct.unpack_from('<I', data, pos + 2)[0] & 0x7FFFFFFF
-                    if tp == 0xC2 and sz >= 2 and pos + 6 + sz <= end:
+                    if dmc_stream_mode and tp == 0xC2 and sz >= 2 and pos + 6 + sz <= end:
                         ram_addr = struct.unpack_from('<H', data, pos + 6)[0]
                         payload = data[pos + 8: pos + 6 + sz]
                         last_time = time.perf_counter()
-                        o = 0
-                        while o < len(payload):
-                            chunk = payload[o: o + 32]
-                            ser.write(bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)]) + bytes(chunk))
-                            o += len(chunk)
-                            ram_addr += len(chunk)
-                            # 每 512 字节 yield 1ms, 让 MCU process_uart 消化 RX buffer
-                            if o % 512 == 0:
-                                time.sleep(0.001)
-                                last_time = time.perf_counter()
+                        dmc_send_block(ser, ram_addr, payload)
                         last_time = time.perf_counter()
+                        # 流式实时进度: 每块刷新一行 (序号/地址/本块/累计/总进度)
+                        dmc_stream_seq += 1
+                        dmc_stream_sent += len(payload)
+                        total_str = fmt_bytes(total_dmc_bytes)
+                        nblk = len(dmc_blocks)
+                        print(f"\r  DMC [STREAM ] #{dmc_stream_seq:03d}/{nblk} "
+                              f"${ram_addr:04X} {fmt_bytes(len(payload)):<7s} "
+                              f"{progress_bar(dmc_stream_sent, total_dmc_bytes, 16)} "
+                              f"{fmt_bytes(dmc_stream_sent)} / {total_str}", end='', flush=True)
                     pos += 6 + sz
                 else:
-                    break
+                    pos = end
 
             else:
                 # Unknown: skip by length
@@ -547,6 +604,9 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         if pos >= end:
             break
 
+    # 流式进度条换行 (避免和 END/CUT 挤一行)
+    if dmc_stream_mode and dmc_stream_seq > 0:
+        print()
     real_sec = current_samples / SAMPLES_PER_SEC / speed
     if interrupt_cmd:
         print(f"  [CUT {interrupt_cmd.upper()}] {real_sec:.1f}s")
