@@ -388,10 +388,9 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     gb_clk = hdr.get('gb_clock') or 0
     if stats['gb'] > 0 and gb_clk:
         print(f"  GB clock: {gb_clk} Hz (DMG)")
-    # NES DMC 采样数据下发 (0x67 type=0xC2 RAM write 块)
-    # 分片发送, 每包 [0xB6][addr_lo][addr_hi][len<=32][data...]
-    # chunk=32 (固件 tmp[32] 硬限制), sleep=0.3ms: 比原来 2ms 快 6.7 倍.
-    # 之前 sleep=2ms: 65KB 数据要 4-8 秒 (Gimmick 卡好几秒根因).
+    # NES DMC 采样数据开播前预下 (分片发 0xB6, chunk=32 对齐固件 tmp[32]).
+    # 流式下发会卡播放节奏 (多次尝试都不稳定), 权衡稳定性选预下.
+    # DMC 时序修复 (< 0 + address 回绕 + loop bits_left) 在固件侧已让 DMC 正常.
     dmc_blocks = hdr.get('nes_dmc_blocks') or []
     total_dmc_bytes = sum(len(p) for _, p in dmc_blocks)
     if dmc_blocks:
@@ -400,11 +399,10 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         ofs = 0
         while ofs < len(payload):
             chunk = payload[ofs: ofs + 32]
-            hdr_bytes = bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)])
-            ser.write(hdr_bytes + bytes(chunk))
+            ser.write(bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)]) + bytes(chunk))
             ofs += len(chunk)
             ram_addr += len(chunk)
-            time.sleep(0.0003)  # 防 RX1_Buffer 溢出 (115200 baud 下 36 字节约 3ms)
+            time.sleep(0.0003)  # 防 RX1_Buffer 溢出
     loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
     if loop_remaining > 0 and hdr['loop_offset'] > 0:
         print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
@@ -490,6 +488,14 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                 if pos + 3 <= end:
                     ser.write(data[pos-1:pos+3])
                     pos += 3
+
+            elif b == 0x67:
+                # 数据块: 开播前已预下, 这里只跳过
+                if pos + 6 <= end:
+                    sz = struct.unpack_from('<I', data, pos + 2)[0] & 0x7FFFFFFF
+                    pos += 6 + sz
+                else:
+                    pos = end
 
             elif b == 0x61:
                 # Wait N samples
