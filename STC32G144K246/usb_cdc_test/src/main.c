@@ -173,11 +173,12 @@ void process_uart(void)
     while (TX1_Cnt != RX1_Cnt)
     {
         b = RX1_Buffer[TX1_Cnt];
-        if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
 
-        /* @STCISP# 续命优先, 否则 0x50='P' 会被 SN 分支截走 */
+        /* @STCISP# 续命优先, 否则 0x50='P' 会被 SN 分支截走.
+         * 注意: STCISP 处理与下面的多字节命令不同, 它逐字节消费, 不回退 */
         if (isp_match > 0 && b == USER_STCISPCMD[isp_match])
         {
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (++isp_match >= 8)
             {
                 USBCON = 0x00;
@@ -186,63 +187,91 @@ void process_uart(void)
                 IAP_CONTR = 0x60;
                 while (1);
             }
+            continue;
         }
         else if (isp_match == 0 && b == USER_STCISPCMD[0])
         {
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             isp_match = 1;
+            continue;
         }
-        else if (b == 0xA0)
+        isp_match = 0;
+
+        /* 多字节命令: 先 peek 命令头 (不消费), 检查所需数据是否到齐.
+         * 数据不足时 return (不消费命令头), 等 USB 中断把剩余字节填满再处理.
+         * 这样避免命令流错位 — 命令中间数据不够时把后面的字节误当成新命令头.
+         *
+         * buffer_avail: 从 TX1_Cnt 到 RX1_Cnt 之间的字节数 (含命令头本身) */
+        {
+            u16 avail;
+            if (RX1_Cnt >= TX1_Cnt) avail = RX1_Cnt - TX1_Cnt;
+            else avail = UART1_BUF_LENGTH - TX1_Cnt + RX1_Cnt;
+
+            /* 0xA0/0x50/0xB3/0xB4/0xBD: 3 字节 (cmd+2)
+             * 0xD2:             4 字节 (cmd+3)
+             * 0xB5/0xB7:        5 字节 (cmd+4)
+             * 0xB6:             4 + len 字节 (cmd+addr_lo+addr_hi+len+data[len]) */
+            if (b == 0xA0 || b == 0x50 || b == 0xB3 || b == 0xB4 || b == 0xBD) {
+                if (avail < 3) return;
+            } else if (b == 0xD2) {
+                if (avail < 4) return;
+            } else if (b == 0xB5 || b == 0xB7) {
+                if (avail < 5) return;
+            } else if (b == 0xB6) {
+                /* 0xB6 长度可变, 需要先读 len 字段才知道总长 */
+                if (avail < 4) return;
+                {
+                    u16 hdr_pos = (TX1_Cnt + 3) & (UART1_BUF_LENGTH - 1);
+                    u8 need_len = RX1_Buffer[hdr_pos];
+                    if (need_len > 32) need_len = 32;
+                    if (avail < (u16)(4 + need_len)) return;
+                }
+            }
+        }
+
+        /* 数据已到齐, 消费命令头 */
+        if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+
+        if (b == 0xA0)
         {
             /* AY8910: [0xA0][reg][data] */
-            if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             ay_active = 1;
             ay_wr(r, d);
-            isp_match = 0;
         }
         else if (b == 0x50)
         {
             /* SN76489: [0x50][data] */
-            if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_active = 1;
             sn_wr(d);
-            isp_match = 0;
         }
         else if (b == 0xD2)
         {
             /* SCC: [0xD2][port][reg][data] */
-            if (TX1_Cnt == RX1_Cnt) break;
             p = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             scc_active = 1;
             scc_wr((p & 0x7F) << 1, r);
             scc_wr(((p & 0x7F) << 1) | 1, d);
-            isp_match = 0;
         }
         else if (b == 0xB4)
         {
             /* NES APU: [0xB4][reg][data] */
-            if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             nes_active = 1;
             nes_wr(r, d);
-            isp_match = 0;
         }
         else if (b == 0xB5)
         {
@@ -250,59 +279,45 @@ void process_uart(void)
             u32 clk = 0;
             u8 k;
             for (k = 0; k < 4; k++) {
-                if (TX1_Cnt == RX1_Cnt) break;
                 clk |= ((u32)RX1_Buffer[TX1_Cnt]) << (k * 8);
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
-            if (k == 4) {
-                nes_set_clock(clk);
-            }
-            isp_match = 0;
+            nes_set_clock(clk);
         }
         else if (b == 0xB6)
         {
             /* NES DMC 采样数据下发: [0xB6][addr_lo][addr_hi][len][data...]
              * cpu_addr 是 NES CPU 地址 ($C000+), MCU 内部映射到 nes_dmc_buf[addr - 0xC000]
-             * len 最大 32 (避免一次过长), vgm_player 分片下发
-             */
+             * len 最大 32 (避免一次过长), vgm_player 分片下发 */
             u16 addr;
             u8 len, k;
             u8 tmp[32];
-            if (TX1_Cnt == RX1_Cnt) break;
             addr = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             addr |= ((u16)RX1_Buffer[TX1_Cnt]) << 8;
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             len = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             if (len > 32) len = 32;
             for (k = 0; k < len; k++) {
-                if (TX1_Cnt == RX1_Cnt) break;
                 tmp[k] = RX1_Buffer[TX1_Cnt];
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
-            nes_dmc_load(addr, k, tmp);
-            isp_match = 0;
+            nes_dmc_load(addr, len, tmp);
         }
         else if (b == 0xB7)
         {
             /* AY set clock: [0xB7][clk0][clk1][clk2][clk3] little-endian
              * 自定义命令 (libvgm 标准无此字节), 对齐 0xB5 NES clock.
-             * py 端按 chipFlags bit0 (/2 分频器) 处理后下发实际时钟.
-             * 如 Gimmick YM2149 clock=1789773 + bit0=1 → 下发 894886 */
+             * py 端按 chipFlags bit4 (/2 分频器) 处理后下发实际时钟.
+             * 如 Gimmick YM2149 clock=1789773 + chipFlags=0x10 → 下发 894886 */
             u32 clk = 0;
             u8 k;
             for (k = 0; k < 4; k++) {
-                if (TX1_Cnt == RX1_Cnt) break;
                 clk |= ((u32)RX1_Buffer[TX1_Cnt]) << (k * 8);
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
-            if (k == 4) {
-                ay_set_clock(clk);
-            }
-            isp_match = 0;
+            ay_set_clock(clk);
         }
         else if (b == 0xF0)
         {
@@ -321,25 +336,18 @@ void process_uart(void)
             scc_init();
             nes_init();
             gb_init();
-            isp_match = 0;
         }
         else if (b == 0xB3)
         {
             /* GB DMG: [0xB3][reg][data] */
-            if (TX1_Cnt == RX1_Cnt) break;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            if (TX1_Cnt == RX1_Cnt) break;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             gb_active = 1;
             gb_wr(r, d);
-            isp_match = 0;
         }
-        else
-        {
-            isp_match = 0;
-        }
+        /* 未知字节: 已消费, 当噪声丢弃 (不影响后续对齐) */
     }
 }
 

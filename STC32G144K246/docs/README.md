@@ -2,7 +2,7 @@
 
 STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HID/CDC, 100-pin LQFP）。本项目把 12K128 的多音源合成器迁移过来，使用 USB CDC 通信 + 12-bit DAC 音频输出。
 
-## 当前状态 (2026-06-21)
+## 当前状态 (2026-06-22)
 
 ### USB CDC 纯源码 + DAC1 12-bit + PLL 72MHz + 五音源 (NES 完美) ✅
 
@@ -285,6 +285,50 @@ enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, ini
 ### NES APU 已知限制
 
 NES APU 已完整支持 5 通道 (含 DMC 16KB 采样缓冲), 无已知限制。
+
+### 命令流错位 bug (2026-06-22 修复)
+
+**症状**: NES 曲目播放中**偶尔突然完全无声**, 切歌 (发 0xF0 reset) 后恢复正常。
+
+**根因**: `main.c process_uart()` 的多字节命令 (0xB6/0xD2/0xB4 等) 处理时, 中途数据不足
+(RX1_Cnt == TX1_Cnt) 直接 `break` 跳出循环, **但命令头 (0xB6 等) 已经被消费** (TX1_Cnt
+已推进). 下次 `process_uart()` 调用时, 命令的参数字节被**当成新命令头**解析 → 整条命令流
+从此错位 → NES 收到垃圾寄存器值 → 静音.
+
+USB 中断和主循环异步, DMC 数据量大时 (0xB6 每次 4+32 字节) 极易在命令中间触发 break.
+切歌的 0xF0 reset 重新对齐命令流, 所以切歌能恢复.
+
+**修复**: `process_uart()` 改为 **peek + wait** 模式:
+1. 读命令头前**不消费 TX1_Cnt**, 先 peek 判断 buffer 里可用字节数
+2. 数据不足时 `return` (命令头留在 buffer 里), 等 USB 中断把剩余字节填满
+3. 数据到齐才消费命令头和参数
+
+各命令长度表 (peek 时判断):
+- 0xA0/0x50/0xB3/0xB4/0xBD: 3 字节
+- 0xD2: 4 字节
+- 0xB5/0xB7: 5 字节
+- 0xB6: 4 + len (可变, 先 peek len 字段再判断)
+
+这样**永远不会在命令中间打断**, 从根本上消除错位. 同时对齐 STM32 硬件 NES 播放器
+(player_with_extsnd_test) 的思路: 先校验完整包再处理.
+
+### DMC 流式下发 (2026-06-22)
+
+**方案演进**:
+1. ~~预下载 (2867633 稳定版)~~: 开播前一次性发所有 0xC2 块到 nes_dmc_buf, sleep 0.3ms.
+   问题: 同地址多块互相覆盖, 后到的覆盖先到的, 时序不可控.
+2. **流式下发 (当前)**: 主循环遇到 0x67 type=0xC2 块时, 实时分片 0xB6 发送到 MCU.
+   - VGM 的 0xC2 块按时间顺序写, 后写覆盖先写, 符合真实 NES 语义
+   - 每 512 字节 yield 1ms, 让 MCU process_uart 消化 RX buffer (避免 2048B 溢出)
+   - 传输期间持续重置 `last_time`, 传输耗时不计入 samples_budget (避免 VGM 追跑)
+
+**参考其他硬件 NES 播放器** (都是驱动真实 2A03 芯片, 非软件模拟):
+- NESDriver7132 (ESP32): 通过 HC595 SPI 驱动 2A03, DMC 硬件自动读 $C000-$FFFF
+- player_with_extsnd_test (ESP32+PSRAM): VGM 解析在 MCU, 64KB PSRAM 存所有 DMC 块,
+  播放时逐字节 SPI 写真实 NES. **不存在 bank 冲突** (真实 NES DMC 地址空间线性可见)
+
+**我们的方案** (软件模拟): nes_dmc_buf 16KB 对应 $C000-$FFFF, PC 端流式下发按 VGM
+时间顺序覆盖, ISR 在 $4015 trigger 后从新数据读取, 无 bank 冲突.
 
 ### GB DMG 实现要点 (对齐 libvgm gb.c)
 

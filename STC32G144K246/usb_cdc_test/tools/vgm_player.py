@@ -388,21 +388,12 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     gb_clk = hdr.get('gb_clock') or 0
     if stats['gb'] > 0 and gb_clk:
         print(f"  GB clock: {gb_clk} Hz (DMG)")
-    # NES DMC 采样数据开播前预下 (分片发 0xB6, chunk=32 对齐固件 tmp[32]).
-    # 流式下发会卡播放节奏 (多次尝试都不稳定), 权衡稳定性选预下.
-    # DMC 时序修复 (< 0 + address 回绕 + loop bits_left) 在固件侧已让 DMC 正常.
+    # NES DMC 采样: 流式下发 (主循环遇 0xC2 块时实时发 0xB6 到 MCU 16K buffer).
+    # 同地址多块按 VGM 时间顺序覆盖, TRIG 后 ISR 从新数据读取, 无 bank 冲突.
     dmc_blocks = hdr.get('nes_dmc_blocks') or []
     total_dmc_bytes = sum(len(p) for _, p in dmc_blocks)
     if dmc_blocks:
-        print(f"  NES DMC samples: {len(dmc_blocks)} block(s), {total_dmc_bytes} bytes")
-    for ram_addr, payload in dmc_blocks:
-        ofs = 0
-        while ofs < len(payload):
-            chunk = payload[ofs: ofs + 32]
-            ser.write(bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)]) + bytes(chunk))
-            ofs += len(chunk)
-            ram_addr += len(chunk)
-            time.sleep(0.0003)  # 防 RX1_Buffer 溢出
+        print(f"  NES DMC samples: {len(dmc_blocks)} block(s), {total_dmc_bytes} bytes (stream on 0xC2)")
     loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
     if loop_remaining > 0 and hdr['loop_offset'] > 0:
         print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
@@ -489,14 +480,6 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     ser.write(data[pos-1:pos+3])
                     pos += 3
 
-            elif b == 0x67:
-                # 数据块: 开播前已预下, 这里只跳过
-                if pos + 6 <= end:
-                    sz = struct.unpack_from('<I', data, pos + 2)[0] & 0x7FFFFFFF
-                    pos += 6 + sz
-                else:
-                    pos = end
-
             elif b == 0x61:
                 # Wait N samples
                 if pos + 2 <= end:
@@ -530,9 +513,27 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
 
             elif b == 0x67:
                 # Data block: [0x67][0x66][type][size:4 LE][data]
-                # pos 已 +1 指向 0x66, type 在 pos+1, size 在 pos+2..pos+5
+                # NES DMC type=0xC2: 流式分片下发 0xB6 写到 16K nes_dmc_buf.
+                # 时序安全: 0xC2 LOAD 总在 $4015 TRIG 之前到达, 写时 DMC 还在播旧地址.
+                # 重置 last_time 让传输耗时不计入 samples_budget (避免追跑).
                 if pos + 6 <= end:
-                    sz = struct.unpack_from('<I', data, pos + 2)[0]
+                    tp = data[pos + 1]
+                    sz = struct.unpack_from('<I', data, pos + 2)[0] & 0x7FFFFFFF
+                    if tp == 0xC2 and sz >= 2 and pos + 6 + sz <= end:
+                        ram_addr = struct.unpack_from('<H', data, pos + 6)[0]
+                        payload = data[pos + 8: pos + 6 + sz]
+                        last_time = time.perf_counter()
+                        o = 0
+                        while o < len(payload):
+                            chunk = payload[o: o + 32]
+                            ser.write(bytes([0xB6, ram_addr & 0xFF, (ram_addr >> 8) & 0xFF, len(chunk)]) + bytes(chunk))
+                            o += len(chunk)
+                            ram_addr += len(chunk)
+                            # 每 512 字节 yield 1ms, 让 MCU process_uart 消化 RX buffer
+                            if o % 512 == 0:
+                                time.sleep(0.001)
+                                last_time = time.perf_counter()
+                        last_time = time.perf_counter()
                     pos += 6 + sz
                 else:
                     break
