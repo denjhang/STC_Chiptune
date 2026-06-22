@@ -69,7 +69,10 @@ mix += nes_dpcm.output;   // DMC/DAC 全幅 (±64)
 - 每个 bit 按 `nes_dpcm_periods[reg0 & 0x0F]` 周期消耗
 - bit=1 vol+=2, bit=0 vol-=2, vol 钳位 [0..127]
 - 7-bit DAC 输出 (转 signed: vol - 64)
-- 采样数据来源: `0x67 type=0xC2` NES CPU RAM write
+- 采样数据来源 (三条路径, 详见 §4 和 §4.6):
+  - `0x67 type=0xC2` 内联 NES RAM write (标准 DMC)
+  - `0x67 type=0x07` + `0x68` PCM RAM write (从 PCM bank 拷贝)
+  - `0x67 type=0x00` + `0x90-0x95` DAC stream (py 展开 `$4011` 直写, 绕过 DMC 引擎)
 
 ## 4. Deflemask DAC stream 支持 (0x90-0x95)
 
@@ -158,6 +161,51 @@ ygo10.vgm:      422 次 0x95 PLAY → 9 sounds 全部正确触发 ✓
 
 实测: PCM 鼓声清晰 (每字节一发是关键).
 
+### 4.6 第三条路径: 0x68 PCM RAM write (up-nes2/5)
+
+up-nes2-v0.613-1800.vgm / up-nes5-v0.613-dpcm.vgm 走**第三条 DMC 路径**, 既不是
+标准 `0x67 type=0xC2`, 也不是 Deflemask `0x90-0x95` DAC stream:
+
+- **`0x67 type=0x07`** — PCM data block, 数据进 PCM bank 7 (与 type=0x00 同机制,
+  type 低 6 位 = bank_id)
+- **`0x68 type=0x07`** — PCM RAM write, 从 bank 7 的 `dbPos` 取 `dataLen` 字节,
+  写到 NES CPU RAM 的 `wrtAddr` (就是 DMC 采样数据)
+- 后续 `$4010/$4012/$4013 + $4015 bit4` 标准 DMC 触发 (MCU DMC 引擎 1-bit delta)
+
+**三条 DMC 路径对照**:
+
+| 路径 | PCM 数据来源 | 应用方式 | 代表文件 |
+|------|-------------|----------|----------|
+| 1. 标准 DMC | `0x67 type=0xC2` 内联 NES RAM write | `$4015 bit4` trigger DMC 引擎 | Kirby/Gimmick |
+| 2. DAC stream | `0x67 type=0x00` + `0x90-0x95` | py 展开 `$4011` 直写 (7-bit DAC) | feeblemask/ygo10 |
+| 3. PCM RAM write | `0x67 type=0x07` + `0x68` | `$4015 bit4` trigger DMC 引擎 | **up-nes2/up-nes5** |
+
+**实现** (vgm_player.py play_vgm 主循环加 0x68 分支):
+- 从 `pcm_banks[type]` 的 `dbPos` 取 `dataLen` 字节
+- **回绕读取** (对齐 libvgm `Cmd_PcmRamWrite` line 819-832):
+  libvgm 只检查 `dbPos < size`, 不检查 `dbPos + dataLen`. up-nes 的 bank 7 仅
+  23168 字节, 但 0x68 要从 dbPos=20480 读 16384 字节 (到 36864, 越界 13696).
+  libvgm 直接传指针让 romWrite 读越界内存 (C++ 未定义行为), 我们用
+  `(dbPos + i) % bank_size` 回绕模拟, NES DMC 不在乎具体内容.
+- 用 `0xB6` 下发到 MCU `nes_dmc_buf[wrtAddr - 0xC000]` (复用 dmc_send_block)
+- 下位机无需改动 (0xB6 命令早支持, DMC 引擎早完整)
+
+**0x68 命令格式** (12 字节):
+```
+[0x68][0x66][type][dbPos:3 LE][wrtAddr:3 LE][dataLen:3 LE]
+```
+pos 消费 0x68 后, `data[pos+0]=0x66, data[pos+1]=type,
+data[pos+2..4]=dbPos, data[pos+5..7]=wrtAddr, data[pos+8..10]=dataLen`.
+
+**踩坑**: 第一次实现时偏移整体 +1 (误以为 pos 还指向 0x68), dry-run 0 字节下发.
+修正后 up-nes2/5 各下发 16384 字节到 `$C000` ✓.
+
+**0x68 dataLen==0 的特殊语义** (libvgm line 822-823):
+```cpp
+if (! dataLen) dataLen += 0x01000000;  // 0 → 16MB (读到 bank 末尾)
+```
+我们也做了同样处理.
+
 ## 5. 早期调试记录 (NES APU trigger / $4015)
 
 移植 libvgm 时照搬了它的两个 bug, 导致大量 NES 曲目无声:
@@ -227,10 +275,14 @@ enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, ini
 ## 9. 当前状态与遗留问题
 
 - ✅ 5 通道 (方波/三角/噪声/DMC) 完整, 对齐 libvgm
-- ✅ Deflemask DAC stream (0x90-0x95) 支持, PCM 鼓声清晰
+- ✅ **三条 DMC 路径全部支持**:
+  - `0x67 type=0xC2` 标准 DMC (Kirby/Gimmick)
+  - `0x90-0x95` Deflemask DAC stream (feeblemask/ygo10)
+  - `0x68` PCM RAM write (up-nes2/up-nes5)
 - ✅ PAL/NTSC 双时钟, 预存/流式混合策略
 - ⚠️ **遗留**: 启用 DAC stream 后**播放非常不稳定** (节奏/卡顿), 待排查.
   怀疑每字节 `ser.write` 的 Python 端开销让上位机 budget 算法失准.
+  (暂不处理, 能有声音就行)
 
 ## 10. 关键文件路径速查
 
@@ -253,7 +305,8 @@ enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, ini
 | 0xB5 | NES 时钟下发 | `[0xB5][clk0..3]` (LE u32, NTSC=1789773/PAL=1662607) |
 | 0xB6 | NES DMC 采样块 | `[0xB6][addr_lo][addr_hi][len≤32][data...]` |
 | 0x67 type=0xC2 | NES CPU RAM write | `[0x67][0x66][0xC2][size:4][addr:2][data...]` |
-| 0x67 type=0x00~0x3F | PCM bank (DAC stream) | `[0x67][0x66][type][size:4][data...]` |
+| 0x67 type=0x00~0x3F | PCM bank (DAC stream / 0x68 源) | `[0x67][0x66][type][size:4][data...]` |
+| 0x68 | PCM RAM write (NES type=0x07) | `[0x68][0x66][type][dbPos:3][wrtAddr:3][dataLen:3]` |
 | 0x90 | DAC stream Setup | `[0x90][streamID][chipType\|chipID][cmdHi][cmdLo]` |
 | 0x91 | DAC stream SetData | `[0x91][streamID][bankID][stepSize][stepBase]` |
 | 0x92 | DAC stream SetFreq | `[0x92][streamID][freq:4 LE]` |
