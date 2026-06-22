@@ -70,6 +70,65 @@ def dmc_send_block(ser, addr, payload):
             time.sleep(0.001)
 
 
+def dac_tick(state, ser, samples):
+    """DAC stream 引擎: 在 samples 个 VGM sample 时间内, 按 freq/44100 比例
+    从当前 sound 取字节, 发 [0xB4 0x11 byte] 到 MCU (7-bit DAC 直写 $4011).
+
+    严格对齐 libvgm dac_control.c daccontrol_update (line 286-334):
+      - RATIO_CNTR 按 freq/sampleRate 累积, 算出本次该发的命令数 cmdsToProc
+      - 每个命令从 Data[DataStart + RealPos] 取 1 字节
+      - RemainCmds 递减, 到 0 时 loop(bit2) 回起点, 否则停止
+
+    state 字段:
+      active: 是否在播
+      freq:   当前采样率 (Hz)
+      data:   PCM bank 总数据 (bytes)
+      start:  当前 sound 在 bank 中的起始偏移
+      length: 当前 sound 字节数
+      loop:   是否循环
+      pos:    当前 sound 内偏移 (0..length)
+      acc:    频率累积器 (浮点, 简化版 RATIO_CNTR)
+      ser:    串口
+      last_snd_id, n_sounds: 进度条用
+    返回: 本次实际发送的命令数 (用于进度条更新判断)
+    """
+    if not state.get('active') or not state.get('freq') or samples <= 0:
+        return 0
+    freq = state['freq']
+    data = state['data']
+    start = state['start']
+    length = state['length']
+    pos = state['pos']
+    loop = state.get('loop', False)
+
+    # 累积器: 按 freq/44100 比例把 samples 换算成要发的字节数
+    state['acc'] += samples * freq / SAMPLES_PER_SEC
+    cmds_to_proc = int(state['acc'])
+    state['acc'] -= cmds_to_proc
+
+    sent = 0
+    # 每字节单独 ser.write (不批量打包).
+    # 实测: 批量发送会导致下位机 RX buffer 瞬间堆积 → 字节被覆盖丢失 → PCM 沙哑.
+    # 每字节一发虽然 ser.write 调用次数多, 但 USB CDC 驱动会自动合包, 且下位机
+    # process_uart 有充足时间在两次 write 之间消费, 保证每个 $4011 字节都被应用.
+    while cmds_to_proc > 0:
+        if pos >= length:
+            if loop:
+                pos = 0
+            else:
+                # sound 播完, 停止
+                state['active'] = False
+                state['pos'] = length
+                break
+        byte = data[start + pos]
+        ser.write(bytes([0xB4, 0x11, byte]))
+        pos += 1
+        sent += 1
+        cmds_to_proc -= 1
+    state['pos'] = pos
+    return sent
+
+
 def uart_send(ser, data, ack=True):
     """发送带 XOR 校验的命令包
     ack=True: 等待 ACK, 超时重发 (最多3次), 用于 FM/直接命令
@@ -192,31 +251,53 @@ def parse_vgm_header(data):
     # chipFlags bit4 (YM2149_PIN26_LOW=0x10) = /2 分频器, 实际 clock = clock / 2
     ay_effective_clock = ay_clock // 2 if (ay_chipflags & 0x10) else ay_clock
 
-    # 扫 0x67 data block, 提取 type=0xC2 NES APU RAM write 的 DMC 采样数据
-    # 格式: [0x67][0x66][0xC2][size:4][addr_lo][addr_hi][data...]
-    # addr 是 NES CPU 地址 ($C000+), data 是采样字节
-    nes_dmc_blocks = []  # list of (cpu_addr, bytes)
+    # 扫 0x67 data block, 提取两类数据 (参考 libvgm vgmplayer_cmdhandler.cpp Cmd_DataBlock):
+    #   1. type=0xC2: NES APU RAM write (DMC 采样, NES CPU $C000+)
+    #      格式: [0x67][0x66][0xC2][size:4][addr_lo][addr_hi][data...]
+    #   2. type=0x00~0x3F: PCM/RAM data block (DAC stream 用的采样 bank)
+    #      格式: [0x67][0x66][type][size:4][data...]
+    #      多个同 type 的块在 bank 内顺序追加, items 记录每块 (offset, size)
+    #      (对齐 libvgm _pcmBank[dblkType & 0x3F], line 712-746)
+    nes_dmc_blocks = []  # list of (cpu_addr, bytes)  -- type=0xC2
+    pcm_banks = {}       # {bank_id(int): {'data': bytes, 'items': [(ofs, size), ...]}}
     scan_pos = data_off
     while scan_pos < eof and scan_pos + 7 < len(data):
         b = data[scan_pos]
         if b == 0x66: break
         if b == 0x67:
-            second = data[scan_pos + 1]  # 固定 0x66
             tp = data[scan_pos + 2]
             sz = struct.unpack_from('<I', data, scan_pos + 3)[0]
             chip_id_bit = (sz >> 31) & 1
             sz &= 0x7FFFFFFF
-            if tp == 0xC2 and sz >= 2 and scan_pos + 7 + sz <= len(data):
-                ram_addr = struct.unpack_from('<H', data, scan_pos + 7)[0]
-                payload = data[scan_pos + 9: scan_pos + 7 + sz]
-                nes_dmc_blocks.append((ram_addr, payload))
+            if scan_pos + 7 + sz <= len(data):
+                if tp == 0xC2 and sz >= 2:
+                    # NES APU RAM write: 前 2 字节 = CPU 地址
+                    ram_addr = struct.unpack_from('<H', data, scan_pos + 7)[0]
+                    payload = data[scan_pos + 9: scan_pos + 7 + sz]
+                    nes_dmc_blocks.append((ram_addr, payload))
+                elif 0x00 <= tp <= 0x3F:
+                    # PCM data block: 追加到 bank[tp]
+                    payload = bytes(data[scan_pos + 7: scan_pos + 7 + sz])
+                    bank = pcm_banks.setdefault(tp, {'data': b'', 'items': []})
+                    ofs = len(bank['data'])
+                    bank['items'].append((ofs, len(payload)))
+                    bank['data'] += payload
             scan_pos += 7 + sz
         elif b in (0xA0, 0x51, 0xB3, 0xB4, 0xBD, 0x52): scan_pos += 3
         elif b == 0x50: scan_pos += 2
         elif b == 0xD2: scan_pos += 4
         elif b == 0x61: scan_pos += 3
         elif b in (0x62, 0x63): scan_pos += 1
-        elif 0x70 <= b <= 0x9F: scan_pos += 1
+        elif 0x70 <= b <= 0x7F: scan_pos += 1   # wait n+1 samples (1 字节)
+        elif 0x80 <= b <= 0x8F: scan_pos += 1   # YM2612 PCM stream (1 字节)
+        # 0x90-0x95 DAC Stream Control: 必须按 libvgm 正确长度跳过, 否则误吞后续命令
+        elif b == 0x90: scan_pos += 5    # Setup Chip
+        elif b == 0x91: scan_pos += 5    # Set Data
+        elif b == 0x92: scan_pos += 6    # Set Frequency
+        elif b == 0x93: scan_pos += 0x0B # Play (location)
+        elif b == 0x94: scan_pos += 2    # Stop
+        elif b == 0x95: scan_pos += 5    # Play (by sound ID)
+        elif 0x96 <= b <= 0x9F: scan_pos += 1
         else: scan_pos += 1
 
     return {
@@ -227,6 +308,7 @@ def parse_vgm_header(data):
         'ay_clock': ay_clock, 'ay_chiptype': ay_chiptype, 'ay_chipflags': ay_chipflags,
         'ay_effective_clock': ay_effective_clock,
         'nes_dmc_blocks': nes_dmc_blocks,
+        'pcm_banks': pcm_banks,
     }
 
 
@@ -262,9 +344,18 @@ def scan_vgm_stats(data, hdr):
         elif 0x70 <= b <= 0x7F:
             total_wait_samples += (b & 0x0F) + 1; wait += 1; pos += 1
         elif 0x80 <= b <= 0x8F:
-            total_wait_samples += (b & 0x0F) + 1; wait += 1; pos += 1
-        elif 0x90 <= b <= 0x9F:
-            total_wait_samples += (b & 0x0F) * 2 + 1; wait += 1; pos += 1
+            # YM2612 PCM stream: 从 PCM bank 取 1 字节写 $2A, 然后 wait (b&0x0F) samples
+            # (libvgm Cmd_YM2612PCM_Delay line 840: _fileTick += (fData[0x00] & 0x0F), 不是 +1)
+            total_wait_samples += (b & 0x0F); wait += 1; pos += 1
+        # 0x90-0x95 DAC Stream Control: 按正确长度跳过, 不计 wait
+        # (之前误把 0x90-0x9F 当 wait, 虚增 duration 且 pos 只 +1 导致后续命令错位)
+        elif b == 0x90: pos += 5
+        elif b == 0x91: pos += 5
+        elif b == 0x92: pos += 6
+        elif b == 0x93: pos += 0x0B
+        elif b == 0x94: pos += 2
+        elif b == 0x95: pos += 5
+        elif 0x96 <= b <= 0x9F: pos += 1
         else:
             other += 1; pos += 1
     duration = total_wait_samples / SAMPLES_PER_SEC
@@ -450,6 +541,16 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         else:
             # 流式: 主循环遇 0x67 0xC2 实时下发. 开播前只显示计划.
             print(f"  DMC [{mode_label}] {len(dmc_blocks)} blocks, {total_str} total (>16KB, on-the-fly)")
+    # DAC Stream (0x90-0x95): Deflemask NES PCM 鼓/采样走这条路径.
+    # py 端把 DAC stream 按 freq 展开成 0xB4 0x11 byte 命令流下发 MCU (7-bit DAC 直写).
+    # MCU 不需要改 (nes.c case 0x11 已支持 vol = val & 0x7F → output = vol - 64).
+    pcm_banks = hdr.get('pcm_banks') or {}
+    dac_bank = None
+    if 0 in pcm_banks:
+        dac_bank = pcm_banks[0]
+        total_pcm = len(dac_bank['data'])
+        n_sounds = len(dac_bank['items'])
+        print(f"  DAC [PCM] {fmt_bytes(total_pcm)} ({n_sounds} sounds) — expand to $4011 on play")
     loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
     if loop_remaining > 0 and hdr['loop_offset'] > 0:
         print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
@@ -462,6 +563,23 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     current_samples = 0
     iteration = 0
     interrupt_cmd = None
+
+    # DAC stream 状态机 (对齐 libvgm dac_control, 单 stream, streamID=0)
+    # NES APU 路径: DstCommand=0x0011 → 每个命令写 $4011 byte
+    dac_state = {
+        'active': False,     # 是否在播 (Running bit0)
+        'freq': 0,           # 当前采样率 Hz (0x92 SETFREQ)
+        'data': dac_bank['data'] if dac_bank else b'',  # PCM bank 0 全部数据
+        'items': dac_bank['items'] if dac_bank else [],  # [(ofs, size), ...]
+        'start': 0,          # 当前 sound 在 bank 中的起始偏移
+        'length': 0,         # 当前 sound 字节数
+        'pos': 0,            # 当前 sound 内偏移
+        'loop': False,       # loop (Running bit2)
+        'acc': 0.0,          # 频率累积器
+        'last_snd_id': -1,   # 上次播放的 sound ID (进度条用)
+    }
+    dac_play_seq = 0         # 已处理 0x95 命令的序号 (进度条用)
+    dac_total_plays = None   # 总 0x95 数 (loop 重启不重置, 进度条显示用)
 
     while True:
         # 1ms 轮询
@@ -489,6 +607,13 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                 if loop_remaining > 0 and hdr['loop_offset'] > 0:
                     loop_remaining -= 1
                     pos = hdr['loop_offset']
+                    # loop 重启: 重置 DAC stream 状态 (停止当前播放, 序号清零)
+                    if dac_play_seq > 0:
+                        print()   # 进度条换行, 避免和 loop 段挤一行
+                    dac_state['active'] = False
+                    dac_state['pos'] = 0
+                    dac_state['acc'] = 0.0
+                    dac_play_seq = 0
                     continue
                 else:
                     pos = end
@@ -543,29 +668,118 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     pos += 2
                     samples_budget -= n
                     current_samples += n
+                    dac_tick(dac_state, ser, n)
 
             elif b == 0x62:
                 samples_budget -= 735
                 current_samples += 735
+                dac_tick(dac_state, ser, 735)
 
             elif b == 0x63:
                 samples_budget -= 882
                 current_samples += 882
+                dac_tick(dac_state, ser, 882)
 
             elif 0x70 <= b <= 0x7F:
                 n = (b & 0x0F) + 1
                 samples_budget -= n
                 current_samples += n
+                dac_tick(dac_state, ser, n)
 
             elif 0x80 <= b <= 0x8F:
-                n = (b & 0x0F) + 1
+                # YM2612 PCM stream: wait (b&0x0F) samples (libvgm 不是 +1)
+                n = (b & 0x0F)
                 samples_budget -= n
                 current_samples += n
+                dac_tick(dac_state, ser, n)
 
-            elif 0x90 <= b <= 0x9F:
-                n = (b & 0x0F) * 2 + 1
-                samples_budget -= n
-                current_samples += n
+            # === DAC Stream Control (0x90-0x95) ===
+            # 参考 libvgm vgmplayer_cmdhandler.cpp Cmd_DACCtrl_*
+            # NES APU 路径: 0x90 绑定 $4011 写, 0x95 按 sound ID 播放
+            elif b == 0x90:
+                # [0x90][streamID][chipType|chipID][cmdHi][cmdLo]
+                # NES: chipType=0x14, cmdHi/cmdLo 拼成 DstCommand=0x0011
+                # py 端无需真正 setup (目标命令固定 0x11), 只读 5 字节跳过
+                if pos + 4 <= end:
+                    pos += 4
+                else:
+                    pos = end
+
+            elif b == 0x91:
+                # [0x91][streamID][bankID][stepSize][stepBase]
+                # NES DAC: bankID=0, stepSize=1, stepBase=0
+                # data 已在开播前从 pcm_banks[0] 收集, 这里只跳过
+                if pos + 4 <= end:
+                    pos += 4
+                else:
+                    pos = end
+
+            elif b == 0x92:
+                # [0x92][streamID][freq:4 LE] - Set Frequency
+                # pos 已消费 0x92, 当前指向 streamID, freq 在 pos+1..pos+4
+                if pos + 5 <= end:
+                    freq = struct.unpack_from('<I', data, pos + 1)[0]
+                    dac_state['freq'] = freq
+                    pos += 5
+                else:
+                    pos = end
+
+            elif b == 0x93:
+                # [0x93][streamID][startOfs:4][pbMode][soundLen:4] - Play (location)
+                # Deflemask NES 不用这条 (用 0x95 by ID), 但为完整性实现
+                # pos 当前指向 streamID
+                if pos + 10 <= end:
+                    start_ofs = struct.unpack_from('<I', data, pos + 1)[0]
+                    pb_mode = data[pos + 5]
+                    sound_len = struct.unpack_from('<I', data, pos + 6)[0]
+                    dac_state['start'] = start_ofs
+                    dac_state['length'] = sound_len
+                    dac_state['pos'] = 0
+                    dac_state['loop'] = bool(pb_mode & 0x80)
+                    dac_state['acc'] = 0.0
+                    dac_state['active'] = True
+                    pos += 10
+                else:
+                    pos = end
+
+            elif b == 0x94:
+                # [0x94][streamID] - Stop
+                if pos + 1 <= end:
+                    pos += 1
+                dac_state['active'] = False
+
+            elif b == 0x95:
+                # [0x95][streamID][sndID_lo][sndID_hi][flags] - Play by sound ID
+                # pos 已消费 0x95, 当前指向 streamID:
+                #   data[pos+0]=streamID, data[pos+1]=sndID_lo,
+                #   data[pos+2]=sndID_hi,  data[pos+3]=flags
+                # flags bit7 = loop, 下 4 位 = LMODE (Deflemask 用 0=LMODE_BYTES)
+                if pos + 4 <= end:
+                    snd_id = data[pos + 1] | (data[pos + 2] << 8)
+                    flags = data[pos + 3]
+                    items = dac_state['items']
+                    if 0 <= snd_id < len(items):
+                        ofs, sz = items[snd_id]
+                        dac_state['start'] = ofs
+                        dac_state['length'] = sz
+                        dac_state['pos'] = 0
+                        dac_state['loop'] = bool(flags & 0x80)
+                        dac_state['acc'] = 0.0
+                        dac_state['active'] = True
+                        dac_state['last_snd_id'] = snd_id
+                    dac_play_seq += 1
+                    # 进度条 (模仿 DMC 流式): #seq sndID/total size [LOOP]
+                    n_sounds = len(items)
+                    loop_mark = ' [LOOP]' if (flags & 0x80) else ''
+                    print(f"\r  DAC [PCM] #{dac_play_seq}  snd{snd_id}/{n_sounds} "
+                          f"{fmt_bytes(sz)}{loop_mark}            ", end='', flush=True)
+                    pos += 4
+                else:
+                    pos = end
+
+            elif 0x96 <= b <= 0x9F:
+                # 保留/未知, 跳过 (libvgm 无定义, 当 1 字节)
+                pass
 
             elif b == 0x67:
                 # Data block: [0x67][0x66][type][size:4 LE][data]
@@ -606,6 +820,9 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
 
     # 流式进度条换行 (避免和 END/CUT 挤一行)
     if dmc_stream_mode and dmc_stream_seq > 0:
+        print()
+    # DAC PCM 进度条换行
+    if dac_play_seq > 0:
         print()
     real_sec = current_samples / SAMPLES_PER_SEC / speed
     if interrupt_cmd:
