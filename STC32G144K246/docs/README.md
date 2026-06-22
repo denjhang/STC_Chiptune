@@ -17,7 +17,7 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
 9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
-10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF, 预存/流式混合策略自动选择)
+10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF, 预存/流式混合策略自动选择) + **Deflemask DAC stream (0x90-0x95) 支持** (7-bit DAC 直写 $4011, PCM 鼓声/采样)
 11. **AY8910 envelope 对齐 libvgm** — env_step 从 0x0F 递减 + attack 用 4-bit mask (0x00/0x0F)，修复渐强/渐弱反向导致的漏音
 12. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
 13. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
@@ -45,6 +45,24 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 - **Sweep 两个方波都跑** — 对齐 libvgm，不区分 channel
 - **PAL/NTSC 双时钟自动适配** — vgm_player 读 header 0x84 下发 0xB5
 - **frame_div = 92** — `22050/240 ≈ 91.875`，NES frame counter 保持 240Hz
+
+### NES Deflemask DAC stream (0x90-0x95) 要点 (2026-06-22)
+
+Deflemask 导出的 NES VGM (vgm/nes/dek/) 不走标准 DMC 路径, 而是用 **DAC stream
+机制** (libvgm `dac_control.c` 引擎), 把 PCM 采样按 8000/11025Hz 逐字节写到 NES
+`$4011` (**7-bit DAC 直写模式**, 绕过 DMC 的 1-bit delta 调制).
+
+- **不走 `0xB4 0x11`** — DAC stream 由 py 端 `dac_tick()` 展开成 `0xB4 0x11 byte`
+  命令流下发, MCU `nes.c` case 0x11 已够用 (`vol = val & 0x7F; output = vol - 64`),
+  无需改固件
+- **PCM bank** — `0x67 type=0x00~0x3F` data block, 每个 block 是一个 sound, 7-bit
+  unsigned (中心 0x3F=63, 范围 0x1B-0x64)
+- **每字节单独 `ser.write`** — 批量发送会导致下位机 RX buffer 突发堆积丢字节 → PCM
+  鼓声沙哑 (实测关键 bug)
+- **完整命令表必须** — 之前只统计 `0xB4` 漏掉 `0x90-0x95` 路径, 误判 feeblemask 不用
+  DAC. 审计器 `tools/vgm_cmd_audit.py` + 参考表 `docs/VGM_COMMAND_TABLE_libvgm.md`
+
+详见独立文档 `docs/NES_INTEGRATION_STATUS.md` §4.
 
 ### DAC1 + PGA1 Buffer 配置
 
@@ -116,7 +134,9 @@ base_incr = chip_clock × 2^24 / sample_rate
 | `src/inc/config.h` | EP 端点配置 (EP2IN + EP4IN + EP4OUT) |
 | `src/comm/STC32G.H` | 完整版芯片寄存器定义（含 DAC1/PGA1 far 指针） |
 | `src/util.c` | reverse2() 字节序翻转 |
-| `tools/vgm_player.py` | VGM 播放脚本，默认 COM24 |
+| `tools/vgm_player.py` | VGM 播放脚本，默认 COM24 (含 NES DAC stream 展开) |
+| `tools/vgm_cmd_audit.py` | VGM 命令审计器 (基于 libvgm 完整命令表) |
+| `tools/nes_reg_stats.py` | NES 寄存器分布统计 |
 
 ### 编译
 
@@ -189,6 +209,18 @@ STC8H/STC32G12K 老版 SCC 仿真音高不准，直接参考 RPFM (github RPFM �
 | 0xB6 | NES DMC 采样块 | `[0xB6][addr_lo][addr_hi][len≤32][data...]` |
 | 0xB7 | AY/YM2149 时钟下发 | `[0xB7][clk0..3]` (LE u32, 已处理 chipFlags /2 分频器) |
 | 0xF0 | 全音源 reset | `[0xF0]` (调各 *_init + 清 active) |
+
+**Deflemask DAC stream 命令** (NES VGM 用, py 端展开为 0xB4 0x11 byte, 不直接透传):
+
+| 前缀 | 含义 | 格式 |
+|------|------|------|
+| 0x67 type=0x00~0x3F | PCM bank (DAC stream 采样) | `[0x67][0x66][type][size:4][data...]` |
+| 0x90 | DAC stream Setup | `[0x90][streamID][chipType\|chipID][cmdHi][cmdLo]` |
+| 0x91 | DAC stream SetData | `[0x91][streamID][bankID][stepSize][stepBase]` |
+| 0x92 | DAC stream SetFreq | `[0x92][streamID][freq:4 LE]` |
+| 0x93 | DAC stream Play (loc) | `[0x93][streamID][startOfs:4][pbMode][soundLen:4]` |
+| 0x94 | DAC stream Stop | `[0x94][streamID]` |
+| 0x95 | DAC stream Play (ID) | `[0x95][streamID][sndID:2 LE][flags]` |
 
 ### AY8910 / YM2149 时钟与 chipFlags (2026-06-22)
 
