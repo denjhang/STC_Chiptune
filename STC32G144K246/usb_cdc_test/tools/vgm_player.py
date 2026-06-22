@@ -781,6 +781,46 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                 # 保留/未知, 跳过 (libvgm 无定义, 当 1 字节)
                 pass
 
+            elif b == 0x68:
+                # PCM RAM write: [0x68][0x66][type][dbPos:3 LE][wrtAddr:3 LE][dataLen:3 LE]
+                # 对齐 libvgm Cmd_PcmRamWrite (vgmplayer_cmdhandler.cpp line 804-835):
+                #   从 PCM bank[type & 0x7F] 的 dbPos 位置取 dataLen 字节,
+                #   写到芯片 RAM 的 wrtAddr. 对 NES APU (type=0x07) 就是 DMC 采样数据.
+                #   等同于 0x67 type=0xC2, 只是数据源是 PCM bank 而非内联.
+                #   wrtAddr 是 NES CPU 地址 ($C000+), 后续 $4015 bit4 trigger DMC 引擎播放.
+                if pos + 11 <= end:
+                    # pos 已消费 0x68, 当前指向 0x66:
+                    #   data[pos+0]=0x66, data[pos+1]=type,
+                    #   data[pos+2..4]=dbPos, data[pos+5..7]=wrtAddr, data[pos+8..10]=dataLen
+                    tp = data[pos + 1] & 0x7F
+                    db_pos = data[pos + 2] | (data[pos + 3] << 8) | (data[pos + 4] << 16)
+                    wrt_addr = data[pos + 5] | (data[pos + 6] << 8) | (data[pos + 7] << 16)
+                    data_len = data[pos + 8] | (data[pos + 9] << 8) | (data[pos + 10] << 16)
+                    # libvgm: dataLen==0 时当作 0x01000000 (line 823)
+                    if data_len == 0:
+                        data_len = 0x01000000
+                    bank = pcm_banks.get(tp)
+                    # 对齐 libvgm Cmd_PcmRamWrite (line 819-832):
+                    #   只检查 dbPos < size, 不检查 dbPos + dataLen.
+                    #   越界部分回绕读取 (bank 数据可被循环复用, NES DMC 不在乎具体内容).
+                    if bank is not None and db_pos < len(bank['data']):
+                        bank_data = bank['data']
+                        bank_size = len(bank_data)
+                        payload = bytearray(data_len)
+                        for i in range(data_len):
+                            payload[i] = bank_data[(db_pos + i) % bank_size]
+                        # 用 0xB6 下发到 MCU nes_dmc_buf[wrt_addr - 0xC000]
+                        # (与 0x67 0xC2 流式路径相同, 复用 dmc_send_block)
+                        last_time = time.perf_counter()
+                        dmc_send_block(ser, wrt_addr, bytes(payload))
+                        last_time = time.perf_counter()
+                        print(f"\r  DMC [0x68 t=0x{tp:02X}] ${wrt_addr:04X} "
+                              f"{fmt_bytes(data_len)} from bank[{tp}]+{db_pos}      ",
+                              end='', flush=True)
+                    pos += 12
+                else:
+                    pos = end
+
             elif b == 0x67:
                 # Data block: [0x67][0x66][type][size:4 LE][data]
                 # 预存模式 (≤16KB): 开播前已发, 这里只跳过.
