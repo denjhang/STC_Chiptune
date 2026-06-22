@@ -208,11 +208,14 @@ void process_uart(void)
             else avail = UART1_BUF_LENGTH - TX1_Cnt + RX1_Cnt;
 
             /* 0xA0/0x50/0xB3/0xB4/0xBD: 3 字节 (cmd+2)
+             * 0xB8:             2 字节 (cmd+1, PCM ring push)
              * 0xD2:             4 字节 (cmd+3)
              * 0xB5/0xB7:        5 字节 (cmd+4)
              * 0xB6:             4 + len 字节 (cmd+addr_lo+addr_hi+len+data[len]) */
             if (b == 0xA0 || b == 0x50 || b == 0xB3 || b == 0xB4 || b == 0xBD) {
                 if (avail < 3) return;
+            } else if (b == 0xB8) {
+                if (avail < 2) return;
             } else if (b == 0xD2) {
                 if (avail < 4) return;
             } else if (b == 0xB5 || b == 0xB7) {
@@ -283,6 +286,18 @@ void process_uart(void)
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
             nes_set_clock(clk);
+        }
+        else if (b == 0xB8)
+        {
+            /* NES PCM ring push: [0xB8][byte]
+             * Deflemask DAC stream (0x90-0x95) 路径专用.
+             * 上位机升采样到 22050Hz 后, 每个 PCM 字节用 0xB8 push 到 8KB ring.
+             * nes_render @ 22050Hz 每次 pop 一个字节写 nes_dpcm.vol.
+             * ring 满则丢弃 (nes_pcm_push 内部处理). */
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            nes_active = 1;
+            nes_pcm_push(d);
         }
         else if (b == 0xB6)
         {

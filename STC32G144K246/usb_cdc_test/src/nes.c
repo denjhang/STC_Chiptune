@@ -83,6 +83,13 @@ static u8  xdata nes_regs[0x18];
 /* DMC 采样缓冲: 对应 NES CPU memory $C000-$FFFF (16KB) */
 u8 xdata nes_dmc_buf[NES_DMC_BUF_SIZE];
 
+/* PCM ring buffer: Deflemask DAC stream (0x90-0x95 路径).
+ * 上位机 [0xB8][byte] push, nes_render 每次 pop 写 nes_dpcm.vol.
+ * 8KB @ 22050 pop/s = 371ms 缓冲, 吸收 USB CDC 突发. */
+u8 xdata nes_pcm_ring[NES_PCM_RING_SIZE];
+volatile u16 data nes_pcm_head;   /* push 写位置 (主循环 process_uart) */
+volatile u16 data nes_pcm_tail;   /* pop 读位置 (timer0 ISR nes_render) */
+
 static u32 data nes_base_count;
 static u32 data nes_base_incr;
 static u16 data nes_frame_div;
@@ -147,6 +154,10 @@ void nes_init(void) {
     /* 清空 DMC 缓冲 */
     for (k = 0; k < NES_DMC_BUF_SIZE; k++) nes_dmc_buf[k] = 0;
 
+    /* PCM ring buffer 初始化 (Deflemask DAC stream 路径) */
+    nes_pcm_head = 0;
+    nes_pcm_tail = 0;
+
     /* 自动 enable sq1/sq2/tri/noise (对齐 libvgm device_reset_nesapu line 901-902):
      * libvgm 在 reset 时自动发 $4015=0x0F, 某些 VGM (如 Kirby 16 Crane Fever)
      * 完全不写 $4015, 如果不默认 enable 会全通道无声. */
@@ -166,6 +177,16 @@ void nes_dmc_load(u16 cpu_addr, u8 len, u8 *buf) {
             nes_dmc_buf[offset + i] = buf[i];
         }
     }
+}
+
+void nes_pcm_push(u8 byte) {
+    /* PCM ring buffer push (主循环 process_uart 调用, 非中断上下文).
+     * ring 满则丢弃 (保护节奏, PCM 连续流丢几字节听不出).
+     * head/tail 用 mask 运算保证 2^N 回绕, 无需取模. */
+    u16 next = (nes_pcm_head + 1) & (NES_PCM_RING_SIZE - 1);
+    if (next == nes_pcm_tail) return;   /* 满, 丢弃 */
+    nes_pcm_ring[nes_pcm_head] = byte;
+    nes_pcm_head = next;
 }
 
 void nes_wr(u8 reg, u8 val) {
@@ -531,6 +552,16 @@ s16 nes_render(void) {
         nes_update_tri(&nes_tri, cycles, do_frame);
         nes_update_noise(&nes_noi, cycles, do_frame);
         nes_update_dpcm(&nes_dpcm, cycles);
+    }
+
+    /* PCM ring buffer pop (Deflemask DAC stream 路径, timer0 ISR 22050Hz).
+     * DMC 引擎未 active 时 ($4015 bit4=0, Deflemask DAC stream 就是这种状态),
+     * 从 ring 取一字节写 nes_dpcm.vol. ring 空 则保持 (zero-order hold).
+     * 上位机已升采样到 22050, 每次 render pop 一个字节即可.
+     * 注意: head 可能被主循环改, 用局部快照避免竞态 (ISR 读取 tail 推进). */
+    if (!nes_dpcm.active && nes_pcm_head != nes_pcm_tail) {
+        nes_dpcm.vol = nes_pcm_ring[nes_pcm_tail];
+        nes_pcm_tail = (nes_pcm_tail + 1) & (NES_PCM_RING_SIZE - 1);
     }
 
     mix = (s16)nes_squ[0].output + nes_squ[1].output;

@@ -70,30 +70,33 @@ def dmc_send_block(ser, addr, payload):
             time.sleep(0.001)
 
 
-def dac_tick(state, ser, samples):
-    """DAC stream 引擎: 在 samples 个 VGM sample 时间内, 按 freq/44100 比例
-    从当前 sound 取字节, 发 [0xB4 0x11 byte] 到 MCU (7-bit DAC 直写 $4011).
+# 下位机 render 频率 (nes.c timer0 ISR = 22050Hz)
+# 用于 dac_tick 升采样 + 虚拟水位计算
+NES_RENDER_RATE = 22050
+# PCM ring buffer 大小 (必须和 nes.c NES_PCM_RING_SIZE 一致)
+NES_PCM_RING_SIZE = 8192
+# 虚拟水位高水位线 (75%): 高于此值暂停 push, 让下位机消费
+NES_PCM_WATER_HIGH = NES_PCM_RING_SIZE * 3 // 4
 
-    严格对齐 libvgm dac_control.c daccontrol_update (line 286-334):
-      - RATIO_CNTR 按 freq/sampleRate 累积, 算出本次该发的命令数 cmdsToProc
-      - 每个命令从 Data[DataStart + RealPos] 取 1 字节
-      - RemainCmds 递减, 到 0 时 loop(bit2) 回起点, 否则停止
 
-    state 字段:
-      active: 是否在播
-      freq:   当前采样率 (Hz)
-      data:   PCM bank 总数据 (bytes)
-      start:  当前 sound 在 bank 中的起始偏移
-      length: 当前 sound 字节数
-      loop:   是否循环
-      pos:    当前 sound 内偏移 (0..length)
-      acc:    频率累积器 (浮点, 简化版 RATIO_CNTR)
-      ser:    串口
-      last_snd_id, n_sounds: 进度条用
-    返回: 本次实际发送的命令数 (用于进度条更新判断)
+def dac_tick(state, ser, samples, pushed_total, push_start_time):
+    """DAC stream 引擎 (PCM ring buffer 版):
+
+    在 samples 个 VGM sample (44100 时基) 时间内:
+    1. 按 render_rate/44100 比例算出要 push 的字节数 (升采样到下位机 render 频率)
+    2. 按 freq/render_rate 比例从 PCM bank 取新字节 (零阶保持: 重复采样)
+    3. 发 [0xB8 byte] 到 MCU PCM ring buffer (2 字节/命令)
+    4. 虚拟水位检查: pushed - elapsed*render_rate > 高水位线 就 break
+
+    state 字段 (和之前兼容):
+      active, freq, data, start, length, pos, loop, acc (源采样累积器)
+
+    返回 (sent, pushed_total):
+      sent: 本次实际 push 的字节数
+      pushed_total: 累计已 push 字节数 (用于虚拟水位)
     """
     if not state.get('active') or not state.get('freq') or samples <= 0:
-        return 0
+        return 0, pushed_total
     freq = state['freq']
     data = state['data']
     start = state['start']
@@ -101,32 +104,62 @@ def dac_tick(state, ser, samples):
     pos = state['pos']
     loop = state.get('loop', False)
 
-    # 累积器: 按 freq/44100 比例把 samples 换算成要发的字节数
-    state['acc'] += samples * freq / SAMPLES_PER_SEC
-    cmds_to_proc = int(state['acc'])
-    state['acc'] -= cmds_to_proc
+    # 1. 算本次要 push 的字节数 (升采样到 render_rate)
+    # VGM samples 是 44100 时基, render_rate=22050 → 每个 VGM sample = 0.5 个 push
+    state['push_acc'] = state.get('push_acc', 0.0) + samples * NES_RENDER_RATE / SAMPLES_PER_SEC
+    pushes_to_do = int(state['push_acc'])
+    state['push_acc'] -= pushes_to_do
+
+    # 2. 虚拟水位: pushed_total - elapsed*render_rate = 估算 ring 占用量
+    #    高于 NES_PCM_WATER_HIGH (75%) 就 break, 让下位机消费.
+    #    注意: speed=999 dry-run 时 elapsed 很小, virtual_level 增长快, 会早停 (正常).
+    elapsed = time.perf_counter() - push_start_time
+    est_popped = elapsed * NES_RENDER_RATE
+    virtual_level = pushed_total - est_popped
+
+    # 3. 源字节推进累积器: freq/render_rate 比例
+    #    freq=11025, render=22050 → src_ratio=0.5, 每 2 个 push 推进 1 个源字节 (重复 2 次)
+    src_ratio = freq / NES_RENDER_RATE
+    src_acc = state.get('acc', 0.0)
 
     sent = 0
-    # 每字节单独 ser.write (不批量打包).
-    # 实测: 批量发送会导致下位机 RX buffer 瞬间堆积 → 字节被覆盖丢失 → PCM 沙哑.
-    # 每字节一发虽然 ser.write 调用次数多, 但 USB CDC 驱动会自动合包, 且下位机
-    # process_uart 有充足时间在两次 write 之间消费, 保证每个 $4011 字节都被应用.
-    while cmds_to_proc > 0:
-        if pos >= length:
-            if loop:
-                pos = 0
-            else:
-                # sound 播完, 停止
-                state['active'] = False
-                state['pos'] = length
-                break
-        byte = data[start + pos]
-        ser.write(bytes([0xB4, 0x11, byte]))
-        pos += 1
+    pkt = bytearray()
+    while pushes_to_do > 0:
+        # 虚拟水位检查
+        if virtual_level >= NES_PCM_WATER_HIGH:
+            break
+        # 推进源字节 (零阶保持: 累积到 1 才换字节, 期间重复当前字节)
+        src_acc += src_ratio
+        while src_acc >= 1.0:
+            src_acc -= 1.0
+            pos += 1
+            if pos >= length:
+                if loop:
+                    pos = 0
+                else:
+                    # sound 播完, 停止 (push 完当前批次再退)
+                    state['active'] = False
+                    src_acc = 0.0
+                    break
+        # 取当前字节 push (pos 是"下一个要读"的位置, 所以读 pos 即可, 它刚被推进)
+        # 但如果刚推进完 sound 结束, pos 可能 == length, 用最后有效字节
+        read_pos = pos if pos < length else (length - 1)
+        byte = data[start + read_pos]
+        pkt.append(0xB8); pkt.append(byte)
         sent += 1
-        cmds_to_proc -= 1
+        pushes_to_do -= 1
+        virtual_level += 1
+        pushed_total += 1
+        if len(pkt) >= 64:
+            ser.write(bytes(pkt))
+            pkt = bytearray()
+        if not state['active']:
+            break
+    if pkt:
+        ser.write(bytes(pkt))
     state['pos'] = pos
-    return sent
+    state['acc'] = src_acc
+    return sent, pushed_total
 
 
 def uart_send(ser, data, ack=True):
@@ -564,8 +597,8 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     iteration = 0
     interrupt_cmd = None
 
-    # DAC stream 状态机 (对齐 libvgm dac_control, 单 stream, streamID=0)
-    # NES APU 路径: DstCommand=0x0011 → 每个命令写 $4011 byte
+    # DAC stream 状态机 (PCM ring buffer 版, 升采样到 render_rate)
+    # 下位机 nes.c 8KB PCM ring + render @ 22050Hz 每次 pop 一个字节
     dac_state = {
         'active': False,     # 是否在播 (Running bit0)
         'freq': 0,           # 当前采样率 Hz (0x92 SETFREQ)
@@ -575,9 +608,13 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         'length': 0,         # 当前 sound 字节数
         'pos': 0,            # 当前 sound 内偏移
         'loop': False,       # loop (Running bit2)
-        'acc': 0.0,          # 频率累积器
+        'acc': 0.0,          # 源采样累积器 (freq/render_rate 比例推进 pos)
+        'push_acc': 0.0,     # push 累积器 (render_rate/44100 比例算 push 数)
         'last_snd_id': -1,   # 上次播放的 sound ID (进度条用)
     }
+    # 虚拟水位流控: pushed_total - elapsed*render_rate = 估算 ring 占用量
+    dac_pushed_total = 0       # 累计已 push 字节数
+    dac_push_start_time = time.perf_counter()  # push 开始时间 (算 est_popped)
     dac_play_seq = 0         # 已处理 0x95 命令的序号 (进度条用)
     dac_total_plays = None   # 总 0x95 数 (loop 重启不重置, 进度条显示用)
 
@@ -668,30 +705,30 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     pos += 2
                     samples_budget -= n
                     current_samples += n
-                    dac_tick(dac_state, ser, n)
+                    _, dac_pushed_total = dac_tick(dac_state, ser, n, dac_pushed_total, dac_push_start_time)
 
             elif b == 0x62:
                 samples_budget -= 735
                 current_samples += 735
-                dac_tick(dac_state, ser, 735)
+                _, dac_pushed_total = dac_tick(dac_state, ser, 735, dac_pushed_total, dac_push_start_time)
 
             elif b == 0x63:
                 samples_budget -= 882
                 current_samples += 882
-                dac_tick(dac_state, ser, 882)
+                _, dac_pushed_total = dac_tick(dac_state, ser, 882, dac_pushed_total, dac_push_start_time)
 
             elif 0x70 <= b <= 0x7F:
                 n = (b & 0x0F) + 1
                 samples_budget -= n
                 current_samples += n
-                dac_tick(dac_state, ser, n)
+                _, dac_pushed_total = dac_tick(dac_state, ser, n, dac_pushed_total, dac_push_start_time)
 
             elif 0x80 <= b <= 0x8F:
                 # YM2612 PCM stream: wait (b&0x0F) samples (libvgm 不是 +1)
                 n = (b & 0x0F)
                 samples_budget -= n
                 current_samples += n
-                dac_tick(dac_state, ser, n)
+                _, dac_pushed_total = dac_tick(dac_state, ser, n, dac_pushed_total, dac_push_start_time)
 
             # === DAC Stream Control (0x90-0x95) ===
             # 参考 libvgm vgmplayer_cmdhandler.cpp Cmd_DACCtrl_*
