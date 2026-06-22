@@ -618,6 +618,16 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     dac_play_seq = 0         # 已处理 0x95 命令的序号 (进度条用)
     dac_total_plays = None   # 总 0x95 数 (loop 重启不重置, 进度条显示用)
 
+    # DMC 异步发送队列 (流式模式 > 16KB 用).
+    # 之前: 遇 0x67 0xC2 同步发整块 → 阻塞 budget → 切 bank 卡顿.
+    # 现在: 遇 0x67 拆成 256B chunks 推队列, budget 每轮发一小批, 虚拟水位限流.
+    # DMC 与 PCM/寄存器命令交替发送, 互不阻塞.
+    dmc_send_queue = []          # [(addr, chunk_bytes), ...] 待发送的 DMC chunks
+    dmc_pending_bytes = 0        # 队列总字节数 (虚拟水位用)
+    DMC_QUEUE_WATER_HIGH = 8192  # 高水位: 队列超此值暂停推入新块 (让下位机消化)
+    DMC_CHUNK_SIZE = 256         # 每个 chunk 256 字节 (8 个 0xB6 包, 32B/包)
+    DMC_SEND_PER_TICK = 512      # budget 每轮发送字节数 (2 个 chunk)
+
     while True:
         # 1ms 轮询
         time.sleep(0.001)
@@ -634,6 +644,22 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
 
         # 累积 budget (实际时间 → VGM samples)
         samples_budget += elapsed_sec * SAMPLES_PER_SEC * speed
+
+        # DMC 异步发送: 每轮主循环从队列发一小批 (不阻塞 budget 循环).
+        # 流式模式 (>16KB) 时, 0x67 0xC2 块被拆成 chunks 推入队列, 这里逐批发送,
+        # 让 DMC 数据与 PCM/寄存器命令交替, 避免切 bank 时同步阻塞导致卡顿.
+        if dmc_send_queue:
+            sent_this_tick = 0
+            while dmc_send_queue and sent_this_tick < DMC_SEND_PER_TICK:
+                addr, chunk = dmc_send_queue[0]
+                # 复用 dmc_send_block 的分片逻辑, 但只发一个 chunk (256B = 8 包)
+                dmc_send_block(ser, addr, chunk)
+                sent_this_tick += len(chunk)
+                dmc_pending_bytes -= len(chunk)
+                dmc_send_queue.pop(0)
+                # 更新流式进度
+                if dmc_stream_mode:
+                    dmc_stream_sent += len(chunk)
 
         # 处理所有可以发送的命令
         while samples_budget >= 1.0 and pos < end:
@@ -846,11 +872,14 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                         payload = bytearray(data_len)
                         for i in range(data_len):
                             payload[i] = bank_data[(db_pos + i) % bank_size]
-                        # 用 0xB6 下发到 MCU nes_dmc_buf[wrt_addr - 0xC000]
-                        # (与 0x67 0xC2 流式路径相同, 复用 dmc_send_block)
-                        last_time = time.perf_counter()
-                        dmc_send_block(ser, wrt_addr, bytes(payload))
-                        last_time = time.perf_counter()
+                        # 异步发送: 拆 chunks 推队列 (与 0x67 0xC2 流式同路径)
+                        payload = bytes(payload)
+                        chunk_addr = wrt_addr
+                        for chunk_ofs in range(0, len(payload), DMC_CHUNK_SIZE):
+                            chunk = payload[chunk_ofs: chunk_ofs + DMC_CHUNK_SIZE]
+                            dmc_send_queue.append((chunk_addr, chunk))
+                            dmc_pending_bytes += len(chunk)
+                            chunk_addr += len(chunk)
                         print(f"\r  DMC [0x68 t=0x{tp:02X}] ${wrt_addr:04X} "
                               f"{fmt_bytes(data_len)} from bank[{tp}]+{db_pos}      ",
                               end='', flush=True)
@@ -870,16 +899,22 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     if dmc_stream_mode and tp == 0xC2 and sz >= 2 and pos + 6 + sz <= end:
                         ram_addr = struct.unpack_from('<H', data, pos + 6)[0]
                         payload = data[pos + 8: pos + 6 + sz]
-                        last_time = time.perf_counter()
-                        dmc_send_block(ser, ram_addr, payload)
-                        last_time = time.perf_counter()
-                        # 流式实时进度: 每块刷新一行 (序号/地址/本块/累计/总进度)
+                        # 异步发送: 拆成 chunks 推队列, budget 每轮发一小批 (不阻塞).
+                        # 之前同步发整块 (4-8KB) 会阻塞 budget → 切 bank 卡顿.
+                        # 队列无上限 (一个块最多 8KB, 不会爆内存), 发送端每轮限发 512B.
+                        payload_len = len(payload)
+                        chunk_addr = ram_addr
+                        for chunk_ofs in range(0, payload_len, DMC_CHUNK_SIZE):
+                            chunk = payload[chunk_ofs: chunk_ofs + DMC_CHUNK_SIZE]
+                            dmc_send_queue.append((chunk_addr, chunk))
+                            dmc_pending_bytes += len(chunk)
+                            chunk_addr += len(chunk)
+                        # 流式实时进度
                         dmc_stream_seq += 1
-                        dmc_stream_sent += len(payload)
                         total_str = fmt_bytes(total_dmc_bytes)
                         nblk = len(dmc_blocks)
                         print(f"\r  DMC [STREAM ] #{dmc_stream_seq:03d}/{nblk} "
-                              f"${ram_addr:04X} {fmt_bytes(len(payload)):<7s} "
+                              f"${ram_addr:04X} {fmt_bytes(payload_len):<7s} "
                               f"{progress_bar(dmc_stream_sent, total_dmc_bytes, 16)} "
                               f"{fmt_bytes(dmc_stream_sent)} / {total_str}", end='', flush=True)
                     pos += 6 + sz
@@ -894,6 +929,14 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
 
         if pos >= end:
             break
+
+    # 播放结束: 清空 DMC 队列剩余 (speed 太快时队列可能没发完)
+    if dmc_send_queue:
+        for addr, chunk in dmc_send_queue:
+            dmc_send_block(ser, addr, chunk)
+            dmc_stream_sent += len(chunk)
+        dmc_send_queue.clear()
+        dmc_pending_bytes = 0
 
     # 流式进度条换行 (避免和 END/CUT 挤一行)
     if dmc_stream_mode and dmc_stream_seq > 0:
