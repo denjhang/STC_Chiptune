@@ -113,16 +113,6 @@ static SOUNDC xdata gb_ctrl;
 static u8     xdata gb_regs[0x30];
 static u32    data gb_base_count;
 
-/* RC 高通滤波器状态 (模拟 DMG 硬件隔直电容):
- * DMG 真机 CPU 输出经 1μF 电容 + 510Ω + 10KΩ 电位器到放大器, 截止 15.14Hz.
- * 这个硬件高通: 1) 隔直消除 duty 不对称的直流 (12.5% duty 的 -0.75×env)
- *              2) 衰减次声波. 是 gbsplay 比 libvgm 音质干净的根本原因.
- * 标准一阶 RC 高通差分方程: y[n] = α × (y[n-1] + x[n] - x[n-1])
- * α = RC/(RC+dt) = 0.99570436 (fc=15.14Hz, fs=22050Hz), Q16 定点 = 65254. */
-static s32    data gb_hp_y;       /* 上一次输出 y[n-1] */
-static s32    data gb_hp_x;       /* 上一次输入 x[n-1] */
-#define GB_HP_ALPHA     65254     /* Q16 定点的 α 系数 */
-
 static void *xmemset(void *s, int c, unsigned int n) {
     u8 *p = (u8 *)s;
     while (n--) *p++ = (u8)c;
@@ -635,8 +625,6 @@ void gb_init(void) {
 
     gb_ctrl.on = 1;
     gb_base_count = 0;
-    gb_hp_y = 0;               /* RC 高通滤波器状态 */
-    gb_hp_x = 0;
 }
 
 /* ========== 渲染 (一个采样, ISR 热路径) ========== */
@@ -688,19 +676,6 @@ s16 gb_render(void) {
     vol_avg = ((s32)gb_ctrl.vol_left + gb_ctrl.vol_right + 1) >> 1;
     mono *= vol_avg;
     mono >>= 3;
-
-    /* RC 高通滤波器 (模拟 DMG 硬件隔直电容, 对齐 gbsplay 思路):
-     * 标准一阶 RC 高通: y[n] = α × (y[n-1] + x[n] - x[n-1])
-     * 消除 duty 不对称直流 (12.5% duty 的 -0.75×env) + 衰减 <15Hz 次声波.
-     * α=0.99570436 (fc=15.14Hz @ 22050Hz).
-     * 信号放大到 Q16 再滤波 (否则小信号整数截断导致衰减失效). */
-    {
-        s32 in_q16 = mono << 16;
-        s32 y_q16 = (GB_HP_ALPHA * (gb_hp_y + in_q16 - gb_hp_x)) >> 16;
-        gb_hp_x = in_q16;
-        gb_hp_y = y_q16;
-        mono = y_q16 >> 16;     /* 还原到原始幅度 */
-    }
 
     if (mono > 2047)  mono = 2047;
     if (mono < -2048) mono = -2048;

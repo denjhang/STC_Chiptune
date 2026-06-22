@@ -433,12 +433,6 @@ class GB:
         vol_avg = (self.vol_left + self.vol_right + 1) // 2
         mono *= vol_avg
         mono >>= 3
-        # RC 高通滤波器 (Q16 定点, 避免 small-signal 截断)
-        in_q16 = mono << 16
-        y_q16 = (65254 * (self.hp_y + in_q16 - self.hp_x)) >> 16
-        self.hp_x = in_q16
-        self.hp_y = y_q16
-        mono = y_q16 >> 16
         if mono > 2047: mono = 2047
         if mono < -2048: mono = -2048
         return mono
