@@ -66,8 +66,7 @@ typedef struct {
     u16 address;          /* 当前读地址 (NES CPU memory $C000+) */
     u16 length;           /* 剩余字节数 */
     u8  cur_byte;         /* 当前字节缓冲 */
-    u8  bits_left_int;    /* bits-left 内部计数 (length*8 减到 0) */
-    u8  bit_pos;          /* 当前 bit 在 byte 内的位置 0-7 */
+    u16 bits_left;        /* 总剩余 bit 数 (length<<3 递减到 0, 对齐 libvgm bits_left) */
     u16 phaseacc;         /* 位周期累加 */
     u8  enabled;          /* 由 $4015 bit4 控制 */
     u8  active;           /* DMC 正在播 (内部状态) */
@@ -138,8 +137,7 @@ void nes_init(void) {
     nes_dpcm.address = 0;
     nes_dpcm.length = 0;
     nes_dpcm.cur_byte = 0;
-    nes_dpcm.bits_left_int = 0;
-    nes_dpcm.bit_pos = 0;
+    nes_dpcm.bits_left = 0;
     nes_dpcm.phaseacc = 0;
     nes_dpcm.enabled = 0;
     nes_dpcm.active = 0;
@@ -264,14 +262,17 @@ void nes_wr(u8 reg, u8 val) {
         nes_noi.enabled = (val & 0x08) ? 1 : 0;
         if (!(val & 0x08)) nes_noi.vbl_length = 0;
 
-        /* DMC 启停: bit4=1 启动一次 DMA, 仅在当前未活跃时触发 */
+        /* DMC 启停: bit4=1 启动一次 DMA, 仅在当前未活跃时触发.
+         * 对齐 libvgm apu_dpcmreset (line 412-419):
+         *   address = 0xC000 + (regs[2] << 6)
+         *   length  = (regs[3] << 4) + 1
+         *   bits_left = length << 3   (总 bit 数, 不是字节计数!)
+         * apu_dpcm 每次 bits_left--, bit_pos = 7-(bits_left&7), 每 8 次读新字节 */
         if (val & 0x10) {
             if (!nes_dpcm.active) {
-                /* 重置 DMC 状态 */
                 nes_dpcm.address = 0xC000 + (nes_dpcm.regs[2] << 6);
                 nes_dpcm.length = ((u16)nes_dpcm.regs[3] << 4) + 1;
-                nes_dpcm.bits_left_int = nes_dpcm.length;  /* 字节计数 */
-                nes_dpcm.bit_pos = 0;
+                nes_dpcm.bits_left = nes_dpcm.length << 3;   /* 总 bit 数 (对齐 libvgm) */
                 nes_dpcm.cur_byte = 0;
                 nes_dpcm.phaseacc = 0;
                 nes_dpcm.active = 1;
@@ -453,10 +454,15 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
 
     period = nes_dpcm_periods[chan->regs[0] & 0x0F];
 
-    /* cycles 是本采样的 CPU 周期数, 减到 phaseacc */
+    /* cycles 是本采样的 CPU 周期数, 减到 phaseacc.
+     * 严格对齐 libvgm nes_apu.c apu_dpcm (line 423-484):
+     *   - bits_left 先递减, bit_pos = 7 - (bits_left & 7), LSB first
+     *   - bit_pos == 7 时读新字节 (不是 bit_pos == 0)
+     *   - vol -= 2 的条件是 vol >= 2 (不是 vol > 0), 避免 vol 越界变负 */
     {
         s32 acc = (s32)chan->phaseacc - (s32)cycles;
         while (acc <= 0) {
+            u8 bit_pos;
             acc += period;
 
             if (chan->length == 0) {
@@ -466,6 +472,7 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
                     /* loop: 重启 */
                     chan->address = 0xC000 + (chan->regs[2] << 6);
                     chan->length = ((u16)chan->regs[3] << 4) + 1;
+                    chan->bits_left = 8;
                     chan->active = 1;
                     chan->enabled = 1;
                 } else {
@@ -473,8 +480,9 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
                 }
             }
 
-            /* 读 bit_pos == 7 (新字节) 时, 先取 byte */
-            if (chan->bit_pos == 0) {
+            chan->bits_left--;                       /* 先递减 (对齐 libvgm) */
+            bit_pos = 7 - (chan->bits_left & 7);     /* LSB first: bits_left 7→0 映射 bit_pos 0→7 */
+            if (bit_pos == 7) {                       /* bit_pos==7 时读新字节 */
                 u16 ofs = chan->address - 0xC000;
                 if (ofs < NES_DMC_BUF_SIZE) {
                     chan->cur_byte = nes_dmc_buf[ofs];
@@ -487,14 +495,12 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
                 chan->length--;
             }
 
-            /* 处理当前 bit: MSB first */
-            if (chan->cur_byte & (1 << (7 - chan->bit_pos))) {
+            /* 处理当前 bit (LSB first, 对齐 libvgm line 477-482) */
+            if (chan->cur_byte & (1 << bit_pos)) {
                 if (chan->vol < 127) chan->vol += 2;
             } else {
-                if (chan->vol > 0) chan->vol -= 2;
+                if (chan->vol >= 2) chan->vol -= 2;   /* >=2 避免 vol=1 时减成 -1 */
             }
-
-            chan->bit_pos = (chan->bit_pos + 1) & 7;
         }
         chan->phaseacc = (u16)acc;
     }
