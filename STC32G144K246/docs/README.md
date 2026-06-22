@@ -238,6 +238,28 @@ mix *= 4   ← 总放大后和 AY/SN/SCC 量级匹配
 
 **NES 静音**: `[0xB4, 0x15, 0x00]` 即 $4015 status = 0，硬件级关闭 4 通道。真实 VGM 不显式静音,只流到结尾结束,但我们用标准 status 寄存器关闭是最干净的做法。
 
+### NES APU trigger / $4015 排查记录 (2026-06-22)
+
+移植 libvgm 时照搬了它的两个 bug, 导致大量 NES 曲目无声:
+
+**Bug A — 全通道无声 (Kirby 16 Crane Fever 等)**:
+某些 VGM 文件**完全不写 $4015 status 寄存器**。libvgm 在 `device_reset_nesapu`
+(line 901-902) 自动发 `$4015=0x00` 再 `$4015=0x0F` enable sq1/sq2/tri/noise,
+我们的 `nes_init` 没做这个默认 enable → 通道全 disabled → 全曲无声.
+修复: `nes_init` 末尾默认 enable sq1/sq2/tri/noise (DMC 不默认 enable).
+
+**Bug B — noise 单通道无声 (Kirby 15 Cloud Level 等)**:
+trigger 寄存器 ($4003/$4007/$400B/$400F) 写入时, libvgm 和我们都加了
+`if (enabled)` 检查 — 但 NES 硬件文档明确: **length counter 加载独立于 $4015 enable**.
+某些 VGM (如 Kirby 15) 的 $400F trigger 早于 $4015 enable, trigger 时 enabled=0
+→ vbl_length 不设置 → 即使之后 enable 也无 length → 永久静音.
+修复: square/triangle/noise trigger 移除 `if(enabled)` 检查, 总是加载 vbl_length.
+
+**诊断方法**: dump VGM 命令流对比正常曲 (14) 和故障曲 (15/16), 发现 16 缺 $4015,
+15 的 trigger 早于 $4015. 对照 libvgm `nes_apu.c` 源码找到 `device_reset` 的自动
+enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, init/reset 函数
+的隐式行为 (默认值、自动初始化) 同样关键, libvgm 把它藏在 device_reset 里容易漏**.
+
 ### NES APU 已知限制
 
 NES APU 已完整支持 5 通道 (含 DMC 16KB 采样缓冲), 无已知限制。
