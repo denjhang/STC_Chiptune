@@ -148,6 +148,15 @@ void nes_init(void) {
 
     /* 清空 DMC 缓冲 */
     for (k = 0; k < NES_DMC_BUF_SIZE; k++) nes_dmc_buf[k] = 0;
+
+    /* 自动 enable sq1/sq2/tri/noise (对齐 libvgm device_reset_nesapu line 901-902):
+     * libvgm 在 reset 时自动发 $4015=0x0F, 某些 VGM (如 Kirby 16 Crane Fever)
+     * 完全不写 $4015, 如果不默认 enable 会全通道无声. */
+    nes_squ[0].enabled = 1;
+    nes_squ[1].enabled = 1;
+    nes_tri.enabled = 1;
+    nes_noi.enabled = 1;
+    /* DMC 不默认 enable (bit4), 由 $4015 或 $4015 trigger DMC 时开启 */
 }
 
 void nes_dmc_load(u16 cpu_addr, u8 len, u8 *buf) {
@@ -187,11 +196,10 @@ void nes_wr(u8 reg, u8 val) {
     case 0x03: case 0x07:
         ch = (reg >> 2) & 1;
         nes_squ[ch].regs[3] = val;
-        if (nes_squ[ch].enabled) {
-            nes_squ[ch].vbl_length = nes_vbl_len[val >> 3];
-            nes_squ[ch].env_vol = 0;
-            nes_squ[ch].freq = (((val & 7) << 8) + nes_squ[ch].regs[2]) + 1;
-        }
+        /* NES 硬件: length counter 加载独立于 $4015 enable (见 $400F 注释) */
+        nes_squ[ch].vbl_length = nes_vbl_len[val >> 3];
+        nes_squ[ch].env_vol = 0;
+        nes_squ[ch].freq = (((val & 7) << 8) + nes_squ[ch].regs[2]) + 1;
         break;
 
     case 0x08:
@@ -206,11 +214,10 @@ void nes_wr(u8 reg, u8 val) {
     case 0x0B:
         nes_tri.regs[3] = val;
         nes_tri.write_latency = 3;
-        if (nes_tri.enabled) {
-            nes_tri.vbl_length = nes_vbl_len[val >> 3];
-            nes_tri.linear_length = (nes_tri.regs[0] & 0x7F) + 1;
-            nes_tri.linear_reload = 1;
-        }
+        /* NES 硬件: length counter 加载独立于 $4015 enable (见 $400F 注释) */
+        nes_tri.vbl_length = nes_vbl_len[val >> 3];
+        nes_tri.linear_length = (nes_tri.regs[0] & 0x7F) + 1;
+        nes_tri.linear_reload = 1;
         break;
 
     case 0x0C:
@@ -224,10 +231,12 @@ void nes_wr(u8 reg, u8 val) {
         break;
     case 0x0F:
         nes_noi.regs[3] = val;
-        if (nes_noi.enabled) {
-            nes_noi.vbl_length = nes_vbl_len[val >> 3];
-            nes_noi.env_vol = 0;
-        }
+        /* NES 硬件: length counter 加载独立于 $4015 enable.
+         * libvgm 加 if(enabled) 检查, 但某些 VGM (如 Kirby 15 Cloud Level)
+         * 在 $4015 enable 之前就写 $400F trigger, 导致 vbl_length 永远 0 → 静音.
+         * 移除 enabled 检查, trigger 总是加载 length (符合 NES 硬件文档). */
+        nes_noi.vbl_length = nes_vbl_len[val >> 3];
+        nes_noi.env_vol = 0;
         break;
 
     /* === DMC 寄存器 ($4010-4013) === */
