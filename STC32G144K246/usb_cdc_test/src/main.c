@@ -286,17 +286,24 @@ void process_uart(void)
             ofs = r & 0x7F;
             if (ofs <= 0x17) {
                 nes_active = 1;
-                nes_wr(r, d);
+                nes_wr(ofs, d);                /* NES APU $4000-$4017 */
             } else {
-                /* FDS 路由 */
+                /* FDS 路由: ofs >= 0x20 → FDS.
+                 * 对齐 libvgm nesintf.c nes_w_mame (line 418-426):
+                 *   offset >= 0x20 → NES_FDS_Write(0x4000 | offset, data)
+                 * 但 Cmd_NES_Reg 先做 remap: ofs 0x3F→0x23, ofs 0x20-0x3E→0x80|(ofs&0x1F).
+                 * 这里还原: 先做 Cmd_NES_Reg remap, 再 | 0x4000 传给 fds_wr.
+                 * fds_wr 接收 0x4000|ofs 的低 8 位 (0x40-0x8A 或 0xA0-0xBF). */
+                u8 fds_ofs;
                 fds_active = 1;
                 if (ofs == 0x3F) {
-                    fds_wr(0x23, d);            /* FDS $4023 */
+                    fds_ofs = 0x23;            /* $4023 master I/O */
                 } else if (ofs >= 0x20 && ofs <= 0x3E) {
-                    fds_wr(0x80 | (ofs & 0x1F), d);  /* FDS $4020-$403F remap */
-                } else if (ofs >= 0x40 && ofs <= 0x8A) {
-                    fds_wr(ofs, d);             /* FDS $4040-$408A 直接 */
+                    fds_ofs = 0x80 | (ofs & 0x1F);  /* remap 到 0x80-0x9E */
+                } else {
+                    fds_ofs = ofs;             /* 0x40-0x8A 直接 */
                 }
+                fds_wr(fds_ofs, d);
             }
         }
         else if (b == 0xB5)

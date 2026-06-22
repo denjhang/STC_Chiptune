@@ -222,24 +222,17 @@ s16 fds_render(void) {
 }
 
 void fds_wr(u8 reg, u8 val) {
-    /* reg 可能是:
-     *   $40-$7F: 载波波形表写 ($4040-$407F)
-     *   $80-$8A: 寄存器 ($4080-$408A)
-     *   $23:     master I/O ($4023, VGM remap 0x3F → 0x23)
-     *   0x80|n:  FDS $4020-$403F (VGM remap, n=0x00-0x1F)
-     *     实际只用到 $4080-$408A 在 0x80+ 空间, 这里 reg&0xFF == 0x80+0x??
-     *     但 libvgm remap 是 ofs = 0x80|(ofs&0x1F), 传入 fds_wr 的 ofs 已是 0x80-0x9F
-     *     对应 $4020-$403F, 但这些寄存器大多未用.
-     * 简化: reg 直接当 $40XX 的低字节处理 */
+    /* reg 经 main.c remap 后的值 (对齐 libvgm nesintf.c + Cmd_NES_Reg):
+     *   0x23:     master I/O ($4023, VGM reg 0x3F → remap 0x23)
+     *   0x40-0x7F: 载波波形表 ($4040-$407F, VGM reg 直接传)
+     *   0x80-0x8A: FDS 寄存器 ($4080-$408A, 有两种来源:
+     *              VGM reg 0x40-0x4A 直接传, 或 VGM reg 0x20-0x2A remap 0x80|(reg&0x1F))
+     *   0x8B-0x9F: $408B-$409F 未用, 忽略 */
 
     /* $4023 master I/O enable */
     if (reg == 0x23) {
         fds.master_io = (val & 2) ? 1 : 0;
         return;
-    }
-    /* VGM remap: 0x80|(0x00-0x1F) → $4020-$403F (大多未用, 忽略) */
-    if (reg >= 0x80 && reg <= 0x9F) {
-        return;   /* $4020-$403F 暂不实现 */
     }
 
     if (!fds.master_io) return;
