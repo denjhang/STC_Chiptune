@@ -535,8 +535,8 @@ s16 nes_render(void) {
     mix = (s16)nes_squ[0].output + nes_squ[1].output;
     mix += (s16)(nes_tri.output * 3 >> 2);
     mix += (s16)(nes_noi.output * 3 >> 2);
-    /* DMC 输出范围 ±64, 降一半避免削顶, 与其他通道量级匹配 */
-    mix += (s16)(nes_dpcm.output >> 1);
+    /* DMC 输出范围 ±64, 全幅输出 (之前 >>1 衰减一半导致鼓点力度不足) */
+    mix += (s16)nes_dpcm.output;
 
     mix = mix * 1;
     return mix;

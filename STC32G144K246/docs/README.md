@@ -185,6 +185,28 @@ STC8H/STC32G12K 老版 SCC 仿真音高不准，直接参考 RPFM (github RPFM �
 | 0xB3 | GB DMG | `[0xB3][reg][data]` |
 | 0xB4 | NES APU | `[0xB4][reg][data]` |
 | 0xB5 | NES 时钟下发 | `[0xB5][clk0..3]` (LE u32, NTSC=1789773/PAL=1662607) |
+| 0xB6 | NES DMC 采样块 | `[0xB6][addr_lo][addr_hi][len≤32][data...]` |
+| 0xB7 | AY/YM2149 时钟下发 | `[0xB7][clk0..3]` (LE u32, 已处理 chipFlags /2 分频器) |
+| 0xF0 | 全音源 reset | `[0xF0]` (调各 *_init + 清 active) |
+
+### AY8910 / YM2149 时钟与 chipFlags (2026-06-22)
+
+AY_CLK 不再硬编码, 改 `ay_set_clock(u32 hz)` 运行时切换 (对齐 nes_set_clock).
+固件 main.c 加自定义 0xB7 命令, py 解析 VGM header 的 AY clock + chipFlags 后下发.
+
+**关键: YM2149 的 chipFlags bit4 (0x10) = PIN26_LOW = 内置 /2 分频器** (ayintf.h:32):
+- VGM header 里 chipType @0x78 (0x10=YM2149, 0x00=AY-3-8910)
+- chipFlags @0x79, **bit4=0x10** (不是 bit0!) = /2 分频器使能, 实际 clock 减半, 音高低八度
+- clock 偏移 v1.50/v1.70 不同: @0x40 (v1.50) / @0x74 (v1.70), 两个都试取非零
+
+坑: 之前误用 bit0 导致 Demodulation (chipFlags=0x01) 被误降八度. 必须查 ayintf.h
+的 #define YM2149_PIN26_LOW 0x10, 不能凭名字猜 (PIN26_LOW 听起来像 bit0, 实际 bit4).
+
+实测:
+- Gimmick (NES+YM2149): clock=1789773, chipFlags=0x11 (bit4=1) → effective 894886, 降八度 ✓
+- Demodulation (ZX Spectrum AY): clock=1773400, chipFlags=0x01 (bit4=0) → 1773400, 原音高 ✓
+
+
 
 SCC port 字段语义（RPFM 对齐）:
 - port=0x00 写波形 bank (offset 由 reg 决定)

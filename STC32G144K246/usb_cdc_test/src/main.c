@@ -101,7 +101,7 @@ void tm0_isr() interrupt 1
     }
 
     mix = 0;
-    if (ay_active) mix += (s16)(ay_render() * 2);
+    if (ay_active) mix += ay_render();
     if (sn_active) mix += sn_render();
     if (scc_active) mix += (s16)(scc_render() / 2);
     if (nes_active) mix += nes_render();
@@ -284,6 +284,24 @@ void process_uart(void)
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
             nes_dmc_load(addr, k, tmp);
+            isp_match = 0;
+        }
+        else if (b == 0xB7)
+        {
+            /* AY set clock: [0xB7][clk0][clk1][clk2][clk3] little-endian
+             * 自定义命令 (libvgm 标准无此字节), 对齐 0xB5 NES clock.
+             * py 端按 chipFlags bit0 (/2 分频器) 处理后下发实际时钟.
+             * 如 Gimmick YM2149 clock=1789773 + bit0=1 → 下发 894886 */
+            u32 clk = 0;
+            u8 k;
+            for (k = 0; k < 4; k++) {
+                if (TX1_Cnt == RX1_Cnt) break;
+                clk |= ((u32)RX1_Buffer[TX1_Cnt]) << (k * 8);
+                if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            }
+            if (k == 4) {
+                ay_set_clock(clk);
+            }
             isp_match = 0;
         }
         else if (b == 0xF0)

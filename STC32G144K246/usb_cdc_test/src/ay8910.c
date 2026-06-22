@@ -31,6 +31,7 @@ static u8  ay_noise_count;
 static u8  ay_noise_freq;
 static u8  ay_volume[AY_CHANS];
 static u32 ay_base_count;
+static u32 ay_base_incr;     /* 运行时可变 (ay_set_clock), 支持 YM2149 /2 分频器 */
 
 static const u8 ay_voltbl[32] = {
     0x00, 0x00, 0x03, 0x03, 0x04, 0x04, 0x06, 0x06,
@@ -66,6 +67,22 @@ void ay_init(void) {
     ay_noise_count = 0;
     ay_noise_freq = 0;
     ay_base_count = 0;
+    ay_set_clock(AY_CLK);   /* 默认 NTSC 1789772 (对齐 libvgm) */
+}
+
+/* 运行时切换 AY 时钟 (对齐 nes_set_clock).
+ * 支持 YM2149 的 /2 内置分频器 (chipFlags bit0=1): clock 传半频即可.
+ * 比如 Gimmick 的 YM2149 clock=1789773, /2 分频器开启 → 传 894886.
+ *
+ * 注: 原 AY_BASE_INCR 常量 170223307 实际是按 21-bit 累加器算的 (虽然 AY_GETA_BITS=24),
+ * 但和原有频率寄存器值配套工作正常, 不能改成"正确"的 24-bit 值否则音高全错.
+ * 这里保留原常量做基准: AY_CLK (1789772) → 170223307, 其他时钟按比例缩放. */
+#define AY_BASE_INCR_DEFAULT  170223307UL   /* AY_CLK=1789772 对应的已验证值 */
+
+void ay_set_clock(u32 clock_hz) {
+    /* 按比例缩放, 避免破坏原常量的 21-bit 工作点.
+     * ay_base_incr = AY_BASE_INCR_DEFAULT × (clock_hz / AY_CLK) */
+    ay_base_incr = (u32)(((double)clock_hz * (double)AY_BASE_INCR_DEFAULT) / (double)AY_CLK);
 }
 
 void ay_wr(u8 reg, u8 val) {
@@ -124,7 +141,7 @@ s16 ay_render(void) {
     s16 mix;
     u8 vol_idx, vol_val;
 
-    ay_base_count += AY_BASE_INCR;
+    ay_base_count += ay_base_incr;
     incr = (u8)(ay_base_count >> AY_GETA_BITS);
     ay_base_count &= (1UL << AY_GETA_BITS) - 1;
 

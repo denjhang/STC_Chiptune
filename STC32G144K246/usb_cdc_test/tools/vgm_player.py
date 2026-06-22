@@ -145,6 +145,23 @@ def parse_vgm_header(data):
     if ver >= 0x161 and len(data) > 0x83:
         gb_clock = struct.unpack_from('<I', data, 0x80)[0] & 0x7FFFFFFF
 
+    # AY8910/YM2149 时钟 + chipFlags (对齐 libvgm _CHIPCLK_OFS + ayintf.h):
+    #   v1.50: clock @0x40 (AY8910 是第 6 个芯片)
+    #   v1.70: clock @0x74 (芯片列表重排, AY8910 索引 18)
+    #   chipType  @0x78 (0x10=YM2149, 0x00=AY-3-8910)
+    #   chipFlags @0x79, bit4 (0x10) = YM2149_PIN26_LOW = 内置 /2 分频器 (clock 减半, 低八度)
+    #     (注意: 是 bit4=0x10, 不是 bit0! bit0 是 AY8910_CHNTYPE 等, 见 ayintf.h)
+    # 两处都试, 取非零值. chipFlags 只在 header 长度够时读.
+    ay_clock = 0
+    if len(data) > 0x43:
+        ay_clock = struct.unpack_from('<I', data, 0x40)[0] & 0x7FFFFFFF   # v1.50 偏移
+    if ay_clock == 0 and len(data) > 0x77:
+        ay_clock = struct.unpack_from('<I', data, 0x74)[0] & 0x7FFFFFFF   # v1.70 偏移
+    ay_chiptype = data[0x78] if len(data) > 0x78 else 0x00
+    ay_chipflags = data[0x79] if len(data) > 0x79 else 0x00
+    # chipFlags bit4 (YM2149_PIN26_LOW=0x10) = /2 分频器, 实际 clock = clock / 2
+    ay_effective_clock = ay_clock // 2 if (ay_chipflags & 0x10) else ay_clock
+
     # 扫 0x67 data block, 提取 type=0xC2 NES APU RAM write 的 DMC 采样数据
     # 格式: [0x67][0x66][0xC2][size:4][addr_lo][addr_hi][data...]
     # addr 是 NES CPU 地址 ($C000+), data 是采样字节
@@ -177,6 +194,8 @@ def parse_vgm_header(data):
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
         'sn_variant': sn_variant, 'nes_clock': nes_clock, 'gb_clock': gb_clock,
+        'ay_clock': ay_clock, 'ay_chiptype': ay_chiptype, 'ay_chipflags': ay_chipflags,
+        'ay_effective_clock': ay_effective_clock,
         'nes_dmc_blocks': nes_dmc_blocks,
     }
 
@@ -335,12 +354,9 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         print(f"  System: {gbk(system)}")
     if author:
         print(f"  Author: {gbk(author)}")
-    extras = []
-    if date: extras.append(f"Date: {date}")
-    if vgm_author: extras.append(f"Rip: {gbk(vgm_author)}")
-    if comment: extras.append(f"Comment: {gbk(comment)}")
-    if extras:
-        print(f"  " + "  ".join(extras))
+    if date:        print(f"  Date: {date}")
+    if vgm_author:  print(f"  Rip: {gbk(vgm_author)}")
+    if comment:     print(f"  Comment: {gbk(comment)}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz  (data {end - pos} bytes)")
     print(f"  CMD: SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} SAA:{stats['saa']} YM:{stats['ym']} Wait:{stats['wait']}")
     # SN76489 变体自动检测 (仅当有 SN 命令时)
@@ -356,12 +372,26 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         region = 'NTSC' if nes_clk > 1700000 else 'PAL'
         print(f"  NES clock: {nes_clk} Hz ({region})")
         ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
+    # AY8910/YM2149 时钟下发 (仅当有 AY 命令时).
+    # chipFlags bit0=1 (YM2149 /2 分频器) 时实际 clock 减半, 下发 effective_clock.
+    # Gimmick: YM2149 clock=1789773 + chipFlags=0x11 (bit0=1) → 下发 894886 (低八度).
+    ay_raw = hdr.get('ay_clock') or 0
+    ay_eff = hdr.get('ay_effective_clock') or 0
+    ay_cf = hdr.get('ay_chipflags') or 0
+    ay_ct = hdr.get('ay_chiptype') or 0
+    if stats['ay'] > 0 and ay_eff > 0:
+        chiptype_name = {0x00:'AY-3-8910', 0x10:'YM2149'}.get(ay_ct, f'AY-type({ay_ct:#x})')
+        div_note = ' /2 divider' if (ay_cf & 0x10) else ''
+        print(f"  {chiptype_name} clock: {ay_raw} Hz{div_note} → effective {ay_eff} Hz")
+        ser.write(bytes([0xB7]) + struct.pack('<I', ay_eff))
     # GB DMG 时钟显示 (仅当有 GB 命令时; GB clock 固定不下发, 固件硬编码 4194304)
     gb_clk = hdr.get('gb_clock') or 0
     if stats['gb'] > 0 and gb_clk:
         print(f"  GB clock: {gb_clk} Hz (DMG)")
     # NES DMC 采样数据下发 (0x67 type=0xC2 RAM write 块)
     # 分片发送, 每包 [0xB6][addr_lo][addr_hi][len<=32][data...]
+    # chunk=32 (固件 tmp[32] 硬限制), sleep=0.3ms: 比原来 2ms 快 6.7 倍.
+    # 之前 sleep=2ms: 65KB 数据要 4-8 秒 (Gimmick 卡好几秒根因).
     dmc_blocks = hdr.get('nes_dmc_blocks') or []
     total_dmc_bytes = sum(len(p) for _, p in dmc_blocks)
     if dmc_blocks:
@@ -374,7 +404,7 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
             ser.write(hdr_bytes + bytes(chunk))
             ofs += len(chunk)
             ram_addr += len(chunk)
-            time.sleep(0.002)  # 防止 RX1_Buffer 溢出
+            time.sleep(0.0003)  # 防 RX1_Buffer 溢出 (115200 baud 下 36 字节约 3ms)
     loop_remaining = loop if isinstance(loop, int) else (2 if loop else 0)
     if loop_remaining > 0 and hdr['loop_offset'] > 0:
         print(f"  Speed: {speed:.1f}x [LOOP x{loop_remaining}]")
