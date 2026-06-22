@@ -461,7 +461,7 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
      *   - vol -= 2 的条件是 vol >= 2 (不是 vol > 0), 避免 vol 越界变负 */
     {
         s32 acc = (s32)chan->phaseacc - (s32)cycles;
-        while (acc <= 0) {
+        while (acc < 0) {              /* libvgm 用 < 0, 不是 <= 0 (避免多消耗一个 bit) */
             u8 bit_pos;
             acc += period;
 
@@ -469,10 +469,10 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
                 chan->active = 0;
                 chan->enabled = 0;
                 if (chan->regs[0] & 0x40) {
-                    /* loop: 重启 */
+                    /* loop: 重启 (对齐 apu_dpcmreset) */
                     chan->address = 0xC000 + (chan->regs[2] << 6);
                     chan->length = ((u16)chan->regs[3] << 4) + 1;
-                    chan->bits_left = 8;
+                    chan->bits_left = (u16)chan->length << 3;   /* 总 bit 数, 不是固定 8 */
                     chan->active = 1;
                     chan->enabled = 1;
                 } else {
@@ -490,8 +490,9 @@ static void nes_update_dpcm(NES_DPCM xdata *chan, u16 cycles) {
                     chan->cur_byte = 0;
                 }
                 chan->address++;
-                /* NES 硬件: address 溢出 $FFFF 后回到 $8000 */
-                if (chan->address > 0xFFFF) chan->address = 0x8000;
+                /* NES 硬件: address 溢出 $FFFF 后回到 $8000 (对齐 libvgm line 472-473).
+                 * u16 在 0xFFFF++ 后回绕到 0, 检测 0 并设为 $8000. */
+                if (chan->address == 0) chan->address = 0x8000;
                 chan->length--;
             }
 
@@ -535,7 +536,7 @@ s16 nes_render(void) {
     mix = (s16)nes_squ[0].output + nes_squ[1].output;
     mix += (s16)(nes_tri.output * 3 >> 2);
     mix += (s16)(nes_noi.output * 3 >> 2);
-    /* DMC 输出范围 ±64, 全幅输出 (之前 >>1 衰减一半导致鼓点力度不足) */
+    /* DMC 输出范围 ±64, 全幅 */
     mix += (s16)nes_dpcm.output;
 
     mix = mix * 1;
