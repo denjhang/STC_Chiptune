@@ -9,6 +9,7 @@
 #include "sn76489.h"
 #include "scc.h"
 #include "nes.h"
+#include "fds.h"
 #include "gb.h"
 
 char *USER_DEVICEDESC = 0;
@@ -27,6 +28,7 @@ static u8 ay_active = 0;
 static u8 sn_active = 0;
 static u8 scc_active = 0;
 static u8 nes_active = 0;
+static u8 fds_active = 0;
 static u8 gb_active = 0;
 #define BOOT_NOTE_TICKS 44100  /* 2 秒 (22050 * 2) */
 
@@ -105,6 +107,7 @@ void tm0_isr() interrupt 1
     if (sn_active) mix += sn_render();
     if (scc_active) mix += (s16)(scc_render() / 2);
     if (nes_active) mix += nes_render();
+    if (fds_active) mix += fds_render() / 4;   /* FDS 增益偏大, /4 控制音量 */
     if (gb_active)  mix += gb_render();
 
     mix *= 8;
@@ -268,13 +271,33 @@ void process_uart(void)
         }
         else if (b == 0xB4)
         {
-            /* NES APU: [0xB4][reg][data] */
+            /* NES APU + FDS: [0xB4][reg][data]
+             * reg 路由 (对齐 libvgm Cmd_NES_Reg):
+             *   0x00-0x17 → NES APU
+             *   0x3F       → FDS $4023 (master I/O)
+             *   0x20-0x3F  → FDS $4020-$403F (remap 到 0x80|reg)
+             *   0x40-0x8A  → FDS $4040-$408A (wave + regs)
+             * bit7 = chipID (第 2 片 NES), 用 ofs = reg & 0x7F 判断 */
+            u8 ofs;
             r = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             d = RX1_Buffer[TX1_Cnt];
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
-            nes_active = 1;
-            nes_wr(r, d);
+            ofs = r & 0x7F;
+            if (ofs <= 0x17) {
+                nes_active = 1;
+                nes_wr(r, d);
+            } else {
+                /* FDS 路由 */
+                fds_active = 1;
+                if (ofs == 0x3F) {
+                    fds_wr(0x23, d);            /* FDS $4023 */
+                } else if (ofs >= 0x20 && ofs <= 0x3E) {
+                    fds_wr(0x80 | (ofs & 0x1F), d);  /* FDS $4020-$403F remap */
+                } else if (ofs >= 0x40 && ofs <= 0x8A) {
+                    fds_wr(ofs, d);             /* FDS $4040-$408A 直接 */
+                }
+            }
         }
         else if (b == 0xB5)
         {
@@ -286,6 +309,7 @@ void process_uart(void)
                 if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             }
             nes_set_clock(clk);
+            fds_set_clock(clk);   /* FDS 时钟和 NES APU 相同 */
         }
         else if (b == 0xB8)
         {
@@ -345,11 +369,13 @@ void process_uart(void)
             sn_active = 0;
             scc_active = 0;
             nes_active = 0;
+            fds_active = 0;
             gb_active = 0;
             sn_init();
             ay_init();
             scc_init();
             nes_init();
+            fds_init();
             gb_init();
         }
         else if (b == 0xB3)
@@ -375,6 +401,7 @@ void main(void)
     ay_init();
     scc_init();
     nes_init();
+    fds_init();
     gb_init();
     test_start();
     timer0_init();
