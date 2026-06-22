@@ -216,31 +216,56 @@ MCU 端 `nes.c` case 0x11 已够用 (`vol = val & 0x7F` → `output = vol - 64` 
 - loop 重启 (0x66 → loop_offset) 时重置 dac_state
 - 进度条模仿 DMC 流式: `DAC [PCM] #N sndX/Y size [LOOP]`
 
-### 4.4 关键 bug: 批量发送 vs 每字节一发
+### 4.4 关键架构: 下位机 8KB PCM ring buffer + 虚拟水位流控 (最终方案)
 
-最初 dac_tick 用批量打包 (192 字节/包, 64 个命令合一次 `ser.write`), 实测 **PCM 鼓声
-非常沙哑, 像缺采样**. 改回**每字节单独 `ser.write`** 后鼓声清晰.
+**迭代历程** (三个版本, 前两个都失败):
 
-**原因**: 批量发送时, 一个 wait 命令可能一次发几百字节, USB CDC 突发灌入下位机
-RX buffer (2048 字节). 但下位机 `process_uart` (主循环) 与 `nes_render` (timer0 ISR
-22050Hz) 共享 CPU, 突发数据来不及消费 → RX buffer 堆积 → **后续字节覆盖前面,
-$4011 只收到最后一个值, 中间 PCM 字节丢失** → 鼓声欠采样沙哑.
+| 版本 | 方案 | 问题 |
+|------|------|------|
+| v1 批量 | dac_tick 批量打包 192 字节/包, `0xB4 0x11 byte` 直写 $4011 | 鼓声沙哑 — USB CDC 突发灌入下位机 RX buffer (2048), process_uart 来不及消费, 字节被覆盖丢失 |
+| v2 每字节 | 每字节单独 `ser.write`, 让下位机有充分时间消费 | 鼓声清晰但播放不稳定 — Python ser.write 开销 88% CPU (11025 次/秒), budget 算法追不上 |
+| **v3 ring buffer** | **下位机 8KB PCM ring + 上位机批量 + 虚拟水位** | **既清晰又稳定** ✓ |
 
-每字节一发虽然 `ser.write` 调用次数多 (USB CDC 驱动会自动合包), 但给下位机充分时间
-在两次 write 之间消费, 每个 `$4011` 字节都被应用 → 鼓声清晰.
+**矛盾根源**: 上位机直接控制 $4011 时序 → 批量则丢字节, 逐个则 Python 慢.
+**解法**: 把时序控制权交给下位机 — 上位机只管灌 ring buffer, 下位机 render 按真实节奏消费.
 
-**用户观察对比** (定位这个 bug 的关键线索):
-- 批量版: 播放顺畅无卡顿 + 鼓声沙哑 = 字节没发够 (被覆盖)
-- 每字节版: 略有卡顿 + 鼓声清晰 = 字节全部应用 (CDC/MCU 负载重但正确)
+**v3 架构** (参考 RPFM `ring_buf.h` + `protocol.h` BUF_LVL/STATUS_BUF_HIGH):
+
+```
+上位机 dac_tick (升采样到 22050, 虚拟水位限流, 批量 0xB8)
+    ↓ USB CDC (64 字节/包)
+下位机 main.c 0xB8 → nes_pcm_push(byte) → 8KB ring [head++]
+                                              ↓
+下位机 timer0 ISR @ 22050Hz → nes_render() → nes_pcm_pop → nes_dpcm.vol
+                                              (ring 空则保持, zero-order hold)
+```
+
+**下位机改动** (nes.h / nes.c / main.c):
+- `nes_pcm_ring[8192]` (xdata, 2^N 回绕), `nes_pcm_head`/`nes_pcm_tail` (data 段, volatile)
+- `nes_pcm_push(byte)`: ring 满则丢弃 (保护节奏, PCM 连续流丢几字节听不出)
+- `nes_render` 末尾: DMC 不 active 时 (`!nes_dpcm.active && head != tail`) pop 一个字节写 `vol`
+- 新命令 `0xB8 [byte]` (2 字节): push 到 ring
+
+**上位机改动** (vgm_player.py dac_tick):
+- **升采样到 22050** (NES_RENDER_RATE): `push_acc += samples * 22050 / 44100`
+  - 源字节按 `freq/render_rate` 比例推进 (零阶保持: freq=11025 → 每 2 个 push 推进 1 字节, 重复 2 次)
+- **虚拟水位流控**: `virtual_level = pushed_total - elapsed*22050`
+  - `> NES_PCM_WATER_HIGH (75% = 6144)` 就 break, 让下位机消费
+  - 不需要下位机反馈 (EP4IN IN 方向未启用发送), 上位机自己估算
+- **批量打包**: 64 字节/包 (32 个 `0xB8 byte` 命令), `ser.write` 从 11025/秒 降到 ~700/秒
+- 命令从 `0xB4 0x11 byte` (3 字节) 改为 `0xB8 byte` (2 字节), **带宽省 33%**
+
+**编译**: xdata 29414 (28.7KB / 64KB), 0 ERROR.
+**实测**: feeblemask PCM 鼓声清晰 + 播放稳定 ✓
 
 ### 4.5 Dry-run 验证
 
 ```
-feeblemask.vgm: 316 次 0x95 PLAY → 展开 404285 次 $4011 写入 ✓
+feeblemask.vgm: 316 次 0x95 PLAY → push 887230 字节 (57.6s, 15395/s) ✓
 ygo10.vgm:      422 次 0x95 PLAY → 9 sounds 全部正确触发 ✓
 ```
 
-实测: PCM 鼓声清晰 (每字节一发是关键).
+实测: PCM 鼓声清晰 + 播放稳定 (ring buffer + 虚拟水位是最终方案).
 
 ### 4.6 第三条路径: 0x68 PCM RAM write (up-nes2/5)
 
@@ -361,9 +386,8 @@ enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, ini
   - `0x90-0x95` Deflemask DAC stream (feeblemask/ygo10)
   - `0x68` PCM RAM write (up-nes2/up-nes5)
 - ✅ PAL/NTSC 双时钟, 预存/流式混合策略
-- ⚠️ **遗留**: 启用 DAC stream 后**播放非常不稳定** (节奏/卡顿), 待排查.
-  怀疑每字节 `ser.write` 的 Python 端开销让上位机 budget 算法失准.
-  (暂不处理, 能有声音就行)
+- ✅ **8KB PCM ring buffer + 虚拟水位流控** (DAC stream 鼓声清晰 + 播放稳定)
+- 无已知遗留问题
 
 ## 10. 关键文件路径速查
 
@@ -385,6 +409,7 @@ enable 机制 (line 901-902). **教训: 移植时不能只看 update 函数, ini
 | 0xB4 | NES 寄存器写 | `[0xB4][reg][data]` (reg & 0x7F, bit7=chipID) |
 | 0xB5 | NES 时钟下发 | `[0xB5][clk0..3]` (LE u32, NTSC=1789773/PAL=1662607) |
 | 0xB6 | NES DMC 采样块 | `[0xB6][addr_lo][addr_hi][len≤32][data...]` |
+| 0xB8 | NES PCM ring push (DAC stream) | `[0xB8][byte]` (push 到 8KB ring, render @ 22050Hz pop) |
 | 0x67 type=0xC2 | NES CPU RAM write | `[0x67][0x66][0xC2][size:4][addr:2][data...]` |
 | 0x67 type=0x00~0x3F | PCM bank (DAC stream / 0x68 源) | `[0x67][0x66][type][size:4][data...]` |
 | 0x68 | PCM RAM write (NES type=0x07) | `[0x68][0x66][type][dbPos:3][wrtAddr:3][dataLen:3]` |
