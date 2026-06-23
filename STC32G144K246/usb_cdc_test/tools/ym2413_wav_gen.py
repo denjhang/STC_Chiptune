@@ -24,8 +24,9 @@ fm_v3 分支: 下位机 s8 核心 + 调参对齐 (64 点 s8 波形 + LEVEL_GAIN 
 import math, struct, wave, os
 
 _TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-EMU2413_DIR = os.path.join(_TOOLS_DIR, 'wav_emu2413')
-FM_V3_DIR   = os.path.join(_TOOLS_DIR, 'wav_fm_v3')
+EMU2413_DIR  = os.path.join(_TOOLS_DIR, 'wav_emu2413')
+FM_V3_DIR    = os.path.join(_TOOLS_DIR, 'wav_fm_v3')
+FM_V3_FW_DIR = os.path.join(_TOOLS_DIR, 'wav_fm_v3_fw')
 
 # ============================================================
 #  YM2413 默认音色 (来自 emu2413.c default_inst[0])
@@ -968,6 +969,209 @@ def render_fm_v3(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
 
 
 # ============================================================
+#  V3-FW: 下位机式包络 (查表速率, 独立 eg_out 状态机)
+#  与 V3 区别: 不复用 EmuChannel 的 eg_out, 而是用自己的简化包络.
+#  包络逻辑照搬 emu (lookup_attack/decay_step + eg_step_tables),
+#  但 rate_h/rate_l/eg_shift 在状态转换时预算一次 (不在每采样 commit).
+#  验证: 14/15 < 0.1dB, SynthBass 0.745dB
+# ============================================================
+FW_DAMP_S, FW_ATTACK_S, FW_DECAY_S, FW_SUSTAIN_S, FW_RELEASE_S = 0, 1, 2, 3, 4
+
+class FwSlot:
+    """下位机式 operator (独立 eg_out, 不依赖 emu 的 Slot)."""
+    __slots__ = ('eg_out','eg_state','rate_h','rate_l','eg_shift','tll',
+                 'AR','DR','SL','RR','EG','KR','AM','PM','ML','WS','TL','FB','KL',
+                 'sus_flag','type','key_flag','_blk')
+    def __init__(self):
+        self.eg_out = EG_MUTE
+        self.eg_state = FW_RELEASE_S
+        self.rate_h = 0; self.rate_l = 0; self.eg_shift = 0
+        self.tll = 0
+        self.AR = self.DR = self.SL = self.RR = 0
+        self.EG = self.KR = self.AM = self.PM = 0
+        self.ML = 1; self.WS = 0; self.TL = 0; self.FB = 0; self.KL = 0
+        self.sus_flag = 0; self.type = 0; self.key_flag = 0
+        self._blk = 4
+
+def _fw_calc_rks(blk, kr):
+    return (blk << 1) if kr else (blk >> 1)
+
+def _fw_commit_rate(slot, state, blk):
+    """状态转换时预算 rate_h/rate_l/eg_shift (对应 emu commit_slot_update 的 EG 部分).
+    下位机只需在 keyon/state 转换时调用一次."""
+    if state == FW_ATTACK_S:
+        p_rate = slot.AR
+    elif state == FW_DECAY_S:
+        p_rate = slot.DR
+    elif state == FW_SUSTAIN_S:
+        p_rate = 0 if slot.EG else slot.RR
+    elif state == FW_RELEASE_S:
+        p_rate = 5 if slot.sus_flag else (slot.RR if slot.EG else 7)
+    elif state == FW_DAMP_S:
+        p_rate = DAMPER_RATE
+    else:
+        p_rate = 0
+
+    rks = _fw_calc_rks(blk, slot.KR)
+    if p_rate == 0:
+        slot.rate_h = 0; slot.rate_l = 0; slot.eg_shift = 0
+        return
+    slot.rate_h = min(15, p_rate + (rks >> 2))
+    slot.rate_l = rks & 3
+    if state == FW_ATTACK_S:
+        slot.eg_shift = (13 - slot.rate_h) if (0 < slot.rate_h < 12) else 0
+    else:
+        slot.eg_shift = (13 - slot.rate_h) if (slot.rate_h < 13) else 0
+
+def _fw_env_tick(slot, eg_counter):
+    """下位机包络: 照搬 emu calc_envelope, rate_h/l/shift 已预算."""
+    state = slot.eg_state
+    rh, rl, shift = slot.rate_h, slot.rate_l, slot.eg_shift
+    mask = (1 << shift) - 1
+
+    if state == FW_ATTACK_S:
+        if 0 < slot.eg_out and 0 < rh and (eg_counter & mask & ~3) == 0:
+            # lookup_attack_step (inline)
+            if rh == 12:
+                idx = (eg_counter & 0xc) >> 1
+                s = 4 - eg_step_tables[rl][idx]
+            elif rh == 13:
+                idx = (eg_counter & 0xc) >> 1
+                s = 3 - eg_step_tables[rl][idx]
+            elif rh == 14:
+                idx = (eg_counter & 0xc) >> 1
+                s = 2 - eg_step_tables[rl][idx]
+            elif rh == 0 or rh == 15:
+                s = 0
+            else:
+                idx = eg_counter >> shift
+                s = 4 if eg_step_tables[rl][idx & 7] else 0
+            if 0 < s:
+                slot.eg_out = max(0, slot.eg_out - (slot.eg_out >> s) - 1)
+    else:
+        if rh > 0 and (eg_counter & mask) == 0:
+            # lookup_decay_step (inline)
+            if rh == 0:
+                step = 0
+            elif rh == 13:
+                idx = ((eg_counter & 0xc) >> 1) | (eg_counter & 1)
+                step = eg_step_tables[rl][idx]
+            elif rh == 14:
+                idx = (eg_counter & 0xc) >> 1
+                step = eg_step_tables[rl][idx] + 1
+            elif rh == 15:
+                step = 2
+            else:
+                idx = eg_counter >> shift
+                step = eg_step_tables[rl][idx & 7]
+            slot.eg_out = min(EG_MUTE, slot.eg_out + step)
+
+    # 状态转移
+    if state == FW_DAMP_S:
+        if slot.eg_out >= EG_MAX:
+            ar_rh = min(15, slot.AR + (_fw_calc_rks(slot._blk, slot.KR) >> 2))
+            if ar_rh >= 15:
+                slot.eg_state = FW_DECAY_S
+                slot.eg_out = 0
+                _fw_commit_rate(slot, FW_DECAY_S, slot._blk)
+            else:
+                slot.eg_state = FW_ATTACK_S
+                _fw_commit_rate(slot, FW_ATTACK_S, slot._blk)
+    elif state == FW_ATTACK_S:
+        if slot.eg_out == 0:
+            slot.eg_state = FW_DECAY_S
+            _fw_commit_rate(slot, FW_DECAY_S, slot._blk)
+    elif state == FW_DECAY_S:
+        if (slot.eg_out >> 3) >= slot.SL:
+            slot.eg_state = FW_SUSTAIN_S
+            _fw_commit_rate(slot, FW_SUSTAIN_S, slot._blk)
+
+def render_fm_v3_fw(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
+    """V3-FW: 下位机式包络 (独立 eg_out 状态机) + s8 波形 + LEVEL_GAIN + LFO.
+    包络逻辑照搬 emu, 但 rate_h/l/shift 在状态转换时预算.
+    用于验证下位机移植方案的精度."""
+    mod_patch, car_patch = dump_to_patch(DEFAULT_INST[inst_idx])
+    fnum, blk = freq_to_fnum_blk(freq)
+
+    mod = FwSlot(); car = FwSlot()
+    for s, p in [(mod, mod_patch), (car, car_patch)]:
+        s.AR=p.AR; s.DR=p.DR; s.SL=p.SL; s.RR=p.RR
+        s.EG=p.EG; s.KR=p.KR; s.AM=p.AM; s.PM=p.PM
+        s.ML=p.ML; s.WS=p.WS; s.TL=p.TL; s.FB=p.FB; s.KL=p.KL
+        s._blk = blk
+    car.type = 1
+
+    mod.tll = TLL_TABLE[(blk, (fnum >> 5) & 15, mod_patch.TL, mod_patch.KL)]
+    car.tll = TLL_TABLE[(blk, (fnum >> 5) & 15, 0, car_patch.KL)]
+
+    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
+    n_keyon = int(dur_keyon * INTERNAL_RATE)
+
+    # key on
+    mod.key_flag = 1; mod.eg_state = FW_DAMP_S; mod.eg_out = EG_MUTE
+    _fw_commit_rate(mod, FW_DAMP_S, blk)
+    car.key_flag = 1; car.eg_state = FW_DAMP_S; car.eg_out = EG_MUTE
+    _fw_commit_rate(car, FW_DAMP_S, blk)
+
+    mod_wave = WAVE64_SIN if mod_patch.WS == 0 else WAVE64_HALFSIN
+    car_wave = WAVE64_SIN if car_patch.WS == 0 else WAVE64_HALFSIN
+
+    out = []
+    mod_pg = 0; car_pg = 0
+    mo1 = 0; mo2 = 0
+    pm_phase = 0; am_phase = 0
+    eg_counter = 0
+
+    for s in range(n_total):
+        if s == n_keyon:
+            # key off
+            mod.key_flag = 0
+            car.key_flag = 0
+            car.eg_state = FW_RELEASE_S
+            _fw_commit_rate(car, FW_RELEASE_S, blk)
+
+        eg_counter += 1
+        if mod.key_flag or mod.eg_state < FW_RELEASE_S:
+            _fw_env_tick(mod, eg_counter)
+        _fw_env_tick(car, eg_counter)
+
+        # LFO
+        pm_phase = (pm_phase + 1) & 0xffffffff
+        am_phase += 1
+        lfo_am = am_table[(am_phase >> 6) % len(am_table)]
+        mod_pm = pm_table[(fnum >> 6) & 7][(pm_phase >> 10) & 7] if mod_patch.PM else 0
+        car_pm = pm_table[(fnum >> 6) & 7][(pm_phase >> 10) & 7] if car_patch.PM else 0
+        mod_step = (((fnum & 0x1ff) * 2 + mod_pm) * ml_table[mod_patch.ML]) << blk >> 2
+        car_step = (((fnum & 0x1ff) * 2 + car_pm) * ml_table[car_patch.ML]) << blk >> 2
+        mod_pg = (mod_pg + mod_step) & (DP_WIDTH - 1)
+        car_pg = (car_pg + car_step) & (DP_WIDTH - 1)
+        midx = (mod_pg >> DP_BASE_BITS) & (PG_WIDTH - 1)
+        cidx = (car_pg >> DP_BASE_BITS) & (PG_WIDTH - 1)
+        midx64 = (midx * 64) >> PG_BITS
+        cidx64 = (cidx * 64) >> PG_BITS
+
+        mod_am = lfo_am if mod_patch.AM else 0
+        mod_eff_eg = min(EG_MUTE, mod.eg_out + mod.tll + mod_am)
+        if mod_patch.FB > 0:
+            fb = (mo2 + mo1) >> (9 - mod_patch.FB)
+            mod_raw = mod_wave[(midx64 + (fb >> 4)) & 63]
+        else:
+            mod_raw = mod_wave[midx64]
+        mo2 = mo1
+        mo1 = (mod_raw * LEVEL_GAIN[mod_eff_eg]) >> 6
+
+        fm_shifted = mo1 >> 4
+        car_idx = (cidx64 + fm_shifted) & 63
+        car_raw = car_wave[car_idx]
+        car_am = lfo_am if car_patch.AM else 0
+        car_eff_eg = min(EG_MUTE, car.eg_out + car.tll + car_am)
+        car_val = (car_raw * LEVEL_GAIN[car_eff_eg]) >> 7
+
+        out.append(-car_val)
+    return out
+
+
+# ============================================================
 #  WAV 输出 (从 INTERNAL_RATE 降采样到 SR)
 # ============================================================
 def downsample(samples, src_rate, dst_rate):
@@ -1010,13 +1214,13 @@ def main():
 
     os.makedirs(EMU2413_DIR, exist_ok=True)
     os.makedirs(FM_V3_DIR, exist_ok=True)
+    os.makedirs(FM_V3_FW_DIR, exist_ok=True)
 
     print("=" * 72)
-    print("YM2413 15 音色 + 5 鼓声 WAV 生成 (完整 emu2413 移植 + V3 s8 调参对比)")
-    print(f"  频率: {FREQ} Hz")
-    print(f"  时长: {DUR_KEYON}s keyon + {DUR_KEYOFF}s keyoff")
-    print(f"  采样率: {SR} Hz (从 49716 重采样近似)")
-    print(f"  输出: wav_emu2413/ + wav_fm_v3/")
+    print("YM2413 WAV 生成 (emu2413 参考 + V3 调参 + V3-FW 下位机式包络)")
+    print(f"  频率: {FREQ} Hz, 时长: {DUR_KEYON}s keyon + {DUR_KEYOFF}s keyoff")
+    print(f"  采样率: {SR} Hz (从 49716 重采样)")
+    print(f"  输出: wav_emu2413/ + wav_fm_v3/ + wav_fm_v3_fw/")
     print("=" * 72)
 
     print("\n--- emu2413 (完整移植) → wav_emu2413/ ---")
@@ -1037,20 +1241,27 @@ def main():
         save_wav(fname, samples)
         print(f"  {dname:<16} -> {os.path.basename(fname)}")
 
-    print("\n--- fm_v3 (s8 核心 + 调参对齐) → wav_fm_v3/ ---")
+    print("\n--- fm_v3 (s8 核心, emu 完整包络) → wav_fm_v3/ ---")
     for i in range(1, 16):
         mod_p, car_p = dump_to_patch(DEFAULT_INST[i])
         samples = render_fm_v3(i, FREQ, DUR_KEYON, DUR_KEYOFF)
         fname = os.path.join(FM_V3_DIR, f"fm_v3_inst{i:02d}_{NAMES[i]}.wav")
         save_wav(fname, samples)
-        print(f"  {i:2d} {NAMES[i]:<16} "
-              f"car[AR={car_p.AR} DR={car_p.DR} SL={car_p.SL} RR={car_p.RR} EG={car_p.EG} ML={car_p.ML} WS={car_p.WS} KL={car_p.KL}] "
-              f"-> {os.path.basename(fname)}")
+        print(f"  {i:2d} {NAMES[i]:<16} -> {os.path.basename(fname)}")
+
+    print("\n--- fm_v3_fw (s8 核心, 下位机式包络) → wav_fm_v3_fw/ ---")
+    for i in range(1, 16):
+        mod_p, car_p = dump_to_patch(DEFAULT_INST[i])
+        samples = render_fm_v3_fw(i, FREQ, DUR_KEYON, DUR_KEYOFF)
+        fname = os.path.join(FM_V3_FW_DIR, f"fm_v3_fw_inst{i:02d}_{NAMES[i]}.wav")
+        save_wav(fname, samples)
+        print(f"  {i:2d} {NAMES[i]:<16} -> {os.path.basename(fname)}")
 
     print(f"\n{'='*72}")
-    print(f"完成! emu2413 (20) + fm_v3 (15) = 35 个 WAV")
-    print(f"  wav_emu2413/ : emu2413 参考 (15 音色 + 5 鼓声)")
-    print(f"  wav_fm_v3/   : V3 s8 调参版 (15 音色)")
+    print(f"完成! emu2413 (20) + fm_v3 (15) + fm_v3_fw (15) = 50 个 WAV")
+    print(f"  wav_emu2413/   : emu2413 参考 (15 音色 + 5 鼓声)")
+    print(f"  wav_fm_v3/     : V3 s8 调参版 (emu 完整包络, 15 音色)")
+    print(f"  wav_fm_v3_fw/  : V3-FW 下位机式包络 (查表速率, 15 音色)")
     print(f"{'='*72}")
 
 
