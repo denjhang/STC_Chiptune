@@ -387,11 +387,13 @@ void ym2413_init(void) {
     ym_test_flag = 0;
     /* 鼓声参数初始化 (PC drum_fw_sim 试听确定) */
     /* BD=0: sin 100Hz, decay 快; TOM=1: sin 214Hz; HH=2: noise 755Hz; CYM=3: noise 755Hz 慢 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 1;  /* BD 100Hz */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 1;  /* TOM 214Hz */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 3;  /* HH 755Hz */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 40; /* CYM 755Hz 慢 */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x082C;  ym_drum[4].env_step = 2;  /* SD 25Hz noise */
+    /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
+    /* BD ~10ms TOM ~10ms HH ~29ms CYM ~150ms SD ~20ms */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 16;  /* BD 100Hz */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 16;  /* TOM 214Hz */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  /* HH 755Hz */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; /* CYM 755Hz ~150ms */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x082C;  ym_drum[4].env_step = 32;  /* SD 25Hz noise */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -512,12 +514,11 @@ static void ym_update_noise(void) {
 }
 
 /* ===== 鼓声简化渲染 (单 op: 查表×level, 无 FM 调制) ===== */
-/* BD=0 TOM=1 HH=2 CYM=3, SD 暂不实现 */
+/* BD=0 TOM=1 HH=2 CYM=3 SD=4, oneshot 每采样 tick 包络 */
 static void ym_drum_trigger(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
     d->active = 1;
     d->level = 31;
-    d->env_state = 1;  /* decay */
     d->env_cnt = 0;
 }
 
@@ -528,15 +529,13 @@ static s16 ym_render_drum(u8 idx) {
 
     if (!d->active) return 0;
 
-    /* 包络 (round-robin) */
-    if (ym_wait_cnt == idx) {
-        if (d->env_step > 0) {
-            if (d->env_cnt < d->env_step) d->env_cnt++;
-            else {
-                d->env_cnt = 0;
-                if (d->level > 0) d->level--;
-                else { d->active = 0; return 0; }
-            }
+    /* 包络: 每采样 tick (不走 round-robin, env_step 直接 = 采样数/步) */
+    if (d->env_step > 0) {
+        if (d->env_cnt < d->env_step) d->env_cnt++;
+        else {
+            d->env_cnt = 0;
+            if (d->level > 0) d->level--;
+            else { d->active = 0; return 0; }
         }
     }
 
