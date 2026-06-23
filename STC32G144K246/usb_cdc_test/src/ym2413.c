@@ -395,7 +395,7 @@ void ym2413_init(void) {
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x4A4D;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 8; /* BD */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x4A4D;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
