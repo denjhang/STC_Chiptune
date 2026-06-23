@@ -31,13 +31,6 @@ static const s8 code ym_halfsin[64] = {
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
 };
-/* WS=2: 噪声 (64 点假随机 ±31, 代替 LFSR, 用于鼓声 HH/SD/CYM/TOM) */
-static const s8 code ym_noise[64] = {
-     7, -4, 19, -28, 12, 23, -15,  6, -31,  8, -2, 27, -9, 14, -22,  3,
-    18, -11, 25, -7, 30, -19,  5, -24, 10, -14, 21, -3, 16, -27,  1, 29,
-    -8, 13, -21,  4, 26, -10, 20, -6, 15, -25, 11, -17, 24, -1,  9, -29,
-     2, 22, -13, 28, -5, 17, -23,  0, 31, -18,  7, -12, 19, -26, 14, -20
-};
 
 /* ===== ADSR 速度查表 (AR/DR/RR 各一张, 对齐 emu2413 速率) ===== */
 /* round-robin 每 16 采样 tick 一次, level 0~31 线性.
@@ -139,12 +132,10 @@ typedef struct {
 
 /* ===== 全局状态 ===== */
 #define YM_CHANNELS 9
-#define YM_DRUM_CHANNELS 5
-#define YM_TOTAL_CHANNELS (YM_CHANNELS + YM_DRUM_CHANNELS)
-static YM_CHANNEL xdata ym_ch[YM_TOTAL_CHANNELS];
+static YM_CHANNEL xdata ym_ch[YM_CHANNELS];
 static YM_VOICE_PATCH xdata ym_patch[19];   /* 0=用户, 1-15=内置, 16-18=rhythm */
 static u8 xdata ym_reg[0x40];
-static u8 xdata ym_ch_patch[YM_TOTAL_CHANNELS];
+static u8 xdata ym_ch_patch[YM_CHANNELS];   /* 当前每通道用的音色号 */
 static u8 xdata ym_rhythm_mode;
 /* 噪声发生器 (AY8910 原理: 17-bit LFSR, 用于鼓声 HH/SD/CYM) */
 static u32 data ym_noise_seed;
@@ -202,74 +193,18 @@ static void ym_apply_patch(u8 ch) {
     if (mod->tl > 31) mod->tl = 31;
     mod->fb = p->mod_fb;
     mod->eg_type = p->mod_eg;
-    mod->wave = (p->mod_ws >= 2) ? ym_noise : (p->mod_ws ? ym_halfsin : ym_sin);
+    mod->wave = p->mod_ws ? ym_halfsin : ym_sin;
     mod->atk  = ym_ar_tab[p->mod_ar];
     mod->decy = ym_dr_tab[p->mod_dr];
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_rr_tab[p->mod_rr];
     car->fb = 0;
     car->eg_type = p->car_eg;
-    car->wave = (p->car_ws >= 2) ? ym_noise : (p->car_ws ? ym_halfsin : ym_sin);
+    car->wave = p->car_ws ? ym_halfsin : ym_sin;
     car->atk  = ym_ar_tab[p->car_ar];
     car->decy = ym_dr_tab[p->car_dr];
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
     car->rel  = ym_rr_tab[p->car_rr];
-}
-
-/* ===== 鼓声专用参数设置 (rhythm mode 进入时调用) ===== */
-/* ch9-13 = 5 个独立鼓声通道 (BD/SD/TOM/HH/CYM), 各自独立 2-op */
-/* BD = ch9:  mod=halfsin+FB, car=sin (标准 FM), 100Hz */
-/* SD = ch10: mod=noise(WS=2), car=sin, sine慢包络+noise快, FB=2 */
-/* TOM= ch11: mod=sin, car=sin (只用 car 输出), 214Hz ml=5 */
-/* HH = ch12: mod=noise(WS=2), car=unused, 755Hz */
-/* CYM= ch13: mod=noise(WS=2), car=unused, 755Hz */
-#define DRUM_BD   9
-#define DRUM_SD   10
-#define DRUM_TOM  11
-#define DRUM_HH   12
-#define DRUM_CYM  13
-
-static void ym_setup_drums(void) {
-    u8 ch;
-    /* 噪声步进: 755Hz (16.16 定点) = 755 × 64 × 65536 / 49716 ≈ 63608 */
-    u32 noise_step = 63608;
-
-    /* 初始化 ch9-13: 都用 patch16/17/18 的 ADSR, 但 WS/频率特殊 */
-    for (ch = DRUM_BD; ch <= DRUM_CYM; ch++) {
-        ym_ch[ch].key_on = 0;
-        ym_ch[ch].mod.pos = 0; ym_ch[ch].car.pos = 0;
-        ym_ch[ch].mod.fb_val = 0;
-        ym_ch[ch].mod.env_state = 0; ym_ch[ch].car.env_state = 0;
-        ym_ch[ch].mod.level = 0; ym_ch[ch].car.level = 0;
-    }
-
-    /* BD (ch9): patch16, 标准 2-op FM */
-    ym_ch[DRUM_BD].patch = &ym_patch[16];
-    ym_apply_patch(DRUM_BD);
-
-    /* SD (ch10): patch17, mod=noise, car=sin, FB=2 */
-    ym_ch[DRUM_SD].patch = &ym_patch[17];
-    ym_apply_patch(DRUM_SD);
-    ym_ch[DRUM_SD].mod.wave = ym_noise;
-    ym_ch[DRUM_SD].mod.fb = 2;
-    ym_ch[DRUM_SD].mod.step = noise_step;  /* noise 755Hz */
-
-    /* TOM (ch11): patch18 mod, sin 214Hz ml=5 */
-    ym_ch[DRUM_TOM].patch = &ym_patch[18];
-    ym_apply_patch(DRUM_TOM);
-    /* TOM 只用 mod 输出 (car 不输出) */
-
-    /* HH (ch12): noise 755Hz */
-    ym_ch[DRUM_HH].patch = &ym_patch[17];
-    ym_apply_patch(DRUM_HH);
-    ym_ch[DRUM_HH].mod.wave = ym_noise;
-    ym_ch[DRUM_HH].mod.step = noise_step;
-
-    /* CYM (ch13): noise 755Hz */
-    ym_ch[DRUM_CYM].patch = &ym_patch[18];
-    ym_apply_patch(DRUM_CYM);
-    ym_ch[DRUM_CYM].mod.wave = ym_noise;
-    ym_ch[DRUM_CYM].mod.step = noise_step;
 }
 
 /* ===== 算 step (16.16 定点) ===== */
@@ -333,11 +268,13 @@ static void ym_update_keys(void) {
     u8 ch;
     u8 r14 = ym_reg[0x0E];
     u8 rhythm = (r14 >> 5) & 1;
-    /* ch0-8: 旋律 (rhythm mode 时 ch6-8 不再用) */
     for (ch = 0; ch < 9; ch++) {
         u8 new_key;
         if (rhythm && ch >= 6) {
-            new_key = 0;  /* rhythm mode: ch6-8 旋律静音 */
+            /* rhythm mode: ch6/7/8 由 reg 0x0E 控制 */
+            if (ch == 6) new_key = (r14 >> 4) & 1;       /* BD */
+            else if (ch == 7) new_key = ((r14 & 0x09) != 0) ? 1 : 0; /* HH(1) | SD(8) */
+            else new_key = ((r14 & 0x06) != 0) ? 1 : 0;  /* TOM(4) | CYM(2) */
         } else {
             new_key = (ym_reg[0x20 + ch] >> 4) & 1;
         }
@@ -345,21 +282,6 @@ static void ym_update_keys(void) {
             ym_key_on(ch);
         } else if (!new_key && ym_ch[ch].key_on) {
             ym_key_off(ch);
-        }
-    }
-    /* rhythm mode: ch9-13 鼓声由 reg 0x0E 各 bit 触发 */
-    if (rhythm) {
-        u8 drum_key[5];
-        drum_key[0] = (r14 >> 4) & 1;           /* BD  = bit4 */
-        drum_key[1] = (r14 >> 3) & 1;           /* SD  = bit3 */
-        drum_key[2] = (r14 >> 2) & 1;           /* TOM = bit2 */
-        drum_key[3] = (r14 >> 1) & 1;           /* CYM = bit1 */
-        drum_key[4] = r14 & 1;                   /* HH  = bit0 */
-        for (ch = 0; ch < 5; ch++) {
-            u8 dch = DRUM_BD + ch;
-            if (drum_key[ch] && !ym_ch[dch].key_on) {
-                ym_key_on(dch);
-            }
         }
     }
 }
@@ -412,11 +334,11 @@ void ym2413_init(void) {
         ym_decode_patch(&ym_default_inst[i * 8], &ym_patch[i]);
     }
     /* 初始化通道 */
-    for (ch = 0; ch < YM_TOTAL_CHANNELS; ch++) {
-        ym_ch[ch].patch = &ym_patch[0];
+    for (ch = 0; ch < YM_CHANNELS; ch++) {
+        ym_ch[ch].patch = &ym_patch[0];  /* 默认音色 0 */
         ym_ch[ch].key_on = 0;
         ym_ch[ch].sus_flag = 0;
-        ym_ch[ch].vol = 0;
+        ym_ch[ch].vol = 60;
         ym_ch_patch[ch] = 0;
         ym_ch[ch].mod.active = 0; ym_ch[ch].car.active = 0;
         ym_ch[ch].mod.step = 0; ym_ch[ch].car.step = 0;
@@ -465,8 +387,22 @@ void ym2413_wr(u8 reg, u8 val) {
         if (new_rhythm != ym_rhythm_mode) {
             ym_rhythm_mode = new_rhythm;
             if (new_rhythm) {
-                /* 进 rhythm mode: 初始化 ch9-13 鼓声通道 */
-                ym_setup_drums();
+                /* 进 rhythm mode: ch6/7/8 用鼓音色 16/17/18 */
+                for (ch = 6; ch < 9; ch++) {
+                    ym_ch_patch[ch] = 13 + ch;   /* ch6→16(BD), ch7→17(HH/SD), ch8→18(TOM/CYM) */
+                    ym_ch[ch].patch = &ym_patch[13 + ch];
+                    ym_apply_patch(ch);
+                    ym_update_step(ch);
+                }
+            } else {
+                /* 退 rhythm mode: ch6/7/8 恢复用户音色 */
+                for (ch = 6; ch < 9; ch++) {
+                    u8 inst = (ym_reg[0x30 + ch] >> 4) & 0x0F;
+                    ym_ch_patch[ch] = inst;
+                    ym_ch[ch].patch = &ym_patch[inst];
+                    ym_apply_patch(ch);
+                    ym_update_step(ch);
+                }
             }
         }
         ym_update_keys();
@@ -541,7 +477,8 @@ static s16 ym_render_fm(u8 ch) {
     YM_OP *mod = &ym_ch[ch].mod;
     YM_OP *car = &ym_ch[ch].car;
     u8 idx;
-    s8 wave_val, ch_out;
+    s8 wave_val;
+    s16 ch_out;
 
     if (!mod->step) return 0;
 
@@ -551,8 +488,12 @@ static s16 ym_render_fm(u8 ch) {
     idx += (u8)mod->fb_val;
     wave_val = mod->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
-    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
+    /* 预乘 level×tl, 减少乘法次数: wave × (level+1) × (tl+1) >> 10 */
+    {
+        u16 gain = (u16)((mod->level + 1) * (mod->tl + 1));  /* u8×u8 = u16 */
+        ch_out = ((s16)wave_val * (s16)gain) >> 10;
+    }
+    if (mod->fb > 0) mod->fb_val = (s8)(ch_out >> mod->fb);
     else mod->fb_val = 0;
 
     /* OP2 (carrier) */
@@ -561,11 +502,14 @@ static s16 ym_render_fm(u8 ch) {
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-    ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
+    {
+        u16 gain = (u16)((car->level + 1) * (car->tl + 1));
+        ch_out = ((s16)wave_val * (s16)gain) >> 10;
+    }
     return ch_out;
 }
 
-/* ===== FM 渲染 (旋律 + 鼓声) ===== */
+/* ===== FM 渲染 (极简核心) ===== */
 s16 ym2413_render(void) {
     u8 ch;
     s16 total = 0;
@@ -573,26 +517,21 @@ s16 ym2413_render(void) {
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
-    /* 旋律 ch0-8 */
-    for (ch = 0; ch < YM_CHANNELS; ch++) {
+    for (ch = 0; ch < 9; ch++) {
+        /* 跳过无声通道: 没 key_on 且包络结束 */
+        if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
+        /* 跳过没频率的通道 */
         if (ym_ch[ch].mod.step == 0) continue;
-        if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0 && ym_ch[ch].car.level == 0) continue;
+        /* release 结束 */
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
         }
-        total += ym_render_fm(ch);
-    }
-    /* 鼓声 ch9-13: 只渲染有声的 (level>0) */
-    for (ch = DRUM_BD; ch <= DRUM_CYM; ch++) {
-        if (ym_ch[ch].mod.step == 0) continue;
-        if (!ym_ch[ch].key_on) continue;
-        if (ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
-            ym_ch[ch].key_on = 0;
+        if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
-            ym_ch[ch].mod.env_state = 0;
             continue;
         }
+
         total += ym_render_fm(ch);
     }
 
