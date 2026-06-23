@@ -199,9 +199,9 @@ static void ym_apply_patch(u8 ch) {
 /* ===== 算 step (16.16 定点) ===== */
 static u32 ym_calc_step(u16 fnum, u8 blk, u8 ml) {
     /* step = fnum × (1<<blk) × YM_STEP_CONST × ml / 2
-     * 实测整体高一个八度, 再 /2 修正 */
+     * ml 是查表后的值 (ym_ml_table), 实际 = ml/2 */
     float base = (float)fnum * (float)(1 << blk) * YM_STEP_CONST;
-    u32 step = (u32)(base * (float)ml / 2.0f / 2.0f);
+    u32 step = (u32)(base * (float)ml / 2.0f);
     return step;
 }
 
@@ -209,6 +209,8 @@ static u32 ym_calc_step(u16 fnum, u8 blk, u8 ml) {
 static void ym_update_step(u8 ch) {
     u16 fnum = (u16)ym_reg[0x10 + ch] | ((u16)(ym_reg[0x20 + ch] & 1) << 8);
     u8 blk = (ym_reg[0x20 + ch] >> 1) & 7;
+    /* 实测音高整体高一个八度, blk 减 1 修正 (频率 ÷2 = 降一个八度) */
+    if (blk > 0) blk--;
     ym_ch[ch].mod.step = ym_calc_step(fnum, blk, ym_ch[ch].mod.ml);
     ym_ch[ch].car.step = ym_calc_step(fnum, blk, ym_ch[ch].car.ml);
 }
