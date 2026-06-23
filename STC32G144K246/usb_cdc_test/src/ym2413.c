@@ -392,12 +392,12 @@ void ym2413_init(void) {
     /* 鼓声参数初始化 (PC drum_fw_sim 试听确定) */
     /* BD=0: sin 100Hz, decay 快; TOM=1: sin 214Hz; HH=2: noise 755Hz; CYM=3: noise 755Hz 慢 */
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
-    /* BD ~10ms TOM ~10ms HH ~29ms CYM ~150ms SD ~20ms */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 16;  /* BD 100Hz */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 16;  /* TOM 214Hz */
+    /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 160; /* BD 100Hz */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 128; /* TOM 214Hz */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  /* HH 755Hz */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; /* CYM 755Hz ~150ms */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x082C;  ym_drum[4].env_step = 32;  /* SD 25Hz noise */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; /* CYM 755Hz */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x493A;  ym_drum[4].env_step = 96;  /* SD noise 230Hz */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
