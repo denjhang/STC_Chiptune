@@ -573,20 +573,24 @@ s16 ym2413_render(void) {
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
-    for (ch = 0; ch < YM_TOTAL_CHANNELS; ch++) {
-        /* 跳过没有频率的通道 (未使用) */
+    /* 旋律 ch0-8 */
+    for (ch = 0; ch < YM_CHANNELS; ch++) {
         if (ym_ch[ch].mod.step == 0) continue;
-        /* 跳过静音通道 */
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0 && ym_ch[ch].car.level == 0) continue;
-        /* 鼓声 (ch>=9) 衰减完后自动 key_off (省 CPU) */
-        if (ch >= DRUM_BD && ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
+        if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
+            ym_ch[ch].car.env_state = 0;
+            continue;
+        }
+        total += ym_render_fm(ch);
+    }
+    /* 鼓声 ch9-13: 只渲染有声的 (level>0) */
+    for (ch = DRUM_BD; ch <= DRUM_CYM; ch++) {
+        if (ym_ch[ch].mod.step == 0) continue;
+        if (!ym_ch[ch].key_on) continue;
+        if (ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
             ym_ch[ch].key_on = 0;
             ym_ch[ch].car.env_state = 0;
             ym_ch[ch].mod.env_state = 0;
-            continue;
-        }
-        if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
-            ym_ch[ch].car.env_state = 0;
             continue;
         }
         total += ym_render_fm(ch);
