@@ -32,9 +32,14 @@ static const s8 code ym_halfsin[64] = {
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
 };
 
-/* ===== ADSR 速度查表 (index 0-15 → 周期, 值越大越慢) ===== */
+/* ===== ADSR 速度查表 (index 0-15 → 周期, 值越大越慢) =====
+ * 去掉 round-robin 后每采样都更新, 速率要和 emu2413 对齐.
+ * emu2413 每采样 eg_counter++, 按 rate_h/shift 决定步进.
+ * 简化: env_cnt[AR] = 大约多少采样走一步.
+ *   AR=15 → 1 (最快, 每采样都走)
+ *   AR=0  → 255 (不启动) */
 static const u8 code ym_env_cnt[16] = {
-    0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255
+    255, 200, 150, 100, 70, 50, 35, 25, 18, 12, 8, 5, 3, 2, 1, 1
 };
 
 /* ===== level 增益查表 (替代线性 (level+1), 模拟 dB 曲线) =====
@@ -236,22 +241,18 @@ static void ym_key_on(u8 ch) {
     ym_ch[ch].key_on = 1;
     mod->pos = 0; car->pos = 0;
     mod->fb_val = 0;
-    /* AR=0 → 不启动 (保持 mute) */
-    /* AR=15 (atk=env_cnt[15]=255, 最快) → 跳过 attack, 直接到 sustain level */
+    /* AR=15 (env_cnt[15]=1, 最快) → 跳过 attack, 直接到 decay
+     * AR=0  (env_cnt[0]=255, 最慢) → 几乎不启动 */
     mod->level = 0; car->level = 0;
-    if (mod->atk >= 255) {
+    if (mod->atk <= 1) {
         mod->level = 31; mod->env_state = 2; mod->env_step = mod->decy;
-    } else if (mod->atk == 0) {
-        mod->env_state = 0; mod->level = 0;
     } else {
-        mod->env_state = 1; mod->env_cnt = 250; mod->env_step = mod->atk;
+        mod->env_state = 1; mod->env_cnt = 0; mod->env_step = mod->atk;
     }
-    if (car->atk >= 255) {
+    if (car->atk <= 1) {
         car->level = 31; car->env_state = 2; car->env_step = car->decy;
-    } else if (car->atk == 0) {
-        car->env_state = 0; car->level = 0;
     } else {
-        car->env_state = 1; car->env_cnt = 250; car->env_step = car->atk;
+        car->env_state = 1; car->env_cnt = 0; car->env_step = car->atk;
     }
 }
 
@@ -290,35 +291,41 @@ static void ym_update_keys(void) {
     }
 }
 
-/* ===== 包络 tick (行为对齐 YM2413) ===== */
+/* ===== 包络 tick (行为对齐 YM2413) =====
+ * emu2413 attack 是指数衰减 (eg_out -= eg_out>>s + 1), 不是线性.
+ * 极简版 attack 也用指数: level += (31-level)>>s + 1.
+ * decay/release 是线性 -1 (每 tick 减 1).
+ * round-robin 每 16 采样更新一个 op, 所以 AR/DR 要补偿 (env_cnt 值缩小). */
 static void ym_env_tick(YM_OP *op) {
     u8 cnt = op->env_cnt;
     u8 step = op->env_step;
     if (cnt >= step) { op->env_cnt = cnt - step; return; }
     op->env_cnt = 250;
+
     switch (op->env_state) {
-    case 1: /* attack: level 0→31 */
-        if (op->level < 31) op->level++;
-        if (op->level >= 31) {
-            op->env_state = 2;   /* → decay */
-            op->env_step = op->decy;
+    case 1: /* attack: level 0→31, 指数曲线 (对齐 emu2413) */
+        {
+            u8 remaining = 31 - op->level;
+            u8 inc = (remaining >> 2) + 1;   /* 指数增长 */
+            op->level += inc;
+            if (op->level >= 31) {
+                op->level = 31;
+                op->env_state = 2;   /* → decay */
+                op->env_step = op->decy;
+            }
         }
         break;
-    case 2: /* decay: level 31→sul */
+    case 2: /* decay: level 31→sul, 线性 -1 */
         if (op->level > op->sul) op->level--;
         else {
             op->env_state = 3;   /* → sustain */
-            /* Sustain 速率 (行为对齐 YM2413):
-             *   EG=0 (sustaining) → 保持 SL, step=0
-             *   EG=1 (non-sustaining) → 继续降, step=RR */
-            op->env_step = op->eg_type ? op->rel : 0;
+            op->env_step = op->eg_type ? op->rel : 255;  /* EG=1 继续, EG=0 保持(step大=不动) */
         }
         break;
-    case 3: /* sustain: EG=0 保持 SL, EG=1 继续降到 0 */
+    case 3: /* sustain: EG=0 保持, EG=1 继续降到 0 */
         if (op->eg_type) {
             if (op->level > 0) op->level--;
         }
-        /* EG=0: step=0, 永远不进这里 (cnt>=step 立即返回) */
         break;
     case 4: /* release: level→0 */
         if (op->level > 0) op->level--;
@@ -492,9 +499,9 @@ static s16 ym_render_fm(u8 ch) {
     idx = (u8)(mod->pos >> 16) & 0x3F;
     idx += (u8)mod->fb_val;
     wave_val = mod->wave[idx & 0x3F];
-    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
+    ym_env_tick(mod);
     ch_out = (s8)(((s16)wave_val * (s16)ym_level_gain[mod->level & 31] * (s16)(mod->tl + 1)) >> 10);
-    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
+    if (mod->fb > 0) mod->fb_val = (s8)(ch_out >> mod->fb);
     else mod->fb_val = 0;
 
     /* OP2 (carrier) */
@@ -502,7 +509,7 @@ static s16 ym_render_fm(u8 ch) {
     idx = (u8)(car->pos >> 16) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
-    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
+    ym_env_tick(car);
     ch_out = (s8)(((s16)wave_val * (s16)ym_level_gain[car->level & 31] * (s16)(car->tl + 1)) >> 10);
     return ch_out;
 }
@@ -514,9 +521,6 @@ s16 ym2413_render(void) {
     s16 drum_out;
     s8 wave_val, hh, cym;
     YM_OP *car, *mod;
-
-    ym_wait_cnt++;
-    ym_wait_cnt &= 0x0F;
 
     /* 噪声推进 (鼓声用) */
     if (ym_rhythm_mode) ym_update_noise();
