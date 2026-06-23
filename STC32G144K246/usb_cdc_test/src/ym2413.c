@@ -17,11 +17,19 @@
 #include "ym2413.h"
 
 /* ===== 64 点波形表 (s8, -31..31) ===== */
+/* WS=0: 正弦 (正常 FM) */
 static const s8 code ym_sin[64] = {
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
      0, -3, -6, -9,-12,-15,-17,-20,-22,-24,-26,-28,-29,-30,-31,-31,
    -31,-31,-31,-30,-29,-28,-26,-24,-22,-20,-17,-15,-12, -9, -6, -3
+};
+/* WS=1: 半正弦 (abssin, 负半周取绝对值, 产生八度叠加感) */
+static const s8 code ym_halfsin[64] = {
+     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
+    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
+     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
+    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
 };
 
 /* ===== ADSR 速度查表 (index 0-15 → 周期, 值越大越慢) ===== */
@@ -78,6 +86,7 @@ typedef struct {
     u8 mod_sl, mod_rr;     /* sustain level / release rate */
     u8 car_sl, car_rr;
     u8 mod_eg, car_eg;     /* EG type: 0=sustaining(保持SL), 1=non-sustaining(降到0) */
+    u8 mod_ws, car_ws;     /* wave select: 0=sin, 1=half-sin(abssin) */
 } YM_VOICE_PATCH;
 
 /* ===== Operator 状态 (极简 FM) ===== */
@@ -89,8 +98,9 @@ typedef struct {
     u8 sul;
     u8 rel;
     u8 fb;
-    u8 eg_type;       /* 0=sustaining(保持SL), 1=non-sustaining(降到0) */
-    u8 sus_flag;      /* 通道 sustain flag (reg 0x2x bit5) */
+    u8 eg_type;
+    u8 sus_flag;
+    const s8 code *wave;   /* 波形表指针 (ym_sin 或 ym_halfsin) */
     u32 step;
     u32 pos;
     s8 fb_val;
@@ -136,6 +146,8 @@ static void ym_decode_patch(const u8 *dump, YM_VOICE_PATCH *p) {
     p->car_eg = (dump[1] >> 5) & 1;
     p->mod_tl = dump[2] & 0x3F;
     p->mod_fb = dump[3] & 0x07;
+    p->mod_ws = (dump[3] >> 3) & 1;   /* bit3 */
+    p->car_ws = (dump[3] >> 4) & 1;   /* bit4 */
     p->mod_ar = (dump[4] >> 4) & 0x0F;
     p->mod_dr = dump[4] & 0x0F;
     p->car_ar = (dump[5] >> 4) & 0x0F;
@@ -158,12 +170,14 @@ static void ym_apply_patch(u8 ch) {
     if (mod->tl > 31) mod->tl = 31;
     mod->fb = p->mod_fb;
     mod->eg_type = p->mod_eg;
+    mod->wave = p->mod_ws ? ym_halfsin : ym_sin;
     mod->atk  = ym_env_cnt[p->mod_ar];
     mod->decy = ym_env_cnt[p->mod_dr];
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_env_cnt[p->mod_rr];
     car->fb = 0;
     car->eg_type = p->car_eg;
+    car->wave = p->car_ws ? ym_halfsin : ym_sin;
     car->atk  = ym_env_cnt[p->car_ar];
     car->decy = ym_env_cnt[p->car_dr];
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
@@ -228,8 +242,18 @@ static void ym_key_off(u8 ch) {
 /* ===== 更新 key 状态 (reg 0x20-0x28 或 0x0E 改变时) ===== */
 static void ym_update_keys(void) {
     u8 ch;
+    u8 r14 = ym_reg[0x0E];
+    u8 rhythm = (r14 >> 5) & 1;
     for (ch = 0; ch < 9; ch++) {
-        u8 new_key = (ym_reg[0x20 + ch] >> 4) & 1;
+        u8 new_key;
+        if (rhythm && ch >= 6) {
+            /* rhythm mode: ch6/7/8 由 reg 0x0E 控制 */
+            if (ch == 6) new_key = (r14 >> 4) & 1;       /* BD */
+            else if (ch == 7) new_key = ((r14 & 0x09) != 0) ? 1 : 0; /* HH(1) | SD(8) */
+            else new_key = ((r14 & 0x06) != 0) ? 1 : 0;  /* TOM(4) | CYM(2) */
+        } else {
+            new_key = (ym_reg[0x20 + ch] >> 4) & 1;
+        }
         if (new_key && !ym_ch[ch].key_on) {
             ym_key_on(ch);
         } else if (!new_key && ym_ch[ch].key_on) {
@@ -333,10 +357,32 @@ void ym2413_wr(u8 reg, u8 val) {
         }
         break;
     }
-    case 0x0E:
-        ym_rhythm_mode = (val >> 5) & 1;
+    case 0x0E: {
+        u8 new_rhythm = (val >> 5) & 1;
+        if (new_rhythm != ym_rhythm_mode) {
+            ym_rhythm_mode = new_rhythm;
+            if (new_rhythm) {
+                /* 进 rhythm mode: ch6/7/8 用鼓音色 16/17/18 */
+                for (ch = 6; ch < 9; ch++) {
+                    ym_ch_patch[ch] = 13 + ch;   /* ch6→16(BD), ch7→17(HH/SD), ch8→18(TOM/CYM) */
+                    ym_ch[ch].patch = &ym_patch[13 + ch];
+                    ym_apply_patch(ch);
+                    ym_update_step(ch);
+                }
+            } else {
+                /* 退 rhythm mode: ch6/7/8 恢复用户音色 */
+                for (ch = 6; ch < 9; ch++) {
+                    u8 inst = (ym_reg[0x30 + ch] >> 4) & 0x0F;
+                    ym_ch_patch[ch] = inst;
+                    ym_ch[ch].patch = &ym_patch[inst];
+                    ym_apply_patch(ch);
+                    ym_update_step(ch);
+                }
+            }
+        }
         ym_update_keys();
         break;
+    }
     case 0x0F:
         ym_test_flag = val;
         break;
@@ -351,8 +397,10 @@ void ym2413_wr(u8 reg, u8 val) {
     case 0x25: case 0x26: case 0x27: case 0x28:
         ch = reg - 0x20;
         ym_ch[ch].sus_flag = (val >> 5) & 1;
-        ym_ch[ch].mod.sus_flag = (val >> 5) & 1;
+        /* sus_flag 只影响 carrier (对齐 emu2413 set_sus_flag line 672:
+         * modulator 的 sus_flag 永远不设, 因 type&1==0) */
         ym_ch[ch].car.sus_flag = (val >> 5) & 1;
+        ym_ch[ch].mod.sus_flag = 0;
         ym_update_step(ch);
         ym_update_keys();
         break;
@@ -361,20 +409,26 @@ void ym2413_wr(u8 reg, u8 val) {
     case 0x35: case 0x36: case 0x37: case 0x38:
         ch = reg - 0x30;
         {
-            u8 inst = (val >> 4) & 0x0F;
-            if (!ym_rhythm_mode || ch < 6) {
+            if (ym_rhythm_mode && ch >= 6) {
+                /* rhythm mode: ch6/7/8 的高4位是鼓 volume (不是 instrument)
+                 * ch6=BD vol, ch7=SD vol(高4)/HH vol(低4), ch8=TOM vol(高4)/CYM vol(低4)
+                 * 简化: 用高4位作为 carrier volume */
+                u8 drum_vol = (val >> 4) & 0x0F;
+                ym_ch[ch].car.tl = 31 - (drum_vol << 1);
+                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 0;
+            } else {
+                u8 inst = (val >> 4) & 0x0F;
                 if (inst != ym_ch_patch[ch]) {
                     ym_ch_patch[ch] = inst;
                     ym_ch[ch].patch = &ym_patch[inst];
                     ym_apply_patch(ch);
                     ym_update_step(ch);
                 }
+                /* volume: reg 低4位, YM2413 vol=0 最大, 转 carrier tl */
+                ym_ch[ch].vol = (15 - (val & 0x0F)) << 2;
+                ym_ch[ch].car.tl = 31 - (ym_ch[ch].vol >> 1);
+                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 0;
             }
-            /* volume: reg 低4位, YM2413 vol=0 最大, 转 carrier tl */
-            ym_ch[ch].vol = (15 - (val & 0x0F)) << 2;  /* 0-60, 0=最大 */
-            /* carrier tl 受 vol 影响: tl = base_tl × vol_ratio */
-            ym_ch[ch].car.tl = 31 - (ym_ch[ch].vol >> 1);
-            if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 0;
         }
         break;
     }
@@ -406,7 +460,7 @@ s16 ym2413_render(void) {
             mod->pos += mod->step;
             idx = (u8)(mod->pos >> 16) & 0x3F;
             idx += (u8)mod->fb_val;
-            wave_val = ym_sin[idx & 0x3F];
+            wave_val = mod->wave[idx & 0x3F];
             if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
             ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
             if (mod->fb > 0)
@@ -418,7 +472,7 @@ s16 ym2413_render(void) {
             car->pos += car->step;
             idx = (u8)(car->pos >> 16) & 0x3F;
             idx += (u8)ch_out;
-            wave_val = ym_sin[idx & 0x3F];
+            wave_val = car->wave[idx & 0x3F];
             if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
             ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
             total += ch_out;
