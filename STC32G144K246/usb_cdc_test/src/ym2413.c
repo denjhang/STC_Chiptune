@@ -477,8 +477,7 @@ static s16 ym_render_fm(u8 ch) {
     YM_OP *mod = &ym_ch[ch].mod;
     YM_OP *car = &ym_ch[ch].car;
     u8 idx;
-    s8 wave_val;
-    s16 ch_out;
+    s8 wave_val, ch_out;
 
     if (!mod->step) return 0;
 
@@ -488,12 +487,8 @@ static s16 ym_render_fm(u8 ch) {
     idx += (u8)mod->fb_val;
     wave_val = mod->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    /* 预乘 level×tl, 减少乘法次数: wave × (level+1) × (tl+1) >> 10 */
-    {
-        u16 gain = (u16)((mod->level + 1) * (mod->tl + 1));  /* u8×u8 = u16 */
-        ch_out = ((s16)wave_val * (s16)gain) >> 10;
-    }
-    if (mod->fb > 0) mod->fb_val = (s8)(ch_out >> mod->fb);
+    ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
+    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
     else mod->fb_val = 0;
 
     /* OP2 (carrier) */
@@ -502,37 +497,44 @@ static s16 ym_render_fm(u8 ch) {
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-    {
-        u16 gain = (u16)((car->level + 1) * (car->tl + 1));
-        ch_out = ((s16)wave_val * (s16)gain) >> 10;
-    }
+    ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
     return ch_out;
 }
 
-/* ===== FM 渲染 (极简核心) ===== */
+/* ===== FM 渲染 (极简核心 + rhythm mode 鼓声) ===== */
 s16 ym2413_render(void) {
-    u8 ch;
+    u8 ch, r14, idx, is_drum;
     s16 total = 0;
+    s16 drum_out;
+    s8 wave_val, hh, cym;
+    YM_OP *car, *mod;
 
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
+    /* 噪声推进 (鼓声用) */
+    if (ym_rhythm_mode) ym_update_noise();
+
+    r14 = ym_reg[0x0E];
+
     for (ch = 0; ch < 9; ch++) {
-        /* 跳过无声通道: 没 key_on 且包络结束 */
-        if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
-        /* 跳过没频率的通道 */
+        is_drum = (ym_rhythm_mode && ch >= 6);
+
+        /* 跳过无声通道: 没频率 或 没 key_on 且包络结束 */
         if (ym_ch[ch].mod.step == 0) continue;
-        /* release 结束 */
-        if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
-            ym_ch[ch].car.env_state = 0;
-            continue;
-        }
+        if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
         }
 
-        total += ym_render_fm(ch);
+        if (is_drum) {
+            /* 鼓声暂未实现 (rhythm mode ch6/7/8 跳过) */
+            continue;
+        } else {
+            /* 标准旋律通道 */
+            total += ym_render_fm(ch);
+        }
     }
 
     total <<= 1;
