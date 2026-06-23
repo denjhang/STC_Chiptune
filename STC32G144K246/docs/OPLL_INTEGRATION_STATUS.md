@@ -1,4 +1,4 @@
-# YM2413 (OPLL) FM 合成芯片集成进度 (2026-06-23)
+# YM2413 (OPLL) FM 合成芯片集成进度 (2026-06-24 更新)
 
 Yamaha YM2413 (OPLL) 是第八个集成进 STC32G144K 固件的音源芯片
 (继 AY8910/SN76489/SCC/NES APU/GB DMG/NES FDS 之后).
@@ -54,16 +54,31 @@ render: pos += step; idx = (pos >> 16) & 0x3F
 
 **实测音高高一个八度**: blk 减 1 修正 (频率 ÷2). 不能动 step (会导致节奏错乱).
 
-### 3.2 ADSR 行为对齐 YM2413
+### 3.2 ADSR 行为对齐 YM2413 (2026-06-24 修正)
 
+**EG 语义** (对齐 emu2413 get_parameter_rate, 之前版本写反了):
 | 行为 | YM2413 规格 | 极简实现 |
 |------|------------|----------|
-| Sustain (EG=0) | 保持 SL | step=0 → env_tick 立即返回 |
-| Sustain (EG=1) | 继续降到 0 | step=rel → 继续减 level |
-| Release (sus=1) | 固定速率 5 | env_step=ym_env_cnt[5] |
+| Sustain (**EG=1**) | **保持 SL** (sustaining) | step=0 → env_tick 不降 |
+| Sustain (**EG=0**) | **继续降到 0** (non-sustaining) | step=rel → 继续减 level |
+| Release (sus=1) | 固定速率 5 | env_step=ym_rr_tab[5] |
 | Release (sus=0) | 速率 RR | env_step=rel |
 | Attack (AR=0) | 不启动 | env_state=0 |
-| Attack (AR=15) | 跳到 decay | level=31, state=2 |
+| Attack (AR≥7) | 瞬间到顶 | atk≤2 → level=31 直接 decay |
+
+**AR/DR/RR 三张表** (commit 93f7cb6, 替换旧 ym_env_cnt 单表):
+- `ym_ar_tab[16]` = `[0,116,58,29,14,7,4,2,1,1,1,1,1,1,1,1]`
+- `ym_dr_tab[16]` = `[0,255,255,175,88,44,22,11,6,3,1,1,1,1,1,1]`
+- `ym_rr_tab[16]` = `[0,255,255,255,170,85,42,21,11,5,3,1,1,1,1,1]`
+- 反推自 emu2413 attack/decay/release 全程时间 (round-robin 16采样/tick)
+
+**env_tick 加法计数器** (commit 1f45584):
+- 旧: `cnt >= step ? cnt -= step : cnt=250+走包络` (减法, reset 250 有累积误差)
+- 新: `cnt < step ? cnt++ : cnt=0+走包络` (加法, step 真正代表周期)
+
+**key_on env_cnt=0** (commit 1f45584): 消除 attack 启动延迟 (旧值 250 导致延迟 4000 采样).
+
+**car.tl 映射** (commit 93bc777): `tl = vol>>1` (之前 `31-vol>>1` 写反, 导致最大音量时输出极小).
 
 **sus_flag 只影响 carrier** (对齐 emu2413 set_sus_flag line 672:
 modulator 的 type&1==0, sus_flag 永远不设).
@@ -119,15 +134,27 @@ step 公式正确, 但整体高一个八度.
 对照 YM2413 规格书 + emu2413 源码, 修复 6 个 ADSR 行为差异
 (EG type / sus_flag / AR=0,15 / release 速率).
 
-## 5. 当前状态
+## 5. 当前状态 (2026-06-24, commit 93bc777, 实测最佳)
 
 - ✅ 寄存器完整兼容 YM2413
 - ✅ 音高完全正确 (blk-1 修正)
-- ✅ 音色大体接近 (15 个内置乐器)
-- ✅ ADSR 行为对齐 (EG type / sus_flag / AR 特殊值)
-- ✅ WS 波形选择 (sin / abssin)
+- ✅ 音色接近 (15 个内置乐器, 实机听感最接近 emu2413)
+- ✅ ADSR 行为对齐 (EG 语义修正: EG=1 保持 / EG=0 继续降)
+- ✅ 音量正常 (car.tl 映射修正, 最大音量满输出)
+- ✅ attack 响应接近弹奏乐器 (AR≥7 瞬间到顶)
+- ✅ WS 波形选择 (sin / halfsin)
 - ⚠️ **鼓声未实现** (rhythm mode ch6/7/8 跳过)
-- ⚠️ 包络精度有偏差 (极简查表 vs YM2413 dB 域)
+- ⚠️ EG=0 音色 sustain 下降斜率比 emu 稍快 (可继续微调 DR 表)
+
+### PC 验证工具
+- `tools/ym2413_wav_gen.py`: 忠实 emu2413 移植 (render_emu2413) + V3 s8 调参核心
+- `tools/fw_real_sim.py`: **严格 1:1 下位机 PC 仿真** (render_fw_real), 改下位机前必须在此验证
+
+### 正确流程 (必须遵守)
+1. 先在 PC 仿真验证 (fw_real_sim.py), 对照 emu2413 逐个乐器看 level 曲线
+2. fw_real_sim.py 必须和下位机 1:1 同步
+3. 只改数值/表, 不改架构 (round-robin/env_tick 逻辑/输出公式/波形/相位/ml/结构体)
+4. PC 验证通过再改下位机, 编译通过再烧录
 
 ## 6. 被证伪的假设
 
@@ -146,12 +173,27 @@ step 公式正确, 但整体高一个八度.
 3. **寄存器兼容是底线**. FM 核心可以极简, 但寄存器解析必须 100% 兼容,
    否则 VGM 文件无法正确播放.
 
+4. **PC 仿真必须和下位机 1:1 同步** (2026-06-24 教训).
+   早期 fw_real_sim.py 没同步下位机的 env_tick/key_on/EG 逻辑, 导致 PC 验证
+   结果不可信, 反复试错浪费大量时间. 改下位机任何东西, 仿真必须同步改.
+
+5. **"只改表"包括数值 bug** (2026-06-24 教训). EG 语义写反、car.tl 映射写反、
+   env_cnt 初始值荒谬, 这些都是"改数值"能修的, 不要因为"只改表"就不碰.
+   但 round-robin/env_tick 逻辑/输出公式/波形/相位 这些是架构, 不能动.
+
+6. **不要在 PC 上用 emu 精度假装验证下位机** (2026-06-24 教训).
+   之前的 render_fm_v3/render_fm_v3_fw 偷用了 emu 的 ±127 波形/19-bit 相位/
+   LEVEL_GAIN 查表/LFO, 生成的 WAV 和 emu 当然几乎相同, 但对下位机毫无意义.
+   真正的验证必须用 render_fw_real (忠实下位机限制).
+
 ## 8. 关键文件
 
 | 文件 | 作用 |
 |------|------|
 | `src/ym2413.h` | 接口 |
-| `src/ym2413.c` | 极简 FM 核心 + 寄存器解析 |
+| `src/ym2413.c` | 极简 FM 核心 + 寄存器解析 (s8 核心, AR/DR/RR 三表) |
+| `tools/ym2413_wav_gen.py` | PC: 忠实 emu2413 移植 + V3 s8 调参核心 |
+| `tools/fw_real_sim.py` | PC: **严格 1:1 下位机仿真**, 改下位机前必须在此验证 |
 | `vgm/opll/opldrv/` | naruto 的 YM2413 测试曲 (Patch Slide Test) |
 | `vgm/opll/msxfan/` | MSX Fan 杂志 YM2413 音乐 |
 | `STC32G12K128/fm.c` | 极简 FM 参考实现 (ArduinoUnoTinyFmKeyboard 移植) |
