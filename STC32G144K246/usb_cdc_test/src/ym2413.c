@@ -519,45 +519,8 @@ s16 ym2413_render(void) {
         }
 
         if (is_drum) {
-            if (ch == 6) {
-                /* BD: 标准 FM */
-                total += ym_render_fm(ch);
-            } else if (ch == 7) {
-                /* ch7: HH (mod) + SD (car) */
-                car = &ym_ch[ch].car;
-                if (r14 & 0x01) {   /* HH */
-                    hh = ym_noise_val ? 20 : -20;
-                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(&ym_ch[ch].mod);
-                    drum_out = (s8)(((s16)hh * (s16)(ym_ch[ch].mod.level + 1)) >> 5);
-                    total += drum_out;
-                }
-                if (r14 & 0x08) {   /* SD */
-                    car->pos += car->step;
-                    idx = (u8)(car->pos >> 16) & 0x3F;
-                    if (ym_noise_val) idx ^= 0x20;
-                    wave_val = car->wave[idx];
-                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-                    drum_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
-                    total += drum_out;
-                }
-            } else { /* ch8: TOM (mod) + CYM (car) */
-                mod = &ym_ch[ch].mod;
-                car = &ym_ch[ch].car;
-                if (r14 & 0x04) {   /* TOM */
-                    mod->pos += mod->step;
-                    idx = (u8)(mod->pos >> 16) & 0x3F;
-                    wave_val = mod->wave[idx];
-                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-                    drum_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
-                    total += drum_out;
-                }
-                if (r14 & 0x02) {   /* CYM */
-                    cym = ym_noise_val ? 15 : -15;
-                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-                    drum_out = (s8)(((s16)cym * (s16)(car->level + 1)) >> 5);
-                    total += drum_out;
-                }
-            }
+            /* 鼓声暂未实现 (rhythm mode ch6/7/8 跳过) */
+            continue;
         } else {
             /* 标准旋律通道 */
             total += ym_render_fm(ch);
