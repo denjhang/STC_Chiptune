@@ -576,6 +576,13 @@ s16 ym2413_render(void) {
     for (ch = 0; ch < YM_TOTAL_CHANNELS; ch++) {
         /* 跳过静音通道 */
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
+        /* 鼓声 (ch>=9) 衰减完后自动 key_off (省 CPU) */
+        if (ch >= DRUM_BD && ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
+            ym_ch[ch].key_on = 0;
+            ym_ch[ch].car.env_state = 0;
+            ym_ch[ch].mod.env_state = 0;
+            continue;
+        }
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
