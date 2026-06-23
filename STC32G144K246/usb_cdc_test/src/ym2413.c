@@ -165,9 +165,8 @@ typedef struct {
     u32 pos;
 } YM_DRUM;
 
-static YM_DRUM xdata ym_drum[4];  /* 0=BD 1=TOM 2=HH 3=CYM */
+static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
 static void ym_drum_trigger(u8 idx);  /* 前向声明 */
-static void ym_sd_trigger(void);      /* 前向声明 */
 
 /* base step 常数: step_q16 = fnum × (1<<blk) × C
  * YM2413 内部 PG_WIDTH=1024 (10-bit 相位), clock/72 采样率.
@@ -315,7 +314,7 @@ static void ym_update_keys(void) {
         u8 new_bits = drum_bits & ~ym_prev_drum_bits;  /* 只触发 0→1 的 bit */
         ym_prev_drum_bits = drum_bits;
         if (new_bits & 0x10) ym_drum_trigger(0);  /* BD */
-        if (new_bits & 0x08) ym_sd_trigger();     /* SD (2-op ch6) */
+        if (new_bits & 0x08) ym_drum_trigger(4);  /* SD */
         if (new_bits & 0x04) ym_drum_trigger(1);  /* TOM */
         if (new_bits & 0x01) ym_drum_trigger(2);  /* HH */
         if (new_bits & 0x02) ym_drum_trigger(3);  /* CYM */
@@ -399,7 +398,8 @@ void ym2413_init(void) {
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
-    for (i = 0; i < 4; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x1293;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
+    for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
 void ym2413_wr(u8 reg, u8 val) {
@@ -519,7 +519,7 @@ static void ym_update_noise(void) {
 }
 
 /* ===== 鼓声简化渲染 (单 op: 查表×level, 无 FM 调制) ===== */
-/* BD=0 TOM=1 HH=2 CYM=3 oneshot, SD=ch6 走 2-op FM */
+/* BD=0 TOM=1 HH=2 CYM=3 SD=4 oneshot 单 op */
 static void ym_drum_trigger(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
     d->active = 1;
@@ -527,54 +527,9 @@ static void ym_drum_trigger(u8 idx) {
     d->env_cnt = 0;
 }
 
-/* SD 简化 2-op: mod=noise 调制 car=sin, 各自 oneshot 包络 */
-/* 不走 ym_render_fm, 独立精简路径 */
-static u8 data sd_mod_level;
-static u8 data sd_mod_cnt;
-static u8 data sd_car_level;
-static u8 data sd_car_cnt;
-static u32 data sd_mod_pos;
-static u32 data sd_car_pos;
-static u8 data sd_mod_envstep = 7;   /* noise 快衰减 */
-static u8 data sd_car_envstep = 14;  /* sine 慢衰减 */
-#define SD_MOD_STEP  0x1293   /* noise 25Hz @22050 */
-#define SD_CAR_STEP  0xB254   /* sin 240Hz @22050 */
-
-static void ym_sd_trigger(void) {
-    sd_mod_level = 31; sd_mod_cnt = 0;
-    sd_car_level = 31; sd_car_cnt = 0;
-    sd_mod_pos = 0; sd_car_pos = 0;
-}
-
-static s16 ym_render_sd(void) {
-    s8 mod_wv, car_wv;
-    s16 mod_out, car_out;
-    if (sd_car_level == 0) return 0;  /* 结束 */
-
-    /* mod 包络 (每采样 tick) */
-    if (sd_mod_envstep > 0) {
-        if (sd_mod_cnt < sd_mod_envstep) sd_mod_cnt++;
-        else { sd_mod_cnt = 0; if (sd_mod_level > 0) sd_mod_level--; }
-    }
-    /* car 包络 */
-    if (sd_car_envstep > 0) {
-        if (sd_car_cnt < sd_car_envstep) sd_car_cnt++;
-        else { sd_car_cnt = 0; if (sd_car_level > 0) sd_car_level--; }
-    }
-
-    /* mod: noise 查表 */
-    sd_mod_pos += SD_MOD_STEP;
-    mod_wv = ym_noise[(u8)(sd_mod_pos >> 16) & 0x3F];
-    mod_out = ((s16)mod_wv * (s16)((sd_mod_level + 1) * 4)) >> 6;
-    if (mod_out > 31) mod_out = 31; if (mod_out < -31) mod_out = -31;
-
-    /* car: sin + mod 调制相位 */
-    sd_car_pos += SD_CAR_STEP;
-    car_wv = ym_sin[((u8)(sd_car_pos >> 16) + (u8)mod_out) & 0x3F];
-    car_out = ((s16)car_wv * (s16)((sd_car_level + 1) * 8)) >> 6;
-    if (car_out > 127) car_out = 127; if (car_out < -128) car_out = -128;
-    return car_out;
-}
+/* SD 真 2-op 已废弃: 真 2-op (ch6 ym_render_fm) 听感最好但卡 ISR */
+/* 简化 2-op 听感不如真 2-op, 暂用单 op noise */
+/* 未来优化 ISR 后可恢复真 2-op SD */
 
 static s16 ym_render_drum(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
@@ -674,7 +629,7 @@ s16 ym2413_render(void) {
         total += ym_render_drum(1);  /* TOM */
         total += ym_render_drum(2);  /* HH */
         total += ym_render_drum(3);  /* CYM */
-        total += ym_render_sd();     /* SD (简化 2-op) */
+        total += ym_render_drum(4);  /* SD */
     }
 
     total <<= 1;

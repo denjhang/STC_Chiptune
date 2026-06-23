@@ -111,7 +111,7 @@ oneshot: 边沿触发 (reg 0x0E bit 0→1), 每采样 tick 包络, 衰减完自�
 |------|------|------|----------|---------|------|
 | BD | sin | 100Hz | 16 | ~10ms | ⚠️ 音量/长度待调 |
 | TOM | sin | 214Hz (ml=5) | 16 | ~10ms | ⚠️ 待调 |
-| SD | noise | 25Hz | 32 | ~20ms | ⚠️ 待调 |
+| SD | noise | 25Hz | 28 | ~20ms | ⚠️ 单op (真2op听感好但卡ISR) |
 | HH | noise | 755Hz | 46 | ~29ms | ✅ 正常 |
 | CYM | noise | 755Hz | 255 | ~150ms | ✅ 正常 |
 
@@ -120,6 +120,13 @@ oneshot: 边沿触发 (reg 0x0E bit 0→1), 每采样 tick 包络, 衰减完自�
 - 渲染: `ym_render_drum(idx)`, 单 op 查表×level, 无 FM 调制
 - 旋律只渲染 ch0-5 (6通道), 为鼓声腾 ISR 余量
 - PC 工具: `tools/drum_fw_sim.py`
+
+**SD 真 2-op 记录** (commit 65ceab9, 已废弃但听感最佳):
+- SD 走 ch6 的 ym_render_fm (真 2-op FM): mod=noise(25Hz,FB=2) 调制 car=sin(240Hz)
+- 双包络: noise 快衰减先消失, sine 慢尾巴 (对齐 PC sd_fm_swap_n50)
+- **听感非常好**, 但 rhythm mode 时相当于 7 通道 (6旋律+SD), ISR 偶尔卡死
+- 简化 2-op (data区独立变量) 听感不如真 2-op
+- 未来优化 ISR 性能后可恢复真 2-op SD
 
 ### 3.6 资源占用
 
