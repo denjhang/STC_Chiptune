@@ -234,21 +234,22 @@ static void ym_key_on(u8 ch) {
     mod->pos = 0; car->pos = 0;
     mod->fb_val = 0;
     /* AR=0 → 不启动 (保持 mute) */
-    /* AR=15 (atk=env_cnt[15]=255, 最快) → 跳过 attack, 直接到 sustain level */
+    /* AR=15 (atk 最大) → 跳过 attack, 直接到 decay */
+    /* env_cnt=0: 立即开始 attack 计时 (对齐 emu2413, 无初始延迟) */
     mod->level = 0; car->level = 0;
     if (mod->atk >= 255) {
         mod->level = 31; mod->env_state = 2; mod->env_step = mod->decy;
     } else if (mod->atk == 0) {
         mod->env_state = 0; mod->level = 0;
     } else {
-        mod->env_state = 1; mod->env_cnt = 250; mod->env_step = mod->atk;
+        mod->env_state = 1; mod->env_cnt = 0; mod->env_step = mod->atk;
     }
     if (car->atk >= 255) {
         car->level = 31; car->env_state = 2; car->env_step = car->decy;
     } else if (car->atk == 0) {
         car->env_state = 0; car->level = 0;
     } else {
-        car->env_state = 1; car->env_cnt = 250; car->env_step = car->atk;
+        car->env_state = 1; car->env_cnt = 0; car->env_step = car->atk;
     }
 }
 
@@ -290,8 +291,9 @@ static void ym_update_keys(void) {
 static void ym_env_tick(YM_OP *op) {
     u8 cnt = op->env_cnt;
     u8 step = op->env_step;
-    if (cnt >= step) { op->env_cnt = cnt - step; return; }
-    op->env_cnt = 250;
+    if (step == 0) return;   /* step=0: 永远保持 (sustain EG=0) */
+    if (cnt < step) { op->env_cnt = cnt + 1; return; }
+    op->env_cnt = 0;
     switch (op->env_state) {
     case 1: /* attack: level 0→31 */
         if (op->level < 31) op->level++;
