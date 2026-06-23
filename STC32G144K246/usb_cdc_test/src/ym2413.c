@@ -396,8 +396,8 @@ void ym2413_init(void) {
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
     ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x4A4D;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 8; /* BD */
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x230FE; ym_drum[2].env_step = 33;  ym_drum[2].vol = 2; /* HH */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x230FE; ym_drum[3].env_step = 180; ym_drum[3].vol = 2; /* CYM */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x230FE; ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x230FE; ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
     ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x1293;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
