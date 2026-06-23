@@ -233,21 +233,20 @@ static void ym_key_on(u8 ch) {
     ym_ch[ch].key_on = 1;
     mod->pos = 0; car->pos = 0;
     mod->fb_val = 0;
-    /* AR=0 → 不启动 (保持 mute) */
-    /* AR=15 (atk 最大) → 跳过 attack, 直接到 decay */
-    /* env_cnt=0: 立即开始 attack 计时 (对齐 emu2413, 无初始延迟) */
+    /* AR 值 (查表后) 含义: 0=不启动, 1~2=瞬间到顶(AR>=7), 3~255=线性 attack */
+    /* env_cnt=0: 立即开始计時 */
     mod->level = 0; car->level = 0;
-    if (mod->atk >= 255) {
-        mod->level = 31; mod->env_state = 2; mod->env_step = mod->decy;
-    } else if (mod->atk == 0) {
+    if (mod->atk == 0) {
         mod->env_state = 0; mod->level = 0;
+    } else if (mod->atk <= 2) {
+        mod->level = 31; mod->env_state = 2; mod->env_step = mod->decy;
     } else {
         mod->env_state = 1; mod->env_cnt = 0; mod->env_step = mod->atk;
     }
-    if (car->atk >= 255) {
-        car->level = 31; car->env_state = 2; car->env_step = car->decy;
-    } else if (car->atk == 0) {
+    if (car->atk == 0) {
         car->env_state = 0; car->level = 0;
+    } else if (car->atk <= 2) {
+        car->level = 31; car->env_state = 2; car->env_step = car->decy;
     } else {
         car->env_state = 1; car->env_cnt = 0; car->env_step = car->atk;
     }
