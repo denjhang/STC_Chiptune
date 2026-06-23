@@ -107,7 +107,7 @@ void tm0_isr() interrupt 1
     if (sn_active) mix += sn_render();
     if (scc_active) mix += (s16)(scc_render() / 2);
     if (nes_active) mix += nes_render();
-    if (fds_active) mix += fds_render() / 4;   /* FDS 增益偏大, /4 控制音量 */
+    if (fds_active) mix += fds_render() / 8;   /* FDS 增益大, /8 避免饱和压低其他通道 */
     if (gb_active)  mix += gb_render();
 
     mix *= 8;
