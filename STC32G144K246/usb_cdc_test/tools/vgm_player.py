@@ -267,6 +267,11 @@ def parse_vgm_header(data):
     if ver >= 0x161 and len(data) > 0x83:
         gb_clock = struct.unpack_from('<I', data, 0x80)[0] & 0x7FFFFFFF
 
+    # YM2413 (OPLL) 时钟 (header 0x50, vgm 1.50+). 标准 3579545 Hz (MSX).
+    ym2413_clock = 0
+    if len(data) > 0x53:
+        ym2413_clock = struct.unpack_from('<I', data, 0x50)[0] & 0x7FFFFFFF
+
     # AY8910/YM2149 时钟 + chipFlags (对齐 libvgm _CHIPCLK_OFS + ayintf.h):
     #   v1.50: clock @0x40 (AY8910 是第 6 个芯片)
     #   v1.70: clock @0x74 (芯片列表重排, AY8910 索引 18)
@@ -338,6 +343,7 @@ def parse_vgm_header(data):
         'loop_offset': loop_off, 'loop_samples': loop_samples,
         'total_samples': total_samples, 'gd3': gd3,
         'sn_variant': sn_variant, 'nes_clock': nes_clock, 'gb_clock': gb_clock,
+        'ym2413_clock': ym2413_clock,
         'ay_clock': ay_clock, 'ay_chiptype': ay_chiptype, 'ay_chipflags': ay_chipflags,
         'ay_effective_clock': ay_effective_clock,
         'nes_dmc_blocks': nes_dmc_blocks,
@@ -561,13 +567,15 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     if stats['saa'] > 0:
         chips_used.append(('SAA1099', ''))
     if stats['ym'] > 0:
-        chips_used.append(('YM', ''))
+        ym_clk = hdr.get('ym2413_clock') or 0
+        if ym_clk == 0: ym_clk = 3579545   # 默认 NTSC
+        chips_used.append(('YM2413', f'{ym_clk} Hz'))
     for name, clk in chips_used:
         if clk:
             print(f"  ->{name} @{clk}")
         else:
             print(f"  ->{name}")
-    # 时钟下发 (NES + AY 共享 NES clock)
+    # 时钟下发 (NES + AY; YM2413 固定 3.579545MHz, 下位机 init 硬编码, 不需下发)
     if stats['nes'] > 0:
         ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
     if stats['ay'] > 0 and ay_eff > 0:
