@@ -512,36 +512,66 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     if vgm_author:  print(f"  Rip: {gbk(vgm_author)}")
     if comment:     print(f"  Comment: {gbk(comment)}")
     print(f"  Duration: {stats['duration']:.1f}s @44100Hz  (data {end - pos} bytes)")
-    print(f"  CMD: SCC:{stats['scc']} AY:{stats['ay']} SN:{stats['sn']} GB:{stats['gb']} NES:{stats['nes']} SAA:{stats['saa']} YM:{stats['ym']} Wait:{stats['wait']}")
     # SN76489 变体自动检测 (仅当有 SN 命令时)
     sn_var = hdr.get('sn_variant')
     sn_names = {0: 'SN76489(15bit)', 1: 'SegaVDP(16bit)', 2: 'SN76489A(17bit)'}
     if sn_var is not None and stats['sn'] > 0:
-        print(f"  SN variant: {sn_names.get(sn_var, '?')}")
         ser.write(bytes([0x52, sn_var]))
-    # NES APU 时钟下发 (仅当有 NES 命令时, 避免对纯 GB/AY 曲发无关 NES clock)
+    # 各芯片使用信息 (统一格式: ->CHIP @clock (region), 仅显示实际使用的芯片)
     nes_clk = hdr.get('nes_clock') or 0
-    if stats['nes'] > 0:
-        if nes_clk == 0: nes_clk = 1789773   # 无 header clock, 默认 NTSC
-        region = 'NTSC' if nes_clk > 1700000 else 'PAL'
-        print(f"  NES clock: {nes_clk} Hz ({region})")
-        ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
-    # AY8910/YM2149 时钟下发 (仅当有 AY 命令时).
-    # chipFlags bit0=1 (YM2149 /2 分频器) 时实际 clock 减半, 下发 effective_clock.
-    # Gimmick: YM2149 clock=1789773 + chipFlags=0x11 (bit0=1) → 下发 894886 (低八度).
+    nes_region = 'NTSC' if nes_clk > 1700000 or nes_clk == 0 else 'PAL'
+    if nes_clk == 0: nes_clk = 1789773   # 无 header clock, 默认 NTSC
     ay_raw = hdr.get('ay_clock') or 0
     ay_eff = hdr.get('ay_effective_clock') or 0
     ay_cf = hdr.get('ay_chipflags') or 0
     ay_ct = hdr.get('ay_chiptype') or 0
-    if stats['ay'] > 0 and ay_eff > 0:
-        chiptype_name = {0x00:'AY-3-8910', 0x10:'YM2149'}.get(ay_ct, f'AY-type({ay_ct:#x})')
-        div_note = ' /2 divider' if (ay_cf & 0x10) else ''
-        print(f"  {chiptype_name} clock: {ay_raw} Hz{div_note} → effective {ay_eff} Hz")
-        ser.write(bytes([0xB7]) + struct.pack('<I', ay_eff))
-    # GB DMG 时钟显示 (仅当有 GB 命令时; GB clock 固定不下发, 固件硬编码 4194304)
     gb_clk = hdr.get('gb_clock') or 0
+    # FDS 检测: 扫前 300 字节看有没有 reg >= 0x20 的 0xB4 命令 (FDS 寄存器)
+    fds_detected = False
+    sp = hdr['data_offset']; se = min(hdr['eof'], len(data))
+    while sp < se and sp < hdr['data_offset'] + 300:
+        b = data[sp]
+        if b == 0x66: break
+        elif b == 0xB4:
+            r = data[sp+1] & 0x7F
+            if r >= 0x20: fds_detected = True; break
+            sp += 3
+        elif b == 0x67:
+            sz2 = struct.unpack_from('<I', data, sp+3)[0] & 0x7FFFFFFF; sp += 7 + sz2
+        elif b == 0x61: sp += 3
+        elif b in (0x62, 0x63): sp += 1
+        elif 0x70 <= b <= 0x8F: sp += 1
+        else: sp += VGM_CMD_LEN[b] if VGM_CMD_LEN[b] else 1
+    chips_used = []   # [(name, clock_str)]
+    if stats['scc'] > 0:
+        chips_used.append(('SCC', '1789773 Hz'))   # SCC 时钟和 NES 同 (MSX 上从 Z80 bus)
+    if stats['ay'] > 0 and ay_eff > 0:
+        ct_name = {0x00:'AY-3-8910', 0x10:'YM2149'}.get(ay_ct, f'AY-type({ay_ct:#x})')
+        div_note = ' /2' if (ay_cf & 0x10) else ''
+        chips_used.append((ct_name, f'{ay_raw} Hz{div_note} (eff {ay_eff})'))
+    if stats['sn'] > 0:
+        chips_used.append(('SN76489', f'{sn_names.get(sn_var,"?")}', ))
+    if stats['nes'] > 0:
+        nes_name = 'NES+FDS' if fds_detected else 'NES'
+        chips_used.append((nes_name, f'{nes_clk} Hz ({nes_region})'))
+    elif fds_detected:
+        chips_used.append(('FDS', f'{nes_clk} Hz ({nes_region})'))
     if stats['gb'] > 0 and gb_clk:
-        print(f"  GB clock: {gb_clk} Hz (DMG)")
+        chips_used.append(('GB', f'{gb_clk} Hz (DMG)'))
+    if stats['saa'] > 0:
+        chips_used.append(('SAA1099', ''))
+    if stats['ym'] > 0:
+        chips_used.append(('YM', ''))
+    for name, clk in chips_used:
+        if clk:
+            print(f"  ->{name} @{clk}")
+        else:
+            print(f"  ->{name}")
+    # 时钟下发 (NES + AY 共享 NES clock)
+    if stats['nes'] > 0:
+        ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
+    if stats['ay'] > 0 and ay_eff > 0:
+        ser.write(bytes([0xB7]) + struct.pack('<I', ay_eff))
     # NES DMC 采样: 按总大小自动选模式 (MCU nes_dmc_buf = 16KB).
     #   ≤ 16KB → 预存 (开播前一次性发完, 不占 samples_budget, 节拍稳)
     #   > 16KB → 流式 (主循环遇 0x67 0xC2 实时下发, 否则 16KB 装不下, 如 Gimmick 132KB)
