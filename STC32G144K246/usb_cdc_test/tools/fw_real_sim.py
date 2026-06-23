@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""render_fw_real: 严格 1:1 忠实下位机 da1cf8a 的 PC 仿真.
+所有限制完全照搬, 不偷用 emu 精度.
+用于看下位机真实输出 vs emu2413 的偏差."""
+import sys, math, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ym2413_wav_gen import (DEFAULT_INST, NAMES, dump_to_patch, INTERNAL_RATE,
+                            TLL_TABLE, ml_table, EG_MUTE, render_emu2413, save_wav)
+
+# ============================================================
+# 下位机真实表 (1:1 照搬 da1cf8a ym2413.c)
+# ============================================================
+# 64 点 s8 波形, 振幅 ±31 (不是 ±127!)
+FW_SIN = [
+     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
+    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
+     0, -3, -6, -9,-12,-15,-17,-20,-22,-24,-26,-28,-29,-30,-31,-31,
+   -31,-31,-31,-30,-29,-28,-26,-24,-22,-20,-17,-15,-12, -9, -6, -3
+]
+# halfsin: 负半周镜像 (取绝对值, 不是 emu 的静音!)
+FW_HALFSIN = [
+     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
+    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
+     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
+    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
+]
+# env_cnt: 下位机 ADSR 速度 (值越大越慢)
+FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
+# ml_table: 下位机自己的 (和 emu 不同!)
+FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
+# step 常数 (16.16 定点, blk-1 修正)
+FW_STEP_CONST = 3579545.0 * 64.0 * 65536.0 / (72.0 * 262144.0 * 22050.0)
+
+def fw_decode(dump):
+    """1:1 照搬 ym_decode_patch (注意: 不解码 KR/AM/PM/KL, 下位机没用)"""
+    return {
+        'mod_ml': dump[0] & 0x0F, 'mod_eg': (dump[0] >> 5) & 1,
+        'car_ml': dump[1] & 0x0F, 'car_eg': (dump[1] >> 5) & 1,
+        'mod_tl': dump[2] & 0x3F, 'mod_fb': dump[3] & 0x07,
+        'mod_ws': (dump[3] >> 3) & 1, 'car_ws': (dump[3] >> 4) & 1,
+        'mod_ar': (dump[4] >> 4) & 0x0F, 'mod_dr': dump[4] & 0x0F,
+        'car_ar': (dump[5] >> 4) & 0x0F, 'car_dr': dump[5] & 0x0F,
+        'mod_sl': (dump[6] >> 4) & 0x0F, 'mod_rr': dump[6] & 0x0F,
+        'car_sl': (dump[7] >> 4) & 0x0F, 'car_rr': dump[7] & 0x0F,
+    }
+
+def fw_apply_patch(p):
+    """1:1 照搬 ym_apply_patch. 返回 (mod_op, car_op) 字典"""
+    def make_op(ml_val, tl_raw, fb, eg, ws, ar, dr, sl, rr):
+        return {
+            'ml': FW_ML_TABLE[ml_val],
+            'tl': max(0, min(31, 31 - (tl_raw >> 1))),  # mod_tl: 31 - tl/2
+            'fb': fb, 'eg_type': eg,
+            'wave': FW_HALFSIN if ws else FW_SIN,
+            'atk': FW_ENV_CNT[ar], 'decy': FW_ENV_CNT[dr],
+            'sul': 0 if sl >= 15 else (31 - sl * 2),
+            'rel': FW_ENV_CNT[rr],
+            # 运行时状态
+            'pos': 0, 'step': 0, 'fb_val': 0,
+            'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
+            'sus_flag': 0,
+        }
+    mod = make_op(p['mod_ml'], p['mod_tl'], p['mod_fb'], p['mod_eg'], p['mod_ws'],
+                  p['mod_ar'], p['mod_dr'], p['mod_sl'], p['mod_rr'])
+    car = make_op(p['car_ml'], 0, 0, p['car_eg'], p['car_ws'],
+                  p['car_ar'], p['car_dr'], p['car_sl'], p['car_rr'])
+    return mod, car
+
+def fw_calc_step(fnum, blk, ml):
+    """1:1 照搬 ym_calc_step (float 算一次, 16.16 定点)"""
+    base = fnum * (1 << blk) * FW_STEP_CONST
+    return int(base * ml / 2.0)
+
+def fw_key_on(mod, car):
+    """1:1 照搬 ym_key_on"""
+    mod['pos'] = 0; car['pos'] = 0
+    mod['fb_val'] = 0
+    for op in (mod, car):
+        op['level'] = 0
+        if op['atk'] >= 255:
+            op['level'] = 31; op['env_state'] = 2; op['env_step'] = op['decy']
+        elif op['atk'] == 0:
+            op['env_state'] = 0; op['level'] = 0
+        else:
+            op['env_state'] = 1; op['env_cnt'] = 250; op['env_step'] = op['atk']
+
+def fw_key_off(mod, car):
+    """1:1 照搬 ym_key_off"""
+    mod['env_state'] = 4; car['env_state'] = 4
+    mod['env_step'] = FW_ENV_CNT[5] if mod['sus_flag'] else mod['rel']
+    car['env_step'] = FW_ENV_CNT[5] if car['sus_flag'] else car['rel']
+
+def fw_env_tick(op):
+    """1:1 照搬 ym_env_tick (线性 level 0~31)"""
+    cnt = op['env_cnt']
+    step = op['env_step']
+    if cnt >= step:
+        op['env_cnt'] = cnt - step
+        return
+    op['env_cnt'] = 250
+    st = op['env_state']
+    if st == 1:  # attack
+        if op['level'] < 31: op['level'] += 1
+        if op['level'] >= 31:
+            op['env_state'] = 2; op['env_step'] = op['decy']
+    elif st == 2:  # decay
+        if op['level'] > op['sul']:
+            op['level'] -= 1
+        else:
+            op['env_state'] = 3
+            op['env_step'] = op['rel'] if op['eg_type'] else 0
+    elif st == 3:  # sustain
+        if op['eg_type']:
+            if op['level'] > 0: op['level'] -= 1
+    elif st == 4:  # release
+        if op['level'] > 0: op['level'] -= 1
+
+def fw_render_fm(mod, car, wait_tick, ch):
+    """1:1 照搬 ym_render_fm. 返回 s16 输出"""
+    if mod['step'] == 0:
+        return 0
+    # OP1 (modulator)
+    mod['pos'] = (mod['pos'] + mod['step']) & 0xFFFFFFFF
+    idx = (mod['pos'] >> 16) & 0x3F
+    idx = (idx + (mod['fb_val'] & 0xFF)) & 0x3F
+    wave_val = mod['wave'][idx]
+    if wait_tick == (ch & 0x0F):
+        fw_env_tick(mod)
+    # 输出公式: (wave × (level+1) × (tl+1)) >> 10, 结果 s8
+    ch_out = ((wave_val * (mod['level'] + 1) * (mod['tl'] + 1)) >> 10)
+    # s8 截断
+    if ch_out > 127: ch_out = 127
+    elif ch_out < -128: ch_out = -128
+    if mod['fb'] > 0:
+        fb_val = ch_out >> mod['fb']
+        if fb_val > 127: fb_val = 127
+        elif fb_val < -128: fb_val = -128
+        mod['fb_val'] = fb_val
+    else:
+        mod['fb_val'] = 0
+
+    # OP2 (carrier)
+    car['pos'] = (car['pos'] + car['step']) & 0xFFFFFFFF
+    idx = (car['pos'] >> 16) & 0x3F
+    idx = (idx + (ch_out & 0xFF)) & 0x3F
+    wave_val = car['wave'][idx]
+    if wait_tick == (ch & 0x0F):
+        fw_env_tick(car)
+    ch_out = ((wave_val * (car['level'] + 1) * (car['tl'] + 1)) >> 10)
+    if ch_out > 127: ch_out = 127
+    elif ch_out < -128: ch_out = -128
+    return ch_out
+
+def render_fw_real(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
+    """严格 1:1 下位机仿真. freq 用 440Hz (会被 freq_to_fnum_blk 转成 fnum/blk).
+    下位机实际从 VGM 寄存器读 fnum/blk, 这里模拟同样行为."""
+    p = fw_decode(DEFAULT_INST[inst_idx])
+    mod, car = fw_apply_patch(p)
+
+    # 算 fnum/blk (用 PC 的 freq_to_fnum_blk, 和下位机 VGM 解析一致)
+    from ym2413_wav_gen import freq_to_fnum_blk
+    fnum, blk = freq_to_fnum_blk(freq)
+    # 下位机 blk-1 修正
+    if blk > 0: blk -= 1
+    mod['step'] = fw_calc_step(fnum, blk, mod['ml'])
+    car['step'] = fw_calc_step(fnum, blk, car['ml'])
+    # carrier tl 用 volume (下位机 vol = (15-reg_vol)<<2, tl = 31 - vol/2)
+    # 这里 volume=0 对应 reg_vol=15 (最小), vol=0, tl=31
+    car['tl'] = max(0, min(31, 31 - (volume >> 1)))
+
+    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
+    n_keyon = int(dur_keyon * INTERNAL_RATE)
+
+    fw_key_on(mod, car)
+
+    out = []
+    wait_cnt = 0
+    for s in range(n_total):
+        if s == n_keyon:
+            fw_key_off(mod, car)
+        wait_cnt = (wait_cnt + 1) & 0x0F
+        # 1:1 照搬 ym2413_render 主循环
+        total = 0
+        # 只渲染这一个通道 (模拟单通道)
+        # 跳过判断
+        if not (not True and car['env_state'] == 0):
+            if not (car['env_state'] == 4 and car['level'] == 0):
+                ch_out = fw_render_fm(mod, car, wait_cnt, 0)
+                total += ch_out
+            elif car['env_state'] == 4 and car['level'] == 0:
+                car['env_state'] = 0
+        total = total << 1  # total <<= 1
+        if total > 32767: total = 32767
+        elif total < -32768: total = -32768
+        out.append(total)
+    return out
+
+# ============================================================
+# 验证: 下位机真实仿真 vs emu2413
+# ============================================================
+def main():
+    FREQ = 440.0
+    DUR_KO = 0.3
+    DUR_KF = 0.3
+
+    print(f"{'='*72}")
+    print("下位机真实仿真 (render_fw_real) vs emu2413")
+    print(f"{'='*72}")
+    print(f"{'Inst':>3} {'Name':<14} {'emu_RMS':>9} {'fw_real':>9} {'diff_dB':>9}")
+    print('-' * 60)
+
+    for i in range(1, 16):
+        emu = render_emu2413(i, FREQ, DUR_KO, DUR_KF)
+        fw  = render_fw_real(i, FREQ, DUR_KO, DUR_KF)
+        n = len(emu)
+        def rms(s): return (sum(x*x for x in s)/len(s))**0.5 if s else 0
+        er, fr = rms(emu), rms(fw)
+        d = 20*math.log10(fr/er) if er > 0 and fr > 0 else -99
+        print(f"{i:>3} {NAMES[i]:<14} {er:>9.1f} {fr:>9.1f} {d:>+9.3f}")
+
+if __name__ == '__main__':
+    main()
