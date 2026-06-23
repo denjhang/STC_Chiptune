@@ -37,25 +37,18 @@ static const u8 code ym_env_cnt[16] = {
     0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255
 };
 
-/* ===== 音量 dB 曲线表 (对齐 emu2413 的 dB 域衰减) =====
+/* ===== level 增益查表 (替代线性 (level+1), 模拟 dB 曲线) =====
  * emu2413: eg_out 0(最响)-127(mute), 每 step ≈ 0.75dB
- * 映射: level 0(mute)-31(最响), 每 step ≈ 3dB
- * vol_table[level] = 1024 × 10^(-(31-level)×3/20) */
-static const u16 code ym_vol_table[32] = {
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 1, 1, 2, 2, 4,
-    5, 8, 11, 16, 22, 32, 45, 64,
-    91, 128, 182, 257, 363, 513, 724, 1024
-};
-
-/* ===== TL dB 曲线表 (对齐 emu2413 的 TL 衰减) =====
- * emu2413: TL 0(最响)-63(mute), 每 step ≈ 0.75dB
- * 映射: tl 0(最小声)-31(最大声) */
-static const u16 code ym_tl_table[32] = {
-    4, 5, 6, 8, 9, 11, 13, 16,
-    19, 22, 27, 32, 38, 45, 54, 64,
-    76, 91, 108, 128, 153, 182, 216, 257,
-    305, 363, 431, 513, 609, 724, 861, 1024
+ * 映射: level 0(mute)-31(最响), gain 按 dB 曲线 (不是线性)
+ * 输出公式不变: wave × gain[level] × (tl+1) >> 10
+ *   gain[31]=32 (最响, =原来的 level+1=32)
+ *   gain[0]=0 (mute)
+ *   中间按 10^(-(31-level)×0.75×4/20) × 32 曲线 */
+static const u8 code ym_level_gain[32] = {
+    0, 0, 0, 0, 0, 0, 0, 0,   /* level 0-7: 几乎无声 */
+    1, 1, 1, 2, 2, 3, 3, 4,   /* level 8-15: 很轻 */
+    5, 6, 8, 10, 12, 15, 18, 22, /* level 16-23: 中等 */
+    24, 26, 28, 30, 31, 31, 32, 32  /* level 24-31: 接近满幅 */
 };
 
 /* ===== ML 查表 (YM2413 multiple, ml=0 时 0.5) ===== */
@@ -490,29 +483,27 @@ static s16 ym_render_fm(u8 ch) {
     YM_OP *mod = &ym_ch[ch].mod;
     YM_OP *car = &ym_ch[ch].car;
     u8 idx;
-    s8 wave_val;
-    s16 ch_out;
+    s8 wave_val, ch_out;
 
     if (!mod->step) return 0;
 
-    /* OP1 (modulator): dB 域音量 = wave × vol_table[level] × tl_table[tl] */
+    /* OP1 (modulator) */
     mod->pos += mod->step;
     idx = (u8)(mod->pos >> 16) & 0x3F;
     idx += (u8)mod->fb_val;
     wave_val = mod->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    /* dB 对齐: wave(±31) × vol(0-1024) × tl(0-1024) >> 20 → ±31 */
-    ch_out = (s16)((s32)wave_val * ym_vol_table[mod->level & 31] * ym_tl_table[mod->tl & 31] >> 20);
-    if (mod->fb > 0) mod->fb_val = (s8)(ch_out >> mod->fb);
+    ch_out = (s8)(((s16)wave_val * (s16)ym_level_gain[mod->level & 31] * (s16)(mod->tl + 1)) >> 10);
+    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
     else mod->fb_val = 0;
 
-    /* OP2 (carrier): 同样 dB 域音量 */
+    /* OP2 (carrier) */
     car->pos += car->step;
     idx = (u8)(car->pos >> 16) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-    ch_out = (s16)((s32)wave_val * ym_vol_table[car->level & 31] * ym_tl_table[car->tl & 31] >> 20);
+    ch_out = (s8)(((s16)wave_val * (s16)ym_level_gain[car->level & 31] * (s16)(car->tl + 1)) >> 10);
     return ch_out;
 }
 
