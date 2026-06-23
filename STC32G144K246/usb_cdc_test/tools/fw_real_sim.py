@@ -24,8 +24,12 @@ FW_HALFSIN = [
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
 ]
-# env_cnt: 下位机 ADSR 速度 (值越大越慢)
+# env_cnt: 下位机旧 ADSR 速度表 (已废弃, 保留作参考)
 FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
+# AR/DR/RR 三张表 (和下位机 commit 93f7cb6 同步, 反推自 emu2413 速率)
+FW_AR_TAB = [0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1]
+FW_DR_TAB = [0, 255, 255, 175, 88, 44, 22, 11, 6, 3, 1, 1, 1, 1, 1, 1]
+FW_RR_TAB = [0, 255, 255, 255, 170, 85, 42, 21, 11, 5, 3, 1, 1, 1, 1, 1]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
 # step 常数 (16.16 定点, blk-1 修正)
@@ -52,9 +56,9 @@ def fw_apply_patch(p):
             'tl': max(0, min(31, 31 - (tl_raw >> 1))),  # mod_tl: 31 - tl/2
             'fb': fb, 'eg_type': eg,
             'wave': FW_HALFSIN if ws else FW_SIN,
-            'atk': FW_ENV_CNT[ar], 'decy': FW_ENV_CNT[dr],
+            'atk': FW_AR_TAB[ar], 'decy': FW_DR_TAB[dr],
             'sul': 0 if sl >= 15 else (31 - sl * 2),
-            'rel': FW_ENV_CNT[rr],
+            'rel': FW_RR_TAB[rr],
             # 运行时状态
             'pos': 0, 'step': 0, 'fb_val': 0,
             'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
@@ -72,32 +76,35 @@ def fw_calc_step(fnum, blk, ml):
     return int(base * ml / 2.0)
 
 def fw_key_on(mod, car):
-    """1:1 照搬 ym_key_on"""
+    """1:1 照搬 ym_key_on (和下位机 commit 1f45584/d84dee0 同步)
+    env_cnt=0 立即开始; atk<=2 (AR>=7) 瞬间到顶"""
     mod['pos'] = 0; car['pos'] = 0
     mod['fb_val'] = 0
     for op in (mod, car):
-        op['level'] = 0
-        if op['atk'] >= 255:
-            op['level'] = 31; op['env_state'] = 2; op['env_step'] = op['decy']
-        elif op['atk'] == 0:
+        op['level'] = 0; op['env_cnt'] = 0
+        if op['atk'] == 0:
             op['env_state'] = 0; op['level'] = 0
+        elif op['atk'] <= 2:
+            op['level'] = 31; op['env_state'] = 2; op['env_step'] = op['decy']
         else:
-            op['env_state'] = 1; op['env_cnt'] = 250; op['env_step'] = op['atk']
+            op['env_state'] = 1; op['env_step'] = op['atk']
 
 def fw_key_off(mod, car):
     """1:1 照搬 ym_key_off"""
     mod['env_state'] = 4; car['env_state'] = 4
-    mod['env_step'] = FW_ENV_CNT[5] if mod['sus_flag'] else mod['rel']
-    car['env_step'] = FW_ENV_CNT[5] if car['sus_flag'] else car['rel']
+    mod['env_step'] = FW_RR_TAB[5] if mod['sus_flag'] else mod['rel']
+    car['env_step'] = FW_RR_TAB[5] if car['sus_flag'] else car['rel']
 
 def fw_env_tick(op):
-    """1:1 照搬 ym_env_tick (线性 level 0~31)"""
-    cnt = op['env_cnt']
+    """1:1 照搬 ym_env_tick (加法计数器, 和下位机 commit 1f45584 同步)"""
     step = op['env_step']
-    if cnt >= step:
-        op['env_cnt'] = cnt - step
+    if step == 0:
+        return   # sustain EG=0 保持
+    cnt = op['env_cnt']
+    if cnt < step:
+        op['env_cnt'] = cnt + 1
         return
-    op['env_cnt'] = 250
+    op['env_cnt'] = 0
     st = op['env_state']
     if st == 1:  # attack
         if op['level'] < 31: op['level'] += 1
@@ -108,10 +115,9 @@ def fw_env_tick(op):
             op['level'] -= 1
         else:
             op['env_state'] = 3
-            op['env_step'] = op['rel'] if op['eg_type'] else 0
+            op['env_step'] = 0 if op['eg_type'] else op['rel']  # EG=1保持, EG=0继续降
     elif st == 3:  # sustain
-        if op['eg_type']:
-            if op['level'] > 0: op['level'] -= 1
+        if op['level'] > 0: op['level'] -= 1
     elif st == 4:  # release
         if op['level'] > 0: op['level'] -= 1
 
@@ -164,9 +170,8 @@ def render_fw_real(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
     if blk > 0: blk -= 1
     mod['step'] = fw_calc_step(fnum, blk, mod['ml'])
     car['step'] = fw_calc_step(fnum, blk, car['ml'])
-    # carrier tl 用 volume (下位机 vol = (15-reg_vol)<<2, tl = 31 - vol/2)
-    # 这里 volume=0 对应 reg_vol=15 (最小), vol=0, tl=31
-    car['tl'] = max(0, min(31, 31 - (volume >> 1)))
+    # carrier tl: vol=0(reg_vol=15最小)→tl=0(静音), vol=60(reg_vol=0最大)→tl=30(满)
+    car['tl'] = max(0, min(31, volume >> 1))
 
     n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
     n_keyon = int(dur_keyon * INTERNAL_RATE)

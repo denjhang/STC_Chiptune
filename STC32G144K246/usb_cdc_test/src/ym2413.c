@@ -305,17 +305,14 @@ static void ym_env_tick(YM_OP *op) {
         if (op->level > op->sul) op->level--;
         else {
             op->env_state = 3;   /* → sustain */
-            /* Sustain 速率 (行为对齐 YM2413):
-             *   EG=0 (sustaining) → 保持 SL, step=0
-             *   EG=1 (non-sustaining) → 继续降, step=RR */
-            op->env_step = op->eg_type ? op->rel : 0;
+            /* Sustain 速率 (对齐 emu2413 get_parameter_rate):
+             *   EG=1 (sustaining) → 保持 SL, step=0
+             *   EG=0 (non-sustaining) → 继续降, step=RR */
+            op->env_step = op->eg_type ? 0 : op->rel;
         }
         break;
-    case 3: /* sustain: EG=0 保持 SL, EG=1 继续降到 0 */
-        if (op->eg_type) {
-            if (op->level > 0) op->level--;
-        }
-        /* EG=0: step=0, 永远不进这里 (cnt>=step 立即返回) */
+    case 3: /* sustain: EG=1 step=0 不进这里(保持); EG=0 step=rel 继续降 */
+        if (op->level > 0) op->level--;
         break;
     case 4: /* release: level→0 */
         if (op->level > 0) op->level--;
@@ -442,8 +439,8 @@ void ym2413_wr(u8 reg, u8 val) {
                  * ch6=BD vol, ch7=SD vol(高4)/HH vol(低4), ch8=TOM vol(高4)/CYM vol(低4)
                  * 简化: 用高4位作为 carrier volume */
                 u8 drum_vol = (val >> 4) & 0x0F;
-                ym_ch[ch].car.tl = 31 - (drum_vol << 1);
-                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 0;
+                ym_ch[ch].car.tl = drum_vol << 1;
+                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 31;
             } else {
                 u8 inst = (val >> 4) & 0x0F;
                 if (inst != ym_ch_patch[ch]) {
@@ -452,10 +449,10 @@ void ym2413_wr(u8 reg, u8 val) {
                     ym_apply_patch(ch);
                     ym_update_step(ch);
                 }
-                /* volume: reg 低4位, YM2413 vol=0 最大, 转 carrier tl */
+                /* volume: reg 低4位, YM2413 vol=0 最大 → tl 大 (输出大) */
                 ym_ch[ch].vol = (15 - (val & 0x0F)) << 2;
-                ym_ch[ch].car.tl = 31 - (ym_ch[ch].vol >> 1);
-                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 0;
+                ym_ch[ch].car.tl = ym_ch[ch].vol >> 1;
+                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 31;
             }
         }
         break;
