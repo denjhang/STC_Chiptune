@@ -155,14 +155,14 @@ static u8 data ym_prev_drum_bits;  /* reg 0x0E 鼓声 bit 上次值 (边沿检�
 /* ===== 鼓声状态 (单 op, 简化路径) ===== */
 /* BD/TOM/HH/CYM/SD 各 1 个单 op */
 typedef struct {
-    u8 active;          /* 是否在响 */
-    u8 level;           /* 包络 level 0~31 */
-    u8 env_cnt;         /* 包络计数器 */
-    u8 env_step;        /* 包络步进 */
-    u8 env_state;       /* 1=decay 2=done */
-    const s8 code *wave;/* 波形表 (sin/noise) */
-    u32 step;           /* 相位步进 16.16 */
-    u32 pos;            /* 相位累加 */
+    u8 active;
+    u8 level;
+    u8 env_cnt;
+    u8 env_step;
+    u8 vol;              /* 音量倍数 (2=标准, 4=2倍) */
+    const s8 code *wave;
+    u32 step;
+    u32 pos;
 } YM_DRUM;
 
 static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
@@ -393,11 +393,11 @@ void ym2413_init(void) {
     /* BD=0: sin 100Hz, decay 快; TOM=1: sin 214Hz; HH=2: noise 755Hz; CYM=3: noise 755Hz 慢 */
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 160; /* BD 100Hz */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 128; /* TOM 214Hz */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  /* HH 755Hz */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; /* CYM 755Hz */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x493A;  ym_drum[4].env_step = 96;  /* SD noise 230Hz */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 160; ym_drum[0].vol = 4; /* BD */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 128; ym_drum[1].vol = 4; /* TOM */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x493A;  ym_drum[4].env_step = 96;  ym_drum[4].vol = 4; /* SD */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -543,10 +543,10 @@ static s16 ym_render_drum(u8 idx) {
         }
     }
 
-    /* 单 op: 查表 + 乘 level */
+    /* 单 op: 查表 × level × vol */
     d->pos += d->step;
     wave_val = d->wave[(u8)(d->pos >> 16) & 0x3F];
-    out = ((s16)wave_val * (s16)((d->level + 1) * 2)) >> 6;
+    out = ((s16)wave_val * (s16)((d->level + 1) * d->vol)) >> 6;
     if (out > 127) out = 127;
     if (out < -128) out = -128;
     return out;
