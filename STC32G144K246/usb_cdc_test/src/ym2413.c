@@ -31,6 +31,13 @@ static const s8 code ym_halfsin[64] = {
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
 };
+/* 噪声表 (64 点假随机 ±31, 用于鼓声 HH/CYM) */
+static const s8 code ym_noise[64] = {
+     7, -4, 19, -28, 12, 23, -15,  6, -31,  8, -2, 27, -9, 14, -22,  3,
+    18, -11, 25, -7, 30, -19,  5, -24, 10, -14, 21, -3, 16, -27,  1, 29,
+    -8, 13, -21,  4, 26, -10, 20, -6, 15, -25, 11, -17, 24, -1,  9, -29,
+     2, 22, -13, 28, -5, 17, -23,  0, 31, -18,  7, -12, 19, -26, 14, -20
+};
 
 /* ===== ADSR 速度查表 (AR/DR/RR 各一张, 对齐 emu2413 速率) ===== */
 /* round-robin 每 16 采样 tick 一次, level 0~31 线性.
@@ -143,6 +150,22 @@ static u8 data ym_noise_step;
 static u8 data ym_noise_val;
 static u8 data ym_wait_cnt;
 static u8 data ym_test_flag;
+
+/* ===== 鼓声状态 (单 op, 简化路径) ===== */
+/* BD/TOM/HH/CYM 各 1 个单 op, SD 暂不实现 */
+typedef struct {
+    u8 active;          /* 是否在响 */
+    u8 level;           /* 包络 level 0~31 */
+    u8 env_cnt;         /* 包络计数器 */
+    u8 env_step;        /* 包络步进 */
+    u8 env_state;       /* 1=decay 2=done */
+    const s8 code *wave;/* 波形表 (sin/noise) */
+    u32 step;           /* 相位步进 16.16 */
+    u32 pos;            /* 相位累加 */
+} YM_DRUM;
+
+static YM_DRUM xdata ym_drum[4];  /* 0=BD 1=TOM 2=HH 3=CYM */
+static void ym_drum_trigger(u8 idx);  /* 前向声明 */
 
 /* base step 常数: step_q16 = fnum × (1<<blk) × C
  * YM2413 内部 PG_WIDTH=1024 (10-bit 相位), clock/72 采样率.
@@ -284,6 +307,13 @@ static void ym_update_keys(void) {
             ym_key_off(ch);
         }
     }
+    /* rhythm mode: reg 0x0E 各 bit 触发鼓声 (单 op 简化路径) */
+    if (rhythm) {
+        if ((r14 >> 4) & 1) ym_drum_trigger(0);                    /* BD */
+        if ((r14 >> 2) & 1) ym_drum_trigger(1);                    /* TOM */
+        if (r14 & 1)        ym_drum_trigger(2);                    /* HH */
+        if ((r14 >> 1) & 1) ym_drum_trigger(3);                    /* CYM */
+    }
 }
 
 /* ===== 包络 tick (行为对齐 YM2413) ===== */
@@ -354,6 +384,13 @@ void ym2413_init(void) {
     ym_noise_val = 0;
     ym_wait_cnt = 0;
     ym_test_flag = 0;
+    /* 鼓声参数初始化 (PC drum_fw_sim 试听确定) */
+    /* BD=0: sin 100Hz, decay 快; TOM=1: sin 214Hz; HH=2: noise 755Hz; CYM=3: noise 755Hz 慢 */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x21AC;  ym_drum[0].env_step = 1;  /* BD 100Hz */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4924;  ym_drum[1].env_step = 1;  /* TOM 214Hz */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF838;  ym_drum[2].env_step = 3;  /* HH 755Hz */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF838;  ym_drum[3].env_step = 40; /* CYM 755Hz 慢 */
+    for (i = 0; i < 4; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
 void ym2413_wr(u8 reg, u8 val) {
@@ -472,6 +509,44 @@ static void ym_update_noise(void) {
     ym_noise_val = ym_noise_seed & 1;
 }
 
+/* ===== 鼓声简化渲染 (单 op: 查表×level, 无 FM 调制) ===== */
+/* BD=0 TOM=1 HH=2 CYM=3, SD 暂不实现 */
+static void ym_drum_trigger(u8 idx) {
+    YM_DRUM *d = &ym_drum[idx];
+    d->active = 1;
+    d->level = 31;
+    d->env_state = 1;  /* decay */
+    d->env_cnt = 0;
+}
+
+static s16 ym_render_drum(u8 idx) {
+    YM_DRUM *d = &ym_drum[idx];
+    s8 wave_val;
+    s16 out;
+
+    if (!d->active) return 0;
+
+    /* 包络 (round-robin) */
+    if (ym_wait_cnt == idx) {
+        if (d->env_step > 0) {
+            if (d->env_cnt < d->env_step) d->env_cnt++;
+            else {
+                d->env_cnt = 0;
+                if (d->level > 0) d->level--;
+                else { d->active = 0; return 0; }
+            }
+        }
+    }
+
+    /* 单 op: 查表 + 乘 level */
+    d->pos += d->step;
+    wave_val = d->wave[(u8)(d->pos >> 16) & 0x3F];
+    out = ((s16)wave_val * (s16)((d->level + 1) * 2)) >> 6;
+    if (out > 127) out = 127;
+    if (out < -128) out = -128;
+    return out;
+}
+
 /* ===== 单通道标准 FM 渲染 (OP1→OP2) ===== */
 static s16 ym_render_fm(u8 ch) {
     YM_OP *mod = &ym_ch[ch].mod;
@@ -529,6 +604,14 @@ s16 ym2413_render(void) {
             continue;
         }
         total += ym_render_fm(ch);
+    }
+
+    /* 鼓声 (单 op 简化路径, 只有 active 时才有开销) */
+    if (ym_rhythm_mode) {
+        total += ym_render_drum(0);  /* BD */
+        total += ym_render_drum(1);  /* TOM */
+        total += ym_render_drum(2);  /* HH */
+        total += ym_render_drum(3);  /* CYM */
     }
 
     total <<= 1;
