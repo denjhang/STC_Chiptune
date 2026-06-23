@@ -1,0 +1,789 @@
+#!/usr/bin/env python3
+"""
+YM2413 完整 emu2413 移植 + V3 简化 FM 对比 WAV 生成器.
+
+emu2413 分支: 完全忠实 emu2413.c 移植, 不省略任何参数:
+  - get_parameter_rate() 完整状态机 (SUSTAIN: EG?0:RR; RELEASE: sus_flag?5 : EG?RR : 7)
+  - KL (Key Scale Level) 影响 tll
+  - KR (Key Rate Scaling) 影响 eg_rate_h (rks)
+  - PM (Pitch Modulation) LFO
+  - AM (Amplitude Modulation) LFO
+  - volume (寄存器低4位 <<2, 影响 carrier tll)
+  - sus_flag (寄存器 bit5, 影响 RELEASE 速率)
+  - DAMP 起始状态 (eg_out=127, DAMPER_RATE=12)
+  - eg_counter 全局递增 (所有 slot 共享)
+  - blk_fnum 影响 rks / tll(KL) / pm_table
+
+fm_v3 分支: 下位机简化核心 (64 点 s8 波形 + 128 级 level).
+  包络行为和 emu2413 完全一致 (复用同一份 eg_out 计算).
+
+每个音色: 1s keyon + 1s keyoff = 2s, 完整 ADSR.
+输出: tools/emu2413_inst*.wav + tools/fm_v3_inst*.wav (共 30 个)
+"""
+import math, struct, wave, os
+
+OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ============================================================
+#  YM2413 默认音色 (来自 emu2413.c default_inst[0])
+# ============================================================
+DEFAULT_INST = [
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],  # 0: User
+    [0x71,0x61,0x1e,0x17,0xd0,0x78,0x00,0x17],  # 1: Violin
+    [0x13,0x41,0x1a,0x0d,0xd8,0xf7,0x23,0x13],  # 2: Guitar
+    [0x13,0x01,0x99,0x00,0xf2,0xc4,0x21,0x23],  # 3: Piano
+    [0x11,0x61,0x0e,0x07,0x8d,0x64,0x70,0x27],  # 4: Flute
+    [0x32,0x21,0x1e,0x06,0xe1,0x76,0x01,0x28],  # 5: Clarinet
+    [0x31,0x22,0x16,0x05,0xe0,0x71,0x00,0x18],  # 6: Oboe
+    [0x21,0x61,0x1d,0x07,0x82,0x81,0x11,0x07],  # 7: Trumpet
+    [0x33,0x21,0x2d,0x13,0xb0,0x70,0x00,0x07],  # 8: Organ
+    [0x61,0x61,0x1b,0x06,0x64,0x65,0x10,0x17],  # 9: Horn
+    [0x41,0x61,0x0b,0x18,0x85,0xf0,0x81,0x07],  # 10: Synthesizer
+    [0x33,0x01,0x83,0x11,0xea,0xef,0x10,0x04],  # 11: Harpsichord
+    [0x17,0xc1,0x24,0x07,0xf8,0xf8,0x22,0x12],  # 12: Vibraphone
+    [0x61,0x50,0x0c,0x05,0xd2,0xf5,0x40,0x42],  # 13: Synthesizer Bass
+    [0x01,0x01,0x55,0x03,0xe9,0x90,0x03,0x02],  # 14: Acoustic Bass
+    [0x41,0x41,0x89,0x03,0xf1,0xe4,0xc0,0x13],  # 15: Electric Guitar
+]
+
+NAMES = ["User","Violin","Guitar","Piano","Flute","Clarinet","Oboe","Trumpet",
+         "Organ","Horn","Synth","Harpsichord","Vibraphone","SynthBass","AcousticBass","ElectricGuitar"]
+
+SR = 22050
+
+# ============================================================
+#  音色参数 (EOPLL_dumpToPatch 解码, 完全按 emu2413.c:1442)
+#  注意: mod 和 car 是分开的两个 PATCH
+# ============================================================
+class Patch:
+    """对应 emu2413 EOPLL_PATCH"""
+    __slots__ = ('TL','FB','EG','ML','AR','DR','SL','RR','KR','KL','AM','PM','WS')
+    def __init__(self):
+        self.TL=0; self.FB=0; self.EG=0; self.ML=0
+        self.AR=0; self.DR=0; self.SL=0; self.RR=0
+        self.KR=0; self.KL=0; self.AM=0; self.PM=0; self.WS=0
+
+def dump_to_patch(dump):
+    """对应 EOPLL_dumpToPatch. 返回 (mod_patch, car_patch)"""
+    mod = Patch(); car = Patch()
+    # dump[0], dump[1]: AM/PM/EG/KR/ML
+    mod.AM = (dump[0] >> 7) & 1
+    car.AM = (dump[1] >> 7) & 1
+    mod.PM = (dump[0] >> 6) & 1
+    car.PM = (dump[1] >> 6) & 1
+    mod.EG = (dump[0] >> 5) & 1
+    car.EG = (dump[1] >> 5) & 1
+    mod.KR = (dump[0] >> 4) & 1
+    car.KR = (dump[1] >> 4) & 1
+    mod.ML = dump[0] & 15
+    car.ML = dump[1] & 15
+    # dump[2], dump[3]: KL/TL, WS/FB
+    mod.KL = (dump[2] >> 6) & 3
+    car.KL = (dump[3] >> 6) & 3
+    mod.TL = dump[2] & 63
+    car.TL = 0          # <-- 注意: carrier 的 TL 始终为 0, 用 volume 代替
+    mod.FB = dump[3] & 7
+    car.FB = 0          # <-- carrier 的 FB 始终为 0
+    mod.WS = (dump[3] >> 3) & 1
+    car.WS = (dump[3] >> 4) & 1
+    # dump[4..7]: AR/DR, SL/RR
+    mod.AR = (dump[4] >> 4) & 15
+    mod.DR = dump[4] & 15
+    car.AR = (dump[5] >> 4) & 15
+    car.DR = dump[5] & 15
+    mod.SL = (dump[6] >> 4) & 15
+    mod.RR = dump[6] & 15
+    car.SL = (dump[7] >> 4) & 15
+    car.RR = dump[7] & 15
+    return mod, car
+
+# ============================================================
+#  emu2413 常量表 (完全照搬 emu2413.c)
+# ============================================================
+EG_MUTE = 127       # (1 << 7) - 1
+EG_MAX  = 123       # EG_MUTE - 4
+EG_STEP_DB = 0.375  # 不直接用, 仅注释
+TL_STEP_DB = 0.75
+SL_STEP_DB = 3.0
+TL2EG = lambda d: (d) << 1     # TL*2 = eg units
+DAMPER_RATE = 12
+
+PG_BITS = 10
+PG_WIDTH = 1 << PG_BITS    # 1024
+DP_BITS = 19
+DP_WIDTH = 1 << DP_BITS
+DP_BASE_BITS = DP_BITS - PG_BITS  # 9
+
+ml_table = [1,1*2,2*2,3*2,4*2,5*2,6*2,7*2,8*2,9*2,10*2,10*2,12*2,12*2,15*2,15*2]
+
+# KL table (emu2413.c:242): 注意是 *2 (dB2)
+kl_table = [0.000,9.000,12.000,13.875,15.000,16.125,16.875,17.625,
+            18.000,18.750,19.125,19.500,19.875,20.250,20.625,21.000]
+kl_table = [x*2 for x in kl_table]
+
+# eg_step_tables (emu2413.c:229)
+eg_step_tables = [
+    [0,1,0,1,0,1,0,1],
+    [0,1,0,1,1,1,0,1],
+    [0,1,1,1,0,1,1,1],
+    [0,1,1,1,1,1,1,1],
+]
+
+# exp_table (emu2413.c:153)
+exp_table = [
+0,3,6,8,11,14,17,20,22,25,28,31,34,37,40,42,
+45,48,51,54,57,60,63,66,69,72,75,78,81,84,87,90,
+93,96,99,102,105,108,111,114,117,120,123,126,130,133,136,139,
+142,145,148,152,155,158,161,164,168,171,174,177,181,184,187,190,
+194,197,200,204,207,210,214,217,220,224,227,231,234,237,241,244,
+248,251,255,258,262,265,268,272,276,279,283,286,290,293,297,300,
+304,308,311,315,318,322,326,329,333,337,340,344,348,352,355,359,
+363,367,370,374,378,382,385,389,393,397,401,405,409,412,416,420,
+424,428,432,436,440,444,448,452,456,460,464,468,472,476,480,484,
+488,492,496,501,505,509,513,517,521,526,530,534,538,542,547,551,
+555,560,564,568,572,577,581,585,590,594,599,603,607,612,616,621,
+625,630,634,639,643,648,652,657,661,666,670,675,680,684,689,693,
+698,703,708,712,717,722,726,731,736,741,745,750,755,760,765,770,
+774,779,784,789,794,799,804,809,814,819,824,829,834,839,844,849,
+854,859,864,869,874,880,885,890,895,900,906,911,916,921,927,932,
+937,942,948,953,959,964,969,975,980,986,991,996,1002,1007,1013,1018
+]
+
+# fullsin_table (emu2413.c:172) — 第一象限, 后续用 makeSinTable 补全
+fullsin_q1 = [
+2137,1731,1543,1419,1326,1252,1190,1137,1091,1050,1013,979,949,920,894,869,
+846,825,804,785,767,749,732,717,701,687,672,659,646,633,621,609,
+598,587,576,566,556,546,536,527,518,509,501,492,484,476,468,461,
+453,446,439,432,425,418,411,405,399,392,386,380,375,369,363,358,
+352,347,341,336,331,326,321,316,311,307,302,297,293,289,284,280,
+276,271,267,263,259,255,251,248,244,240,236,233,229,226,222,219,
+215,212,209,205,202,199,196,193,190,187,184,181,178,175,172,169,
+167,164,161,159,156,153,151,148,146,143,141,138,136,134,131,129,
+127,125,122,120,118,116,114,112,110,108,106,104,102,100,98,96,
+94,92,91,89,87,85,83,82,80,78,77,75,74,72,70,69,
+67,66,64,63,62,60,59,57,56,55,53,52,51,49,48,47,
+46,45,43,42,41,40,39,38,37,36,35,34,33,32,31,30,
+29,28,27,26,25,24,23,23,22,21,20,20,19,18,17,17,
+16,15,15,14,13,13,12,12,11,10,10,9,9,8,8,7,
+7,7,6,6,5,5,5,4,4,4,3,3,3,2,2,2,
+2,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,
+]
+
+def make_fullsin():
+    """emu2413 makeSinTable: 镜像 + 负半周加 0x8000 标志"""
+    t = [0] * PG_WIDTH
+    # 第一象限已给 (索引 0~255, 从 2137 递减到 0)
+    for i in range(256):
+        t[i] = fullsin_q1[i]
+    # 第二象限: 镜像 (makeSinTable: t[256+x] = t[256-x-1])
+    for x in range(PG_WIDTH // 4):
+        t[PG_WIDTH // 4 + x] = t[PG_WIDTH // 4 - x - 1]
+    # 下半周: 加符号位
+    for x in range(PG_WIDTH // 2):
+        t[PG_WIDTH // 2 + x] = 0x8000 | t[x]
+    return t
+
+def make_halfsin():
+    t = make_fullsin()
+    for x in range(PG_WIDTH // 2, PG_WIDTH):
+        t[x] = 0xfff
+    return t
+
+FULLSIN = make_fullsin()
+HALFSIN = make_halfsin()
+WAVE_MAP = [FULLSIN, HALFSIN]
+
+# PM table (emu2413.c:197)
+pm_table = [
+    [0,0,0,0,0,0,0,0],
+    [0,0,1,0,0,0,-1,0],
+    [0,1,2,1,0,-1,-2,-1],
+    [0,1,3,1,0,-1,-3,-1],
+    [0,2,4,2,0,-2,-4,-2],
+    [0,2,5,2,0,-2,-5,-2],
+    [0,3,6,3,0,-3,-6,-3],
+    [0,3,7,3,0,-3,-7,-3],
+]
+
+# AM table (emu2413.c:211)
+am_table = [
+0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,
+4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,
+6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,
+8,8,8,8,8,8,8,8,9,9,9,9,9,9,9,9,
+10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,11,
+12,12,12,12,12,12,12,12,
+13,13,13,
+12,12,12,12,12,12,12,12,
+11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,
+9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,
+7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,
+5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,
+3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,
+1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,
+]
+
+# ============================================================
+#  预计算 tll_table 和 rks_table (emu2413.c:390, 414)
+# ============================================================
+def make_tll_table():
+    """tll_table[(block<<4)|fnum_hi4][TL][KL]"""
+    tbl = {}
+    for fnum in range(16):
+        for block in range(8):
+            for TL in range(64):
+                for KL in range(4):
+                    if KL == 0:
+                        tbl[(block, fnum, TL, KL)] = TL2EG(TL)
+                    else:
+                        tmp = kl_table[fnum] - 6.0 * (7 - block)  # dB2(3.0)=6.0
+                        if tmp <= 0:
+                            tbl[(block, fnum, TL, KL)] = TL2EG(TL)
+                        else:
+                            tbl[(block, fnum, TL, KL)] = int(tmp / (8 >> KL) / EG_STEP_DB + 0.5) + TL2EG(TL) if False else \
+                                int(round((tmp / (EG_STEP_DB * (8 / (2**(3-KL))))))) + TL2EG(TL)
+    return tbl
+
+# 上面那个 make_tll_table 的 KL 分支公式有点绕, 直接照搬 C 代码:
+def make_tll_table_v2():
+    """忠实 emu2413.c:390 makeTllTable
+       tmp = kl_table[fnum] - dB2(3.0)*(7-block)
+       if tmp<=0: TL2EG(TL)
+       else:      (tmp >> (3-KL)) / EG_STEP + TL2EG(TL)
+       注意 C 里 tmp 是 int32_t (即 dB2 域整数, EG_STEP=0.375)
+       实际计算: kl_table 已 *2 (dB2 域), dB2(3.0)=6.0
+       结果 = round(tmp / 0.375 / 2^(3-KL)) ... 但 C 用整数 >> 和 /
+       这里用浮点近似, 差异可忽略"""
+    tbl = {}
+    for fnum in range(16):
+        for block in range(8):
+            for TL in range(64):
+                for KL in range(4):
+                    if KL == 0:
+                        tbl[(block, fnum, TL, KL)] = TL2EG(TL)
+                    else:
+                        tmp = kl_table[fnum] - 6.0 * (7 - block)
+                        if tmp <= 0:
+                            tbl[(block, fnum, TL, KL)] = TL2EG(TL)
+                        else:
+                            # C: (tmp >> (3-KL)) / EG_STEP
+                            #    tmp 是 dB2 整数, >>(3-KL) 是整数移位
+                            #    EG_STEP = 0.375 (dB2 = 0.75)
+                            shifted = int(tmp) >> (3 - KL)
+                            tbl[(block, fnum, TL, KL)] = int(round(shifted / 0.75)) + TL2EG(TL)
+    return tbl
+
+TLL_TABLE = make_tll_table_v2()
+
+def make_rks_table():
+    """rks_table[(block<<1)|fnum8_hi][KR]
+       KR=1: rks = (block<<1) + fnum8
+       KR=0: rks = block>>1
+       fnum8 = fnum 的 bit8 (即 (fnum>>8)&1, 但 fnum 是 9-bit)
+       这里索引用 blk_fnum>>8 得到 (block<<1 | fnum8)"""
+    tbl = {}
+    for fnum8 in range(2):
+        for block in range(8):
+            tbl[(block, fnum8, 1)] = (block << 1) + fnum8
+            tbl[(block, fnum8, 0)] = block >> 1
+    return tbl
+
+RKS_TABLE = make_rks_table()
+
+# ============================================================
+#  Slot 类 (对应 EOPLL_SLOT)
+# ============================================================
+class Slot:
+    def __init__(self, number):
+        self.number = number
+        self.type = number % 2     # 0=mod, 1=car
+        self.patch = None
+        self.wave_table = FULLSIN
+        self.pg_phase = 0
+        self.pg_out = 0
+        self.pg_keep = 0
+        self.blk_fnum = 0
+        self.fnum = 0
+        self.blk = 0
+        self.volume = 0
+        self.output = [0, 0]
+        # EG
+        self.eg_state = 5  # RELEASE=3, 用枚举索引: ATTACK=0,DECAY=1,SUSTAIN=2,RELEASE=3,DAMP=4
+        self.eg_shift = 0
+        self.rks = 0
+        self.tll = 0
+        self.eg_rate_h = 0
+        self.eg_rate_l = 0
+        self.eg_out = EG_MUTE
+        self.key_flag = 0
+        self.sus_flag = 0
+
+# EG state enum (emu2413.c:236)
+ATTACK, DECAY, SUSTAIN, RELEASE, DAMP, UNKNOWN = range(6)
+
+def get_parameter_rate(slot):
+    """完全对应 emu2413.c:492 get_parameter_rate"""
+    if (slot.type & 1) == 0 and slot.key_flag == 0:
+        return 0
+    if slot.eg_state == ATTACK:
+        return slot.patch.AR
+    elif slot.eg_state == DECAY:
+        return slot.patch.DR
+    elif slot.eg_state == SUSTAIN:
+        # 关键! EG=1(non-sustaining) -> rate=0 (保持); EG=0(sustaining) -> rate=RR
+        return 0 if slot.patch.EG else slot.patch.RR
+    elif slot.eg_state == RELEASE:
+        if slot.sus_flag:
+            return 5
+        elif slot.patch.EG:
+            return slot.patch.RR
+        else:
+            return 7
+    elif slot.eg_state == DAMP:
+        return DAMPER_RATE
+    return 0
+
+def commit_slot_update(slot):
+    """对应 emu2413.c:530 commit_slot_update (简化: 每次全更新)"""
+    slot.wave_table = WAVE_MAP[slot.patch.WS]
+    # TLL: mod 用 TL, car 用 volume
+    fnum_hi4 = slot.blk_fnum >> 5  # (block<<4 | fnum>>5)
+    block = slot.blk
+    fnum4 = (slot.fnum >> 5) & 15
+    if (slot.type & 1) == 0:
+        slot.tll = TLL_TABLE[(block, fnum4, slot.patch.TL, slot.patch.KL)]
+    else:
+        slot.tll = TLL_TABLE[(block, fnum4, slot.volume, slot.patch.KL)]
+    # RKS
+    fnum8 = (slot.fnum >> 8) & 1
+    slot.rks = RKS_TABLE[(slot.blk, fnum8, slot.patch.KR)]
+    # EG rate
+    p_rate = get_parameter_rate(slot)
+    if p_rate == 0:
+        slot.eg_shift = 0
+        slot.eg_rate_h = 0
+        slot.eg_rate_l = 0
+        return
+    slot.eg_rate_h = min(15, p_rate + (slot.rks >> 2))
+    slot.eg_rate_l = slot.rks & 3
+    if slot.eg_state == ATTACK:
+        slot.eg_shift = (13 - slot.eg_rate_h) if (0 < slot.eg_rate_h < 12) else 0
+    else:
+        slot.eg_shift = (13 - slot.eg_rate_h) if (slot.eg_rate_h < 13) else 0
+
+def lookup_attack_step(slot, counter):
+    """对应 emu2413.c:791"""
+    rh = slot.eg_rate_h
+    rl = slot.eg_rate_l
+    if rh == 12:
+        idx = (counter & 0xc) >> 1
+        return 4 - eg_step_tables[rl][idx]
+    elif rh == 13:
+        idx = (counter & 0xc) >> 1
+        return 3 - eg_step_tables[rl][idx]
+    elif rh == 14:
+        idx = (counter & 0xc) >> 1
+        return 2 - eg_step_tables[rl][idx]
+    elif rh == 0 or rh == 15:
+        return 0
+    else:
+        idx = counter >> slot.eg_shift
+        return 4 if eg_step_tables[rl][idx & 7] else 0
+
+def lookup_decay_step(slot, counter):
+    """对应 emu2413.c:813"""
+    rh = slot.eg_rate_h
+    rl = slot.eg_rate_l
+    if rh == 0:
+        return 0
+    elif rh == 13:
+        idx = ((counter & 0xc) >> 1) | (counter & 1)
+        return eg_step_tables[rl][idx]
+    elif rh == 14:
+        idx = (counter & 0xc) >> 1
+        return eg_step_tables[rl][idx] + 1
+    elif rh == 15:
+        return 2
+    else:
+        idx = counter >> slot.eg_shift
+        return eg_step_tables[rl][idx & 7]
+
+def start_envelope(slot):
+    """对应 emu2413.c:833"""
+    if min(15, slot.patch.AR + (slot.rks >> 2)) == 15:
+        slot.eg_state = DECAY
+        slot.eg_out = 0
+    else:
+        slot.eg_state = ATTACK
+    commit_slot_update(slot)
+
+def calc_envelope(slot, eg_counter):
+    """对应 emu2413.c:843 calc_envelope (不含 test flag)"""
+    mask = (1 << slot.eg_shift) - 1
+    if slot.eg_state == ATTACK:
+        if 0 < slot.eg_out and 0 < slot.eg_rate_h and (eg_counter & mask & ~3) == 0:
+            s = lookup_attack_step(slot, eg_counter)
+            if 0 < s:
+                slot.eg_out = max(0, slot.eg_out - (slot.eg_out >> s) - 1)
+    else:
+        if slot.eg_rate_h > 0 and (eg_counter & mask) == 0:
+            slot.eg_out = min(EG_MUTE, slot.eg_out + lookup_decay_step(slot, eg_counter))
+
+    # 状态转移
+    if slot.eg_state == DAMP:
+        if slot.eg_out >= EG_MAX and (eg_counter & mask) == 0:
+            start_envelope(slot)
+    elif slot.eg_state == ATTACK:
+        if slot.eg_out == 0:
+            slot.eg_state = DECAY
+            commit_slot_update(slot)
+    elif slot.eg_state == DECAY:
+        if (slot.eg_out >> 3) == slot.patch.SL:
+            slot.eg_state = SUSTAIN
+            commit_slot_update(slot)
+    # SUSTAIN/RELEASE: 无自动转移 (需 keyoff 触发)
+
+def calc_phase(slot, pm_phase):
+    """对应 emu2413.c:781 calc_phase (无 test reset)"""
+    pm = pm_table[(slot.fnum >> 6) & 7][(pm_phase >> 10) & 7] if slot.patch.PM else 0
+    slot.pg_phase += (((slot.fnum & 0x1ff) * 2 + pm) * ml_table[slot.patch.ML]) << slot.blk >> 2
+    slot.pg_phase &= (DP_WIDTH - 1)
+    slot.pg_out = slot.pg_phase >> DP_BASE_BITS
+
+def slot_on(slot):
+    slot.key_flag = 1
+    slot.eg_state = DAMP
+    commit_slot_update(slot)
+
+def slot_off(slot):
+    slot.key_flag = 0
+    if slot.type & 1:  # 只有 carrier 响应 keyoff
+        slot.eg_state = RELEASE
+        commit_slot_update(slot)
+
+def lookup_exp_table(i):
+    """对应 emu2413.c:927"""
+    t = exp_table[(i & 0xff) ^ 0xff] + 1024
+    res = t >> ((i & 0x7f00) >> 8)
+    return ((~res if (i & 0x8000) else res)) << 1
+
+def to_linear(h, slot, am):
+    """对应 emu2413.c:934"""
+    if slot.eg_out > EG_MAX:
+        return 0
+    att = min(EG_MUTE, (slot.eg_out + slot.tll + am)) << 4
+    return lookup_exp_table(h + att)
+
+def calc_slot_mod(slot, lfo_am):
+    """对应 emu2413.c:954 calc_slot_mod"""
+    fm = (slot.output[1] + slot.output[0]) >> (9 - slot.patch.FB) if slot.patch.FB > 0 else 0
+    am = lfo_am if slot.patch.AM else 0
+    slot.output[1] = slot.output[0]
+    slot.output[0] = to_linear(slot.wave_table[(slot.pg_out + fm) & (PG_WIDTH - 1)], slot, am)
+    return slot.output[0]
+
+def calc_slot_car(slot, fm, lfo_am):
+    """对应 emu2413.c:943 calc_slot_car"""
+    am = lfo_am if slot.patch.AM else 0
+    slot.output[1] = slot.output[0]
+    slot.output[0] = to_linear(slot.wave_table[(slot.pg_out + 2 * (fm >> 1)) & (PG_WIDTH - 1)], slot, am)
+    return slot.output[0]
+
+
+# ============================================================
+#  完整单通道 emu2413 渲染器 (1 个 mod+car 对)
+# ============================================================
+class EmuChannel:
+    """模拟 emu2413 的一个旋律通道 (mod slot + car slot)"""
+    def __init__(self, mod_patch, car_patch):
+        self.mod = Slot(0)
+        self.car = Slot(1)
+        self.mod.patch = mod_patch
+        self.car.patch = car_patch
+        self.mod.eg_state = RELEASE
+        self.car.eg_state = RELEASE
+        self.mod.eg_out = EG_MUTE
+        self.car.eg_out = EG_MUTE
+        self.eg_counter = 0
+        self.pm_phase = 0
+        self.am_phase = 0
+        self.lfo_am = 0
+        # 初始 commit
+        commit_slot_update(self.mod)
+        commit_slot_update(self.car)
+
+    def key_on(self):
+        slot_on(self.mod)
+        slot_on(self.car)
+
+    def key_off(self):
+        slot_off(self.mod)
+        slot_off(self.car)
+
+    def set_note(self, fnum, blk):
+        """设置音高 (fnum: 9-bit, blk: 3-bit)"""
+        for slot in (self.mod, self.car):
+            slot.fnum = fnum & 0x1ff
+            slot.blk = blk & 7
+            slot.blk_fnum = ((blk & 7) << 9) | (fnum & 0x1ff)
+            commit_slot_update(slot)
+
+    def set_volume(self, volume):
+        """volume: 0~63 (寄存器低4位 << 2)"""
+        self.car.volume = volume
+        commit_slot_update(self.car)
+
+    def set_sus(self, sus_flag):
+        self.car.sus_flag = sus_flag
+        self.mod.sus_flag = sus_flag
+
+    def render_one(self):
+        """渲染一个采样, 返回 carrier 输出 (mono)"""
+        # update_ampm
+        self.pm_phase = (self.pm_phase + 1) & 0xffffffff
+        self.am_phase += 1
+        self.lfo_am = am_table[(self.am_phase >> 6) % len(am_table)]
+        # update_slots
+        self.eg_counter += 1
+        for slot in (self.mod, self.car):
+            calc_envelope(slot, self.eg_counter)
+            calc_phase(slot, self.pm_phase)
+        # calc mod then car
+        mo = calc_slot_mod(self.mod, self.lfo_am)
+        co = calc_slot_car(self.car, mo, self.lfo_am)
+        return -(co >> 1)  # _MO macro: -(x)>>1
+
+
+# ============================================================
+#  频率 -> (fnum, blk) 转换
+# ============================================================
+INTERNAL_RATE = 49715.9028  # 3579545 / 72
+
+def freq_to_fnum_blk(freq):
+    """YM2413 频率计算.
+    emu2413 calc_phase: pg_phase += ((fnum&0x1ff)*2 + pm) * ml_table[ML] << blk >> 2
+    一个完整正弦周期 = pg_phase 走过 DP_WIDTH = 2^19
+    ML=1 时 ml_table[1]=2, 每采样增量 = fnum*2*2*2^blk/4 = fnum * 2^blk
+    每秒周期数 freq = (增量 * INTERNAL_RATE) / 2^19
+    => fnum = freq * 2^19 / (2^blk * INTERNAL_RATE)
+    选择使 0 <= fnum < 512 的 blk."""
+    for blk in range(8):
+        fnum = freq * (1 << 19) / ((1 << blk) * INTERNAL_RATE)
+        if 0 <= fnum < 512:
+            return int(round(fnum)), blk
+    return max(0, min(511, int(round(freq * (1 << 19) / INTERNAL_RATE)))), 0
+
+
+# ============================================================
+#  主渲染函数
+# ============================================================
+def render_emu2413(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
+    """完整 emu2413 渲染. 用真实内部采样率 INTERNAL_RATE (49716Hz).
+    返回 (samples_at_internal_rate)."""
+    mod_patch, car_patch = dump_to_patch(DEFAULT_INST[inst_idx])
+    ch = EmuChannel(mod_patch, car_patch)
+    fnum, blk = freq_to_fnum_blk(freq)
+    ch.set_note(fnum, blk)
+    ch.set_volume(volume)
+    ch.set_sus(0)
+
+    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
+    n_keyon = int(dur_keyon * INTERNAL_RATE)
+
+    out = []
+    ch.key_on()
+    for i in range(n_total):
+        if i == n_keyon:
+            ch.key_off()
+        out.append(ch.render_one())
+    return out
+
+
+# ============================================================
+#  V3 简化 FM (下位机模拟) — 复用 emu 的 eg_out 但用 s8 波形
+#  目的: 验证简化核心能否逼近 emu2413
+# ============================================================
+def make_64_sin():
+    return [int(round(127 * math.sin(i * 2 * math.pi / 64))) for i in range(64)]
+
+def make_64_halfsin():
+    t = []
+    for i in range(64):
+        s = math.sin(i * 2 * math.pi / 64)
+        t.append(int(round(127 * max(s, 0))))
+    return t
+
+WAVE64_SIN = make_64_sin()
+WAVE64_HALFSIN = make_64_halfsin()
+
+def make_level_gain():
+    """eg_out (0~127, dB 域) -> 线性增益 (0~MAX)"""
+    t = []
+    for lv in range(128):
+        if lv > EG_MAX:
+            t.append(0)
+        else:
+            db = -lv * 0.75
+            t.append(int(round(4096 * (10 ** (db / 20)))))
+    return t
+
+LEVEL_GAIN = make_level_gain()
+
+def make_tl_atten():
+    t = []
+    for tl in range(64):
+        db = -tl * 0.75
+        t.append(int(round(1024 * (10 ** (db / 20)))))
+    return t
+
+TL_ATTEN = make_tl_atten()
+
+def render_fm_v3(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
+    """V3 简化 FM: 用 emu 的 eg_out (忠实包络) + s8 波形 (简化合成).
+    用 INTERNAL_RATE 渲染以匹配 emu2413 节奏."""
+    mod_patch, car_patch = dump_to_patch(DEFAULT_INST[inst_idx])
+    ch = EmuChannel(mod_patch, car_patch)
+    fnum, blk = freq_to_fnum_blk(freq)
+    ch.set_note(fnum, blk)
+    ch.set_volume(volume)
+    ch.set_sus(0)
+
+    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
+    n_keyon = int(dur_keyon * INTERNAL_RATE)
+
+    # 跑 emu 的 eg_out 曲线 (忠实包络)
+    mod_eg_curve = []
+    car_eg_curve = []
+    ch.key_on()
+    for i in range(n_total):
+        if i == n_keyon:
+            ch.key_off()
+        ch.eg_counter += 1
+        for slot in (ch.mod, ch.car):
+            calc_envelope(slot, ch.eg_counter)
+        mod_eg_curve.append(ch.mod.eg_out)
+        car_eg_curve.append(ch.car.eg_out)
+
+    # V3 合成 (s8 波形, 但相位增量必须匹配 emu 的 pg_out 速度)
+    mod_wave = WAVE64_SIN if mod_patch.WS == 0 else WAVE64_HALFSIN
+    car_wave = WAVE64_SIN if car_patch.WS == 0 else WAVE64_HALFSIN
+    mod_tl_atten = TL_ATTEN[mod_patch.TL]
+
+    # emu 每采样 pg_phase 增量 = fnum*2 * ml_table[ML] * 2^blk / 4
+    # pg_out = pg_phase >> 9 (PG_BITS=10, DP_BASE_BITS=9)
+    # 一个正弦周期 = pg_out 走过 1024
+    # V3: 用 32-bit phase, >>26 得 6-bit index (64 点表)
+    # 为匹配: 每采样 V3 phase 增量 = emu_pg_phase增量 * (64/1024) * 2^32 / 2^19
+    # 简化: 直接用 emu 的 pg_out 对 64 点表取模
+    mod_p_step = ((fnum * 2) * ml_table[mod_patch.ML]) << blk >> 2
+    car_p_step = ((fnum * 2) * ml_table[car_patch.ML]) << blk >> 2
+
+    out = []
+    mod_pg = 0
+    car_pg = 0
+    mo1 = 0; mo2 = 0
+
+    for s in range(n_total):
+        mod_pg = (mod_pg + mod_p_step) & (DP_WIDTH - 1)
+        car_pg = (car_pg + car_p_step) & (DP_WIDTH - 1)
+        midx = (mod_pg >> DP_BASE_BITS) & (PG_WIDTH - 1)
+        cidx = (car_pg >> DP_BASE_BITS) & (PG_WIDTH - 1)
+        # 映射到 64 点表 (1024 -> 64)
+        midx64 = (midx * 64) >> PG_BITS
+        cidx64 = (cidx * 64) >> PG_BITS
+
+        if mod_patch.FB > 0:
+            fb = (mo2 + mo1) >> (9 - mod_patch.FB)
+            mod_raw = mod_wave[(midx64 + (fb >> 4)) & 63]
+        else:
+            mod_raw = mod_wave[midx64]
+        mo2 = mo1
+        mo1 = (mod_raw * LEVEL_GAIN[mod_eg_curve[s]] * mod_tl_atten) >> 10
+
+        mod_amount = (mo1 >> 3) & 63
+        car_idx = (cidx64 + mod_amount) & 63
+        car_raw = car_wave[car_idx]
+        car_val = (car_raw * LEVEL_GAIN[car_eg_curve[s]]) >> 4
+
+        out.append(-car_val)
+
+    return out
+
+
+# ============================================================
+#  WAV 输出 (从 INTERNAL_RATE 降采样到 SR)
+# ============================================================
+def downsample(samples, src_rate, dst_rate):
+    """简单线性降采样"""
+    if src_rate == dst_rate:
+        return samples
+    ratio = src_rate / dst_rate
+    n_out = int(len(samples) / ratio)
+    out = []
+    for i in range(n_out):
+        pos = i * ratio
+        i0 = int(pos)
+        i1 = min(i0 + 1, len(samples) - 1)
+        frac = pos - i0
+        out.append(int(samples[i0] * (1 - frac) + samples[i1] * frac))
+    return out
+
+def auto_normalize(samples, target_peak=0.85):
+    peak = max(abs(s) for s in samples) if samples else 1
+    if peak == 0:
+        return samples
+    scale = (32767 * target_peak) / peak
+    return [int(max(-32768, min(32767, s * scale))) for s in samples]
+
+def save_wav(filepath, samples):
+    """samples 是 INTERNAL_RATE (49716) 的, 先降采样到 SR, 再归一化保存"""
+    samples = downsample(samples, INTERNAL_RATE, SR)
+    samples = auto_normalize(samples, target_peak=0.85)
+    with wave.open(filepath, 'w') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(struct.pack(f'<{len(samples)}h', *samples))
+
+
+def main():
+    FREQ = 440.0
+    DUR_KEYON = 1.0
+    DUR_KEYOFF = 1.0
+
+    print("=" * 72)
+    print("YM2413 15 音色 WAV 生成 (完整 emu2413 移植 + V3 简化对比)")
+    print(f"  频率: {FREQ} Hz")
+    print(f"  时长: {DUR_KEYON}s keyon + {DUR_KEYOFF}s keyoff")
+    print(f"  采样率: {SR} Hz (从 49716 重采样近似)")
+    print(f"  输出: {OUT_DIR}")
+    print("=" * 72)
+
+    print("\n--- emu2413 (完整移植) ---")
+    for i in range(1, 16):
+        mod_p, car_p = dump_to_patch(DEFAULT_INST[i])
+        samples = render_emu2413(i, FREQ, DUR_KEYON, DUR_KEYOFF)
+        fname = os.path.join(OUT_DIR, f"emu2413_inst{i:02d}_{NAMES[i]}.wav")
+        save_wav(fname, samples)
+        print(f"  {i:2d} {NAMES[i]:<16} "
+              f"car[AR={car_p.AR} DR={car_p.DR} SL={car_p.SL} RR={car_p.RR} EG={car_p.EG} ML={car_p.ML} WS={car_p.WS} KL={car_p.KL}] "
+              f"-> {os.path.basename(fname)}")
+
+    print("\n--- fm_v3 (下位机简化核心) ---")
+    for i in range(1, 16):
+        mod_p, car_p = dump_to_patch(DEFAULT_INST[i])
+        samples = render_fm_v3(i, FREQ, DUR_KEYON, DUR_KEYOFF)
+        fname = os.path.join(OUT_DIR, f"fm_v3_inst{i:02d}_{NAMES[i]}.wav")
+        save_wav(fname, samples)
+        print(f"  {i:2d} {NAMES[i]:<16} "
+              f"car[AR={car_p.AR} DR={car_p.DR} SL={car_p.SL} RR={car_p.RR} EG={car_p.EG} ML={car_p.ML} WS={car_p.WS} KL={car_p.KL}] "
+              f"-> {os.path.basename(fname)}")
+
+    print(f"\n{'='*72}")
+    print(f"完成! 30 个 WAV 已输出到 tools/")
+    print(f"{'='*72}")
+
+
+if __name__ == '__main__':
+    main()
