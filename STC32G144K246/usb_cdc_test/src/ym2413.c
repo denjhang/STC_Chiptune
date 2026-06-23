@@ -398,7 +398,7 @@ void ym2413_init(void) {
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 128; ym_drum[1].vol = 8; /* TOM */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x230FE; ym_drum[2].env_step = 46;  ym_drum[2].vol = 1; /* HH */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x230FE; ym_drum[3].env_step = 255; ym_drum[3].vol = 1; /* CYM */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0xAAE6;  ym_drum[4].env_step = 96;  ym_drum[4].vol = 8; /* SD */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0xB254;  ym_drum[4].env_step = 96;  ym_drum[4].vol = 8; /* SD 240Hz */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
