@@ -482,21 +482,31 @@ static s16 ym_render_fm(u8 ch) {
     if (!mod->step) return 0;
 
     /* OP1 (modulator) */
-    mod->pos += mod->step;
-    idx = (u8)(mod->pos >> 16) & 0x3F;
-    idx += (u8)mod->fb_val;
-    wave_val = mod->wave[idx & 0x3F];
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
-    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
-    else mod->fb_val = 0;
+    mod->pos += mod->step;
+    /* level=0 时输出必为 0, 跳过查表和乘法 */
+    if (mod->level == 0) {
+        ch_out = 0;
+        mod->fb_val = 0;
+    } else {
+        idx = (u8)(mod->pos >> 16) & 0x3F;
+        idx += (u8)mod->fb_val;
+        wave_val = mod->wave[idx & 0x3F];
+        ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
+        if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
+        else mod->fb_val = 0;
+    }
 
     /* OP2 (carrier) */
+    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
     car->pos += car->step;
+    /* level=0 时输出必为 0, 跳过查表和乘法 */
+    if (car->level == 0) {
+        return 0;
+    }
     idx = (u8)(car->pos >> 16) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
-    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
     ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
     return ch_out;
 }
