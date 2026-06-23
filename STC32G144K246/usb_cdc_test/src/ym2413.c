@@ -126,16 +126,28 @@ static YM_VOICE_PATCH xdata ym_patch[19];   /* 0=用户, 1-15=内置, 16-18=rhyt
 static u8 xdata ym_reg[0x40];
 static u8 xdata ym_ch_patch[YM_CHANNELS];   /* 当前每通道用的音色号 */
 static u8 xdata ym_rhythm_mode;
+/* 噪声发生器 (AY8910 原理: 17-bit LFSR, 用于鼓声 HH/SD/CYM) */
+static u32 data ym_noise_seed;
+static u8 data ym_noise_step;
+static u8 data ym_noise_val;
 static u8 data ym_wait_cnt;
 static u8 data ym_test_flag;
 
 /* base step 常数: step_q16 = fnum × (1<<blk) × C
- * C = clock × 64 × 65536 / (72 × 262144 × 22050)
- * = 3579545 × 64 × 65536 / (72 × 262144 × 22050)
- * = 3579545 / (72 × 262144 × 22050 / 64 / 65536)
- * = 3579545 × 4194304 / (72 × 262144 × 22050)
- * = 3579545 × 64 / (72 × 22050)  ← 因为 262144/65536/64 = 1/4, 再约
- * 实际: C = 3579545 * 64 * 65536 / (72 * 262144 * 22050) = 3579545 / (72*22050/64) = 3579545*64/(72*22050) */
+ * YM2413 内部 PG_WIDTH=1024 (10-bit 相位), clock/72 采样率.
+ * 我们用 64 点表 (s8), 但 phase accumulator 仍按 1024 精度,
+ * 查表时 >> (10-6) = >> 4 取高 6 位索引.
+ * 所以 step = fnum × 2^blk × clock × 65536 / (72 × 262144 × 22050)
+ * (PG_WIDTH=1024 对应 2^10=1024, 但 YM2413 phase 是 19-bit,
+ *  实际表推进 = phase >> 9. 我们用 16.16 定点存 phase, 表索引 = phase >> (16+4))
+ *
+ * 简化验证:
+ *   freq_hz = fnum × 2^blk × clock / (72 × 2^18)
+ *   表推进/采样 = freq_hz × 1024 / 22050  (1024 点表)
+ *   但我们用 64 点表, 所以 = freq_hz × 64 / 22050
+ *   存 16.16: step_q16 = freq_hz × 64 / 22050 × 65536
+ *            = fnum × 2^blk × 3579545 / (72 × 262144) × 64 / 22050 × 65536
+ */
 #define YM_STEP_CONST  (3579545.0f * 64.0f * 65536.0f / (72.0f * 262144.0f * 22050.0f))
 
 /* ===== 解码音色 dump ===== */
@@ -186,10 +198,10 @@ static void ym_apply_patch(u8 ch) {
 
 /* ===== 算 step (16.16 定点) ===== */
 static u32 ym_calc_step(u16 fnum, u8 blk, u8 ml) {
-    /* step = fnum × (1<<blk) × YM_STEP_CONST × ml
-     * ml 是查表后的值 (ym_ml_table), 实际 = ml/2 */
+    /* step = fnum × (1<<blk) × YM_STEP_CONST × ml / 2
+     * 实测整体高一个八度, 再 /2 修正 */
     float base = (float)fnum * (float)(1 << blk) * YM_STEP_CONST;
-    u32 step = (u32)(base * (float)ml / 2.0f);
+    u32 step = (u32)(base * (float)ml / 2.0f / 2.0f);
     return step;
 }
 
@@ -327,6 +339,9 @@ void ym2413_init(void) {
     }
     for (i = 0; i < 0x40; i++) ym_reg[i] = 0;
     ym_rhythm_mode = 0;
+    ym_noise_seed = 1;
+    ym_noise_step = 0;
+    ym_noise_val = 0;
     ym_wait_cnt = 0;
     ym_test_flag = 0;
 }
@@ -434,52 +449,119 @@ void ym2413_wr(u8 reg, u8 val) {
     }
 }
 
-/* ===== FM 渲染 (极简核心, 参考 12k128 fm.c) ===== */
+/* ===== 噪声推进 (AY8910 原理: 17-bit LFSR) ===== */
+static void ym_update_noise(void) {
+    /* 噪声频率较高, 每采样推进多次 */
+    ym_noise_step++;
+    if (ym_noise_step >= 4) {   /* 控制噪声频率 */
+        ym_noise_step = 0;
+        if (ym_noise_seed & 1)
+            ym_noise_seed ^= 0x24000;   /* AY8910 反馈多项式 */
+        ym_noise_seed >>= 1;
+    }
+    ym_noise_val = ym_noise_seed & 1;
+}
+
+/* ===== 单通道标准 FM 渲染 (OP1→OP2) ===== */
+static s16 ym_render_fm(u8 ch) {
+    YM_OP *mod = &ym_ch[ch].mod;
+    YM_OP *car = &ym_ch[ch].car;
+    u8 idx;
+    s8 wave_val, ch_out;
+
+    if (!mod->step) return 0;
+
+    /* OP1 (modulator) */
+    mod->pos += mod->step;
+    idx = (u8)(mod->pos >> 16) & 0x3F;
+    idx += (u8)mod->fb_val;
+    wave_val = mod->wave[idx & 0x3F];
+    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
+    ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
+    if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
+    else mod->fb_val = 0;
+
+    /* OP2 (carrier) */
+    car->pos += car->step;
+    idx = (u8)(car->pos >> 16) & 0x3F;
+    idx += (u8)ch_out;
+    wave_val = car->wave[idx & 0x3F];
+    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
+    ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
+    return ch_out;
+}
+
+/* ===== FM 渲染 (极简核心 + rhythm mode 鼓声) ===== */
 s16 ym2413_render(void) {
-    u8 ch;
+    u8 ch, r14, idx, is_drum;
     s16 total = 0;
-    YM_OP *mod, *car;
+    s16 drum_out;
+    s8 wave_val, hh, cym;
+    YM_OP *car, *mod;
 
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
+    /* 噪声推进 (鼓声用) */
+    if (ym_rhythm_mode) ym_update_noise();
+
+    r14 = ym_reg[0x0E];
+
     for (ch = 0; ch < 9; ch++) {
+        is_drum = (ym_rhythm_mode && ch >= 6);
+
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
         }
 
-        mod = &ym_ch[ch].mod;
-        car = &ym_ch[ch].car;
-
-        /* ---- OP1 (modulator) ---- */
-        if (mod->step) {
-            u8 idx;
-            s8 wave_val, ch_out;
-            mod->pos += mod->step;
-            idx = (u8)(mod->pos >> 16) & 0x3F;
-            idx += (u8)mod->fb_val;
-            wave_val = mod->wave[idx & 0x3F];
-            if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-            ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
-            if (mod->fb > 0)
-                mod->fb_val = (s8)((s8)ch_out >> mod->fb);
-            else
-                mod->fb_val = 0;
-
-            /* ---- OP2 (carrier, 被 OP1 调制) ---- */
-            car->pos += car->step;
-            idx = (u8)(car->pos >> 16) & 0x3F;
-            idx += (u8)ch_out;
-            wave_val = car->wave[idx & 0x3F];
-            if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-            ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
-            total += ch_out;
+        if (is_drum) {
+            if (ch == 6) {
+                /* BD: 标准 FM */
+                total += ym_render_fm(ch);
+            } else if (ch == 7) {
+                /* ch7: HH (mod) + SD (car) */
+                car = &ym_ch[ch].car;
+                if (r14 & 0x01) {   /* HH */
+                    hh = ym_noise_val ? 20 : -20;
+                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(&ym_ch[ch].mod);
+                    drum_out = (s8)(((s16)hh * (s16)(ym_ch[ch].mod.level + 1)) >> 5);
+                    total += drum_out;
+                }
+                if (r14 & 0x08) {   /* SD */
+                    car->pos += car->step;
+                    idx = (u8)(car->pos >> 16) & 0x3F;
+                    if (ym_noise_val) idx ^= 0x20;
+                    wave_val = car->wave[idx];
+                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
+                    drum_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
+                    total += drum_out;
+                }
+            } else { /* ch8: TOM (mod) + CYM (car) */
+                mod = &ym_ch[ch].mod;
+                car = &ym_ch[ch].car;
+                if (r14 & 0x04) {   /* TOM */
+                    mod->pos += mod->step;
+                    idx = (u8)(mod->pos >> 16) & 0x3F;
+                    wave_val = mod->wave[idx];
+                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
+                    drum_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
+                    total += drum_out;
+                }
+                if (r14 & 0x02) {   /* CYM */
+                    cym = ym_noise_val ? 15 : -15;
+                    if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
+                    drum_out = (s8)(((s16)cym * (s16)(car->level + 1)) >> 5);
+                    total += drum_out;
+                }
+            }
+        } else {
+            /* 标准旋律通道 */
+            total += ym_render_fm(ch);
         }
     }
 
-    /* 缩放到和其他音源匹配的范围 */
     total <<= 1;
     if (total > 32767) total = 32767;
     if (total < -32768) total = -32768;
