@@ -150,6 +150,7 @@ static u8 data ym_noise_step;
 static u8 data ym_noise_val;
 static u8 data ym_wait_cnt;
 static u8 data ym_test_flag;
+static u8 data ym_prev_drum_bits;  /* reg 0x0E 鼓声 bit 上次值 (边沿检测) */
 
 /* ===== 鼓声状态 (单 op, 简化路径) ===== */
 /* BD/TOM/HH/CYM/SD 各 1 个单 op */
@@ -307,13 +308,16 @@ static void ym_update_keys(void) {
             ym_key_off(ch);
         }
     }
-    /* rhythm mode: reg 0x0E 各 bit 触发鼓声 (单 op 简化路径) */
+    /* rhythm mode: reg 0x0E 鼓声 bit 边沿触发 (0→1 时触发一次) */
     if (rhythm) {
-        if ((r14 >> 4) & 1) ym_drum_trigger(0);                    /* BD */
-        if ((r14 >> 3) & 1) ym_drum_trigger(4);                    /* SD */
-        if ((r14 >> 2) & 1) ym_drum_trigger(1);                    /* TOM */
-        if (r14 & 1)        ym_drum_trigger(2);                    /* HH */
-        if ((r14 >> 1) & 1) ym_drum_trigger(3);                    /* CYM */
+        u8 drum_bits = r14 & 0x1F;  /* BD(bit4) SD(bit3) TOM(bit2) CYM(bit1) HH(bit0) */
+        u8 new_bits = drum_bits & ~ym_prev_drum_bits;  /* 只触发 0→1 的 bit */
+        ym_prev_drum_bits = drum_bits;
+        if (new_bits & 0x10) ym_drum_trigger(0);  /* BD */
+        if (new_bits & 0x08) ym_drum_trigger(4);  /* SD */
+        if (new_bits & 0x04) ym_drum_trigger(1);  /* TOM */
+        if (new_bits & 0x01) ym_drum_trigger(2);  /* HH */
+        if (new_bits & 0x02) ym_drum_trigger(3);  /* CYM */
     }
 }
 
