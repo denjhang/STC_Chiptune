@@ -91,9 +91,12 @@ void fds_init(void) {
     fds.mod_halt = 1;
     fds.mod_pos = 0;
     fds.mod_write_pos = 0;
-    fds.master_io = 1;      /* 默认使能 */
+    fds.master_io = 1;      /* 默认使能 (对齐 libvgm device_reset: $4023=0x83) */
     fds.master_vol = 0;
-    fds.master_env_speed = 0;
+    /* FDS BIOS reset 自动写 $408A=0xE8 (master envelope speed).
+     * 很多游戏 (如 Zelda) 不显式写 $408A, 依赖 BIOS 默认值.
+     * 如果设 0, Tick 里 master_env_speed!=0 检查失败 → 包络永不跑. */
+    fds.master_env_speed = 0xE8;
     fds.fout = 0;
     fds.rc_accum = 0;
     fds_base_count = 0;

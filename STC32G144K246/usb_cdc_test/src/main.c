@@ -105,9 +105,9 @@ void tm0_isr() interrupt 1
     mix = 0;
     if (ay_active) mix += ay_render();
     if (sn_active) mix += sn_render();
-    if (scc_active) mix += (s16)(scc_render() / 2);
+    if (scc_active) mix += (s16)(scc_render() / 4);
     if (nes_active) mix += nes_render();
-    if (fds_active) mix += fds_render() / 16;  /* FDS 增益大, /16 避免饱和压低其他通道 */
+    if (fds_active) mix += fds_render() / 32;  /* FDS 增益大, /32 避免饱和压低其他通道 */
     if (gb_active)  mix += gb_render();
 
     mix *= 8;
