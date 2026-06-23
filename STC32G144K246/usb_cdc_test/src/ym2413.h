@@ -9,7 +9,7 @@
 
 void ym2413_init(void);
 void ym2413_wr(u8 reg, u8 val);    /* 直接寄存器写 (reg 0x00-0x3F) */
-void ym2413_set_clock(u32 clock_hz); /* 时钟设置 (标准 3579545 Hz) */
+void ym2413_set_clock(u32 clock_hz); /* 固定 3.579545MHz, 保留接口兼容 */
 s16  ym2413_render(void);           /* 每采样调用, 返回 mono 输出 */
 
 #endif
