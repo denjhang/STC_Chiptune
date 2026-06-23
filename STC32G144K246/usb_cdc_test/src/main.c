@@ -10,6 +10,7 @@
 #include "scc.h"
 #include "nes.h"
 #include "fds.h"
+#include "ym2413.h"
 #include "gb.h"
 
 char *USER_DEVICEDESC = 0;
@@ -29,6 +30,7 @@ static u8 sn_active = 0;
 static u8 scc_active = 0;
 static u8 nes_active = 0;
 static u8 fds_active = 0;
+static u8 ym_active = 0;
 static u8 gb_active = 0;
 #define BOOT_NOTE_TICKS 44100  /* 2 秒 (22050 * 2) */
 
@@ -108,6 +110,7 @@ void tm0_isr() interrupt 1
     if (scc_active) mix += (s16)(scc_render() / 4);
     if (nes_active) mix += nes_render();
     if (fds_active) mix += fds_render() / 32;  /* FDS 增益大, /32 避免饱和压低其他通道 */
+    if (ym_active)  mix += ym2413_render() / 2;
     if (gb_active)  mix += gb_render();
 
     mix *= 8;
@@ -215,7 +218,7 @@ void process_uart(void)
              * 0xD2:             4 字节 (cmd+3)
              * 0xB5/0xB7:        5 字节 (cmd+4)
              * 0xB6:             4 + len 字节 (cmd+addr_lo+addr_hi+len+data[len]) */
-            if (b == 0xA0 || b == 0x50 || b == 0xB3 || b == 0xB4 || b == 0xBD) {
+            if (b == 0xA0 || b == 0x50 || b == 0xB3 || b == 0xB4 || b == 0xBD || b == 0x51) {
                 if (avail < 3) return;
             } else if (b == 0xB8) {
                 if (avail < 2) return;
@@ -255,6 +258,16 @@ void process_uart(void)
             if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
             sn_active = 1;
             sn_wr(d);
+        }
+        else if (b == 0x51)
+        {
+            /* YM2413: [0x51][reg][data] */
+            r = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            d = RX1_Buffer[TX1_Cnt];
+            if (++TX1_Cnt >= UART1_BUF_LENGTH) TX1_Cnt = 0;
+            ym_active = 1;
+            ym2413_wr(r, d);
         }
         else if (b == 0xD2)
         {
@@ -377,12 +390,14 @@ void process_uart(void)
             scc_active = 0;
             nes_active = 0;
             fds_active = 0;
+            ym_active = 0;
             gb_active = 0;
             sn_init();
             ay_init();
             scc_init();
             nes_init();
             fds_init();
+            ym2413_init();
             gb_init();
         }
         else if (b == 0xB3)
@@ -409,6 +424,7 @@ void main(void)
     scc_init();
     nes_init();
     fds_init();
+    ym2413_init();
     gb_init();
     test_start();
     timer0_init();
