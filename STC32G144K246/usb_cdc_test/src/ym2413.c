@@ -77,24 +77,27 @@ typedef struct {
     u8 car_ar, car_dr;
     u8 mod_sl, mod_rr;     /* sustain level / release rate */
     u8 car_sl, car_rr;
+    u8 mod_eg, car_eg;     /* EG type: 0=sustaining(保持SL), 1=non-sustaining(降到0) */
 } YM_VOICE_PATCH;
 
 /* ===== Operator 状态 (极简 FM) ===== */
 typedef struct {
-    u8 active;        /* 1=正在发声 */
-    u8 ml;            /* frequency multiplier (查表后, ym_ml_table[ML]) */
-    u8 tl;            /* total level (0-31, 31=最大声) */
-    u8 atk, decy;     /* attack/decay speed (查表后) */
-    u8 sul;           /* sustain level (0-31) */
-    u8 rel;           /* release speed (查表后) */
-    u8 fb;            /* feedback (0-7, mod only) */
-    u32 step;         /* phase step (16.16 定点, = base_step * ml) */
-    u32 pos;          /* phase accumulator (16.16 定点) */
-    s8 fb_val;        /* feedback accumulator */
-    u8 env_state;     /* 0=off,1=atk,2=dec,3=sus,4=rel */
-    u8 env_cnt;       /* envelope counter */
-    u8 env_step;      /* current envelope speed */
-    u8 level;         /* current envelope level (0-31) */
+    u8 active;
+    u8 ml;
+    u8 tl;
+    u8 atk, decy;
+    u8 sul;
+    u8 rel;
+    u8 fb;
+    u8 eg_type;       /* 0=sustaining(保持SL), 1=non-sustaining(降到0) */
+    u8 sus_flag;      /* 通道 sustain flag (reg 0x2x bit5) */
+    u32 step;
+    u32 pos;
+    s8 fb_val;
+    u8 env_state;
+    u8 env_cnt;
+    u8 env_step;
+    u8 level;
 } YM_OP;
 
 /* ===== 通道 (9 旋律 + rhythm) ===== */
@@ -128,7 +131,9 @@ static u8 data ym_test_flag;
 /* ===== 解码音色 dump ===== */
 static void ym_decode_patch(const u8 *dump, YM_VOICE_PATCH *p) {
     p->mod_ml = dump[0] & 0x0F;
+    p->mod_eg = (dump[0] >> 5) & 1;   /* bit5 = EG type */
     p->car_ml = dump[1] & 0x0F;
+    p->car_eg = (dump[1] >> 5) & 1;
     p->mod_tl = dump[2] & 0x3F;
     p->mod_fb = dump[3] & 0x07;
     p->mod_ar = (dump[4] >> 4) & 0x0F;
@@ -152,11 +157,13 @@ static void ym_apply_patch(u8 ch) {
     mod->tl = 31 - (p->mod_tl >> 1);
     if (mod->tl > 31) mod->tl = 31;
     mod->fb = p->mod_fb;
+    mod->eg_type = p->mod_eg;
     mod->atk  = ym_env_cnt[p->mod_ar];
     mod->decy = ym_env_cnt[p->mod_dr];
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_env_cnt[p->mod_rr];
     car->fb = 0;
+    car->eg_type = p->car_eg;
     car->atk  = ym_env_cnt[p->car_ar];
     car->decy = ym_env_cnt[p->car_dr];
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
@@ -180,28 +187,42 @@ static void ym_update_step(u8 ch) {
     ym_ch[ch].car.step = ym_calc_step(fnum, blk, ym_ch[ch].car.ml);
 }
 
-/* ===== key on/off ===== */
+/* ===== key on/off (行为对齐 YM2413) ===== */
 static void ym_key_on(u8 ch) {
+    YM_OP *mod = &ym_ch[ch].mod;
+    YM_OP *car = &ym_ch[ch].car;
     ym_ch[ch].key_on = 1;
-    ym_ch[ch].mod.pos = 0;
-    ym_ch[ch].car.pos = 0;
-    ym_ch[ch].mod.fb_val = 0;
-    ym_ch[ch].mod.env_state = 1;
-    ym_ch[ch].mod.env_cnt = 250;
-    ym_ch[ch].mod.level = 0;
-    ym_ch[ch].mod.env_step = ym_ch[ch].mod.atk;
-    ym_ch[ch].car.env_state = 1;
-    ym_ch[ch].car.env_cnt = 250;
-    ym_ch[ch].car.level = 0;
-    ym_ch[ch].car.env_step = ym_ch[ch].car.atk;
+    mod->pos = 0; car->pos = 0;
+    mod->fb_val = 0;
+    /* AR=0 → 不启动 (保持 mute) */
+    /* AR=15 (atk=env_cnt[15]=255, 最快) → 跳过 attack, 直接到 sustain level */
+    mod->level = 0; car->level = 0;
+    if (mod->atk >= 255) {
+        mod->level = 31; mod->env_state = 2; mod->env_step = mod->decy;
+    } else if (mod->atk == 0) {
+        mod->env_state = 0; mod->level = 0;
+    } else {
+        mod->env_state = 1; mod->env_cnt = 250; mod->env_step = mod->atk;
+    }
+    if (car->atk >= 255) {
+        car->level = 31; car->env_state = 2; car->env_step = car->decy;
+    } else if (car->atk == 0) {
+        car->env_state = 0; car->level = 0;
+    } else {
+        car->env_state = 1; car->env_cnt = 250; car->env_step = car->atk;
+    }
 }
 
 static void ym_key_off(u8 ch) {
+    YM_OP *mod = &ym_ch[ch].mod;
+    YM_OP *car = &ym_ch[ch].car;
     ym_ch[ch].key_on = 0;
-    ym_ch[ch].mod.env_state = 4;
-    ym_ch[ch].mod.env_step = ym_ch[ch].mod.rel;
-    ym_ch[ch].car.env_state = 4;
-    ym_ch[ch].car.env_step = ym_ch[ch].car.rel;
+    mod->env_state = 4; car->env_state = 4;
+    /* Release 速率 (行为对齐 YM2413):
+     *   sus_flag=1 → 固定速率 5 (ym_env_cnt[5])
+     *   sus_flag=0 → 用 RR (rel) */
+    if (mod->sus_flag) mod->env_step = ym_env_cnt[5]; else mod->env_step = mod->rel;
+    if (car->sus_flag) car->env_step = ym_env_cnt[5]; else car->env_step = car->rel;
 }
 
 /* ===== 更新 key 状态 (reg 0x20-0x28 或 0x0E 改变时) ===== */
@@ -217,27 +238,37 @@ static void ym_update_keys(void) {
     }
 }
 
-/* ===== 包络 tick (极简 ADSR) ===== */
+/* ===== 包络 tick (行为对齐 YM2413) ===== */
 static void ym_env_tick(YM_OP *op) {
     u8 cnt = op->env_cnt;
     u8 step = op->env_step;
     if (cnt >= step) { op->env_cnt = cnt - step; return; }
     op->env_cnt = 250;
     switch (op->env_state) {
-    case 1: /* attack */
+    case 1: /* attack: level 0→31 */
         if (op->level < 31) op->level++;
         if (op->level >= 31) {
-            op->env_state = 2;
+            op->env_state = 2;   /* → decay */
             op->env_step = op->decy;
         }
         break;
-    case 2: /* decay */
+    case 2: /* decay: level 31→sul */
         if (op->level > op->sul) op->level--;
-        else { op->env_state = 3; op->env_step = 0; }
+        else {
+            op->env_state = 3;   /* → sustain */
+            /* Sustain 速率 (行为对齐 YM2413):
+             *   EG=0 (sustaining) → 保持 SL, step=0
+             *   EG=1 (non-sustaining) → 继续降, step=RR */
+            op->env_step = op->eg_type ? op->rel : 0;
+        }
         break;
-    case 3: /* sustain: 保持, 不变 */
+    case 3: /* sustain: EG=0 保持 SL, EG=1 继续降到 0 */
+        if (op->eg_type) {
+            if (op->level > 0) op->level--;
+        }
+        /* EG=0: step=0, 永远不进这里 (cnt>=step 立即返回) */
         break;
-    case 4: /* release */
+    case 4: /* release: level→0 */
         if (op->level > 0) op->level--;
         break;
     default: break;
@@ -320,6 +351,8 @@ void ym2413_wr(u8 reg, u8 val) {
     case 0x25: case 0x26: case 0x27: case 0x28:
         ch = reg - 0x20;
         ym_ch[ch].sus_flag = (val >> 5) & 1;
+        ym_ch[ch].mod.sus_flag = (val >> 5) & 1;
+        ym_ch[ch].car.sus_flag = (val >> 5) & 1;
         ym_update_step(ch);
         ym_update_keys();
         break;
