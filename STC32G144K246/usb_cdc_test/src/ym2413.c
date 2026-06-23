@@ -511,40 +511,24 @@ static s16 ym_render_fm(u8 ch) {
     return ch_out;
 }
 
-/* ===== FM 渲染 (极简核心 + rhythm mode 鼓声) ===== */
+/* ===== FM 渲染 (6旋律 + 鼓声简化) ===== */
 s16 ym2413_render(void) {
-    u8 ch, r14, idx, is_drum;
+    u8 ch;
     s16 total = 0;
-    s16 drum_out;
-    s8 wave_val, hh, cym;
-    YM_OP *car, *mod;
 
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
-    /* 噪声推进 (鼓声用) */
-    if (ym_rhythm_mode) ym_update_noise();
-
-    r14 = ym_reg[0x0E];
-
-    for (ch = 0; ch < 9; ch++) {
-        is_drum = (ym_rhythm_mode && ch >= 6);
-
-        /* 跳过无声通道: 没频率 或 没 key_on 且包络结束 */
+    /* 只渲染 ch0-5 旋律 (6通道), ch6-8 留给鼓声不走旋律渲染 */
+    for (ch = 0; ch < 6; ch++) {
+        /* 跳过无声通道 */
         if (ym_ch[ch].mod.step == 0) continue;
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
         }
-
-        if (is_drum) {
-            /* 鼓声暂未实现 (rhythm mode ch6/7/8 跳过) */
-            continue;
-        } else {
-            /* 标准旋律通道 */
-            total += ym_render_fm(ch);
-        }
+        total += ym_render_fm(ch);
     }
 
     total <<= 1;
