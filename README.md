@@ -151,6 +151,7 @@ STC32G12K128 支持 HSPWM 高级 PWM, 理论上可将 ARR 从 255 提升到 1023
 | **AY8910** (YM2149) | `0xA0` | 3 方波 + 噪声 + 包络 | 17640Hz | 完美, ZX Spectrum/MSX 曲目 |
 | **SN76489** | `0x50` | 3 方波 + 噪声 | 17640Hz | Sega Master System, 3 种变体 |
 | **FM** (自定义 2-Op) | `0x51` | 16 voice (32 op) | 17640Hz | 2-Operator FM, 6 种波形 |
+| **YM2413** (OPLL) | VGM | 9 ch (旋律+rhythm) | 17640Hz | 寄存器级兼容, 15 内置音色 + 鼓声 |
 | **Gigatron** | `0xB0` | 4 ch | 8820Hz | 4ch TTL 波形, 直接写 fnum |
 | **WT** (Wavetable) | `0xC0` | 4 ch | 17640Hz | 14 种波形, ADSR 包络 |
 | **ADPCM** | `0xC0` | 6 ch | 17640Hz | 鼓声 + SF2 旋律采样 |
@@ -282,6 +283,35 @@ Round-robin: `fm_wait_cnt & 0x0F`, 每个 tick 只更新 1 个 operator 的包�
 - 包络 `>> 10` 代替 `/(31*31)` (误差 < 0.5%)
 - Round-robin 包络 tick 分散 CPU 负载
 - 反馈 `>> fb` (0-7) 一条移位指令
+
+### 2.5b YM2413 (OPLL) FM 合成
+
+Yamaha YM2413 (OPLL) 寄存器级兼容, 通过 VGM 解析播放。15 内置音色 + 用户音色 + rhythm mode 鼓声。
+
+#### 架构 (s8 精简核心)
+
+- **9 通道**, 每通道 = modulator + carrier (2-Operator FM)
+- **64 点 s8 波形表** (±31): 正弦 (WS=0) + 半正弦 (WS=1, 负半周镜像)
+- **相位累加器**: 16.16 定点 u32, `pos += step`, `idx = (pos>>16) & 0x3F`, blk-1 修正八度
+- **输出公式**: `(wave × (level+1) × (tl+1)) >> 10`, 结果 s8, 最后 `<<1`
+- **Round-robin**: 每 16 采样 tick 一个 operator 的包络
+
+#### 包络 (level 0~31 线性, AR/DR/RR 三张查表)
+
+- **AR/DR/RR 表**: 各 16 个 u8 值, 反推自 emu2413 attack/decay/release 全程时间
+- **key_on**: env_cnt=0 立即开始; atk≤2 (AR≥7) 瞬间到顶跳过 attack
+- **EG 语义**: EG=1 sustaining (保持 SL) / EG=0 non-sustaining (继续用 RR 降)
+- **env_tick**: 加法计数器 `cnt < step ? cnt++ : 走包络`, 消除旧减法 reset 250 的累积误差
+
+#### 音量映射
+
+- reg 0x30-0x38 低 4 位 = volume (0=最大, 15=最小)
+- `vol = (15-reg_vol) << 2`, `car.tl = vol >> 1` (vol=0 最大→tl=30 满输出)
+
+#### PC 验证工具
+
+- `tools/ym2413_wav_gen.py`: 忠实 emu2413 移植 (render_emu2413) + V3 s8 调参核心 (render_fm_v3)
+- `tools/fw_real_sim.py`: 严格 1:1 下位机 PC 仿真 (render_fw_real), 改下位机前必须在此验证
 
 ### 2.6 Gigatron TTL 波形
 
