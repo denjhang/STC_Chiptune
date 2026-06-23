@@ -25,17 +25,35 @@
 
 ## YM2413 下位机调参记录
 
-- **目标**：下位机 s8 核心（64 点 ±31 波形）通过**只改表**对齐 emu2413 包络行为，**严禁改架构**（不改 round-robin、不改 env_tick 逻辑、不改输出公式、不改波形/相位/ml/结构体）。
-- **下位机真实限制**（da1cf8a 基线）：
-  - 64 点 s8 波形，振幅 **±31**（不是 ±127）；halfsin 负半周**镜像**（不是静音）
-  - ml_table `[1,2,4,6,8,10,12,14,16,18,20,22,24,24,24,24]`（和 emu 不同）
-  - 相位 16.16 定点 u32，`pos>>16` 取索引，blk-1 修正八度
-  - 包络 level(0~31) **线性**，env_cnt/env_step **u8**，round-robin 每 16 采样 tick 一个 op
-  - 输出 `(wave × (level+1) × (tl+1)) >> 10`，结果 s8，最后 `<<1`
-- **PC 仿真工具**：`tools/fw_real_sim.py`（render_fw_real，严格 1:1 忠实下位机所有限制）。先在此验证再改下位机。
-- **已完成（commit 93f7cb6）**：AR/DR/RR 三张表替换 ym_env_cnt 单表，反推自 emu2413 attack/decay/release 全程时间。实测不死机、包络更接近、**音量偏小（待调）**。
-- **当前问题**：音量偏小。注意 da1cf8a 原版音量在实机合适，偏差来自 PC emu2413 输出标定不同（±2042 vs 下位机 ±62），**不是下位机音量 bug**，需通过整体后处理放大对齐，不要改 `>>10`/`<<1` 输出公式。
-- **教训**：之前 commit 873a3a5 的下位机改造（eg_out/LEVEL_GAIN/LFO/19-bit 相位）全部废弃——改了架构导致无声。下位机改动必须严格"只改表"。
+### 正确流程（必须遵守）
+1. **先在 PC 仿真验证**（`tools/fw_real_sim.py`），对照 emu2413 逐个乐器看 level 曲线
+2. **fw_real_sim.py 必须和下位机 1:1 同步**——改下位机任何东西，仿真同步改、同步验证
+3. **只改数值/表**，不改架构（round-robin/env_tick 逻辑/输出公式/波形/相位/ml/结构体）
+4. PC 验证通过再改下位机，编译通过再烧录
+
+### 下位机真实限制（da1cf8a 基线）
+- 64 点 s8 波形，振幅 **±31**；halfsin 负半周**镜像**（不是静音）
+- ml_table `[1,2,4,6,8,10,12,14,16,18,20,22,24,24,24,24]`（和 emu 不同）
+- 相位 16.16 定点 u32，`pos>>16` 取索引，blk-1 修正八度
+- 包络 level(0~31) **线性**，env_cnt/env_step **u8**，round-robin 每 16 采样 tick 一个 op
+- 输出 `(wave × (level+1) × (tl+1)) >> 10`，结果 s8，最后 `<<1`
+
+### 当前状态（commit 93bc777，实测最佳）
+通过只改数值/表修复了以下问题，实机听感最接近 emu2413：
+- **AR/DR/RR 三张表**（commit 93f7cb6）：替换 ym_env_cnt 单表，反推自 emu2413 速率
+- **key_on env_cnt=0**（commit 1f45584）：消除 attack 启动延迟（旧值 250 导致延迟 4000 采样）
+- **env_tick 加法计数器**（commit 1f45584）：修正旧减法 reset 250 的累积误差
+- **AR≥7 瞬间到顶**（commit d84dee0）：atk≤2 时跳过 attack，解决 round-robin 精度下限
+- **EG 语义修正**（commit 93bc777）：EG=1 sustaining 保持 / EG=0 non-sustaining 继续降（之前写反了）
+- **car.tl 映射修正**（commit 93bc777）：`tl = vol>>1`（之前 `31-vol>>1` 写反，导致最大音量时输出极小）
+
+### EG 语义（对齐 emu2413 get_parameter_rate）
+- **EG=1 = sustaining**：sustain 阶段保持 SL 不降（step=0）
+- **EG=0 = non-sustaining**：sustain 阶段继续用 RR 速率下降
+
+### 教训
+- commit 873a3a5 的下位机改造（eg_out/LEVEL_GAIN/LFO/19-bit 相位）全部废弃——改了架构导致无声
+- PC 仿真必须严格同步下位机，否则验证结果是假的（fw_real_sim.py 早期没同步导致反复试错）
 
 ## 项目常用命令
 
