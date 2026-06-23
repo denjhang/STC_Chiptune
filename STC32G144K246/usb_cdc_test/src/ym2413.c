@@ -152,7 +152,7 @@ static u8 data ym_wait_cnt;
 static u8 data ym_test_flag;
 
 /* ===== 鼓声状态 (单 op, 简化路径) ===== */
-/* BD/TOM/HH/CYM 各 1 个单 op, SD 暂不实现 */
+/* BD/TOM/HH/CYM/SD 各 1 个单 op */
 typedef struct {
     u8 active;          /* 是否在响 */
     u8 level;           /* 包络 level 0~31 */
@@ -164,7 +164,7 @@ typedef struct {
     u32 pos;            /* 相位累加 */
 } YM_DRUM;
 
-static YM_DRUM xdata ym_drum[4];  /* 0=BD 1=TOM 2=HH 3=CYM */
+static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
 static void ym_drum_trigger(u8 idx);  /* 前向声明 */
 
 /* base step 常数: step_q16 = fnum × (1<<blk) × C
@@ -310,6 +310,7 @@ static void ym_update_keys(void) {
     /* rhythm mode: reg 0x0E 各 bit 触发鼓声 (单 op 简化路径) */
     if (rhythm) {
         if ((r14 >> 4) & 1) ym_drum_trigger(0);                    /* BD */
+        if ((r14 >> 3) & 1) ym_drum_trigger(4);                    /* SD */
         if ((r14 >> 2) & 1) ym_drum_trigger(1);                    /* TOM */
         if (r14 & 1)        ym_drum_trigger(2);                    /* HH */
         if ((r14 >> 1) & 1) ym_drum_trigger(3);                    /* CYM */
@@ -386,11 +387,12 @@ void ym2413_init(void) {
     ym_test_flag = 0;
     /* 鼓声参数初始化 (PC drum_fw_sim 试听确定) */
     /* BD=0: sin 100Hz, decay 快; TOM=1: sin 214Hz; HH=2: noise 755Hz; CYM=3: noise 755Hz 慢 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x21AC;  ym_drum[0].env_step = 1;  /* BD 100Hz */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4924;  ym_drum[1].env_step = 1;  /* TOM 214Hz */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF838;  ym_drum[2].env_step = 3;  /* HH 755Hz */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF838;  ym_drum[3].env_step = 40; /* CYM 755Hz 慢 */
-    for (i = 0; i < 4; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x20E7;  ym_drum[0].env_step = 1;  /* BD 100Hz */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x4675;  ym_drum[1].env_step = 1;  /* TOM 214Hz */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 3;  /* HH 755Hz */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 40; /* CYM 755Hz 慢 */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x082C;  ym_drum[4].env_step = 2;  /* SD 25Hz noise */
+    for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
 void ym2413_wr(u8 reg, u8 val) {
@@ -612,6 +614,7 @@ s16 ym2413_render(void) {
         total += ym_render_drum(1);  /* TOM */
         total += ym_render_drum(2);  /* HH */
         total += ym_render_drum(3);  /* CYM */
+        total += ym_render_drum(4);  /* SD */
     }
 
     total <<= 1;
