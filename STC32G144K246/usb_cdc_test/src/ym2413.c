@@ -165,8 +165,9 @@ typedef struct {
     u32 pos;
 } YM_DRUM;
 
-static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
+static YM_DRUM xdata ym_drum[4];  /* 0=BD 1=TOM 2=HH 3=CYM */
 static void ym_drum_trigger(u8 idx);  /* 前向声明 */
+static void ym_sd_trigger(void);      /* 前向声明 */
 
 /* base step 常数: step_q16 = fnum × (1<<blk) × C
  * YM2413 内部 PG_WIDTH=1024 (10-bit 相位), clock/72 采样率.
@@ -314,7 +315,7 @@ static void ym_update_keys(void) {
         u8 new_bits = drum_bits & ~ym_prev_drum_bits;  /* 只触发 0→1 的 bit */
         ym_prev_drum_bits = drum_bits;
         if (new_bits & 0x10) ym_drum_trigger(0);  /* BD */
-        if (new_bits & 0x08) ym_drum_trigger(4);  /* SD */
+        if (new_bits & 0x08) ym_sd_trigger();     /* SD (2-op ch6) */
         if (new_bits & 0x04) ym_drum_trigger(1);  /* TOM */
         if (new_bits & 0x01) ym_drum_trigger(2);  /* HH */
         if (new_bits & 0x02) ym_drum_trigger(3);  /* CYM */
@@ -398,8 +399,7 @@ void ym2413_init(void) {
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x1293;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD */
-    for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
+    for (i = 0; i < 4; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
 void ym2413_wr(u8 reg, u8 val) {
@@ -519,12 +519,35 @@ static void ym_update_noise(void) {
 }
 
 /* ===== 鼓声简化渲染 (单 op: 查表×level, 无 FM 调制) ===== */
-/* BD=0 TOM=1 HH=2 CYM=3 SD=4, oneshot 每采样 tick 包络 */
+/* BD=0 TOM=1 HH=2 CYM=3 oneshot, SD=ch6 走 2-op FM */
 static void ym_drum_trigger(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
     d->active = 1;
     d->level = 31;
     d->env_cnt = 0;
+}
+
+/* SD 2-op: ch6 mod=noise(25Hz) 调制 car=sin(240Hz), FB=2 */
+static void ym_sd_trigger(void) {
+    YM_OP *mod = &ym_ch[6].mod;
+    YM_OP *car = &ym_ch[6].car;
+    /* mod: noise 25Hz, FB=2, 快衰减 (noise先消失) */
+    mod->wave = ym_noise;
+    mod->step = 0x1293;     /* 25Hz @ 22050 */
+    mod->fb = 2;
+    mod->fb_val = 0;
+    mod->pos = 0;
+    mod->level = 31; mod->env_state = 2; mod->env_cnt = 0;
+    mod->atk = 0; mod->decy = 7; mod->sul = 0; mod->rel = 7;
+    mod->tl = 15; mod->eg_type = 0;
+    /* car: sin 240Hz, 慢衰减 (sine尾巴) */
+    car->wave = ym_sin;
+    car->step = 0xB254;     /* 240Hz @ 22050 */
+    car->pos = 0;
+    car->level = 31; car->env_state = 2; car->env_cnt = 0;
+    car->atk = 0; car->decy = 7; car->sul = 19; car->rel = 7;
+    car->tl = 31; car->eg_type = 0;
+    ym_ch[6].key_on = 1;
 }
 
 static s16 ym_render_drum(u8 idx) {
@@ -600,11 +623,18 @@ s16 ym2413_render(void) {
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
-    /* 只渲染 ch0-5 旋律 (6通道), ch6-8 留给鼓声不走旋律渲染 */
-    for (ch = 0; ch < 6; ch++) {
+    /* 只渲染 ch0-5 旋律 (6通道), ch6=SD(2-op鼓声), ch7-8 不用 */
+    for (ch = 0; ch < 7; ch++) {
         /* 跳过无声通道 */
         if (ym_ch[ch].mod.step == 0) continue;
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
+        /* SD (ch6) 衰减完后自动 key_off */
+        if (ch == 6 && ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
+            ym_ch[ch].key_on = 0;
+            ym_ch[ch].car.env_state = 0;
+            ym_ch[ch].mod.env_state = 0;
+            continue;
+        }
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
@@ -618,7 +648,7 @@ s16 ym2413_render(void) {
         total += ym_render_drum(1);  /* TOM */
         total += ym_render_drum(2);  /* HH */
         total += ym_render_drum(3);  /* CYM */
-        total += ym_render_drum(4);  /* SD */
+        /* SD 走 ch6 2-op, 在旋律循环里渲染 */
     }
 
     total <<= 1;
