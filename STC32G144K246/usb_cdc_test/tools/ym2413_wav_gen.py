@@ -18,7 +18,7 @@ fm_v3 分支: 下位机简化核心 (64 点 s8 波形 + 128 级 level).
   包络行为和 emu2413 完全一致 (复用同一份 eg_out 计算).
 
 每个音色: 1s keyon + 1s keyoff = 2s, 完整 ADSR.
-输出: tools/emu2413_inst*.wav + tools/fm_v3_inst*.wav (共 30 个)
+输出: tools/emu2413_inst*.wav + tools/emu2413_drum_*.wav + tools/fm_v3_inst*.wav (共 35 个)
 """
 import math, struct, wave, os
 
@@ -44,6 +44,10 @@ DEFAULT_INST = [
     [0x61,0x50,0x0c,0x05,0xd2,0xf5,0x40,0x42],  # 13: Synthesizer Bass
     [0x01,0x01,0x55,0x03,0xe9,0x90,0x03,0x02],  # 14: Acoustic Bass
     [0x41,0x41,0x89,0x03,0xf1,0xe4,0xc0,0x13],  # 15: Electric Guitar
+    # 鼓声 patch (emu2413.c default_inst[16..18])
+    [0x01,0x01,0x18,0x0f,0xdf,0xf8,0x6a,0x6d],  # 16: BD mod+car (CH7)
+    [0x01,0x01,0x00,0x00,0xc8,0xd8,0xa7,0x68],  # 17: HH mod/SD car (CH8)
+    [0x05,0x01,0x00,0x00,0xf8,0xaa,0x59,0x55],  # 18: TOM mod/CYM car (CH9)
 ]
 
 NAMES = ["User","Violin","Guitar","Piano","Flute","Clarinet","Oboe","Trumpet",
@@ -556,6 +560,208 @@ class EmuChannel:
 
 
 # ============================================================
+#  鼓声完整渲染器 (对应 emu2413 update_output 的 rhythm 分支)
+# ============================================================
+# 鼓声音色 (default_inst 16/17/18):
+#   16: [0x01,0x01,0x18,0x0f,0xdf,0xf8,0x6a,0x6d]  BD mod(SD共用)/BD car
+#   17: [0x01,0x01,0x00,0x00,0xc8,0xd8,0xa7,0x68]  HH mod/SD car
+#   18: [0x05,0x01,0x00,0x00,0xf8,0xaa,0x59,0x55]  TOM mod/CYM car
+#
+# 5 个鼓声对应 slot 映射 (update_rhythm_mode):
+#   CH7 (slot 12=MOD, slot 13=CAR) -> patch 16 -> Bass Drum (标准二运算器)
+#   CH8 (slot 14=MOD, slot 15=CAR) -> patch 17 -> HH(SLOT_HH=14), Snare(SLOT_SD=15)
+#   CH9 (slot 16=MOD, slot 17=CAR) -> patch 18 -> TOM(SLOT_TOM=16), Cymbal(SLOT_CYM=17)
+#
+# key_on 行为 (update_key_status, rhythm_mode=1):
+#   BD:    r14&0x10 -> slots 12,13 都 key on (type=1,carrier)
+#   HH:    r14&0x01 -> slot 14 key on (type=3,single)
+#   SD:    r14&0x08 -> slot 15 key on (type=3,single)
+#   TOM:   r14&0x04 -> slot 16 key on (type=3,single)
+#   CYM:   r14&0x02 -> slot 17 key on (type=3,single)
+
+DRUM_NAMES = ["BassDrum", "SnareDrum", "TomTom", "HiHat", "TopCymbal"]
+
+def _PD(phase):
+    """emu2413 宏: 直接指定 10-bit 相位偏移"""
+    return (phase >> (10 - PG_BITS)) if PG_BITS < 10 else (phase << (PG_BITS - 10))
+
+def update_noise(noise, cycle):
+    """17-bit LFSR 噪声, 每步: if noise&1: noise ^= 0x800200; noise >>= 1"""
+    for _ in range(cycle):
+        if noise & 1:
+            noise ^= 0x800200
+        noise >>= 1
+    return noise
+
+def update_short_noise(pg_hh, pg_cym):
+    """short_noise = (h_bit2^h_bit7) | (h_bit3^c_bit5) | (c_bit3^c_bit5)"""
+    h_bit2 = (pg_hh >> (PG_BITS - 8)) & 1
+    h_bit7 = (pg_hh >> (PG_BITS - 3)) & 1
+    h_bit3 = (pg_hh >> (PG_BITS - 7)) & 1
+    c_bit3 = (pg_cym >> (PG_BITS - 7)) & 1
+    c_bit5 = (pg_cym >> (PG_BITS - 5)) & 1
+    return (h_bit2 ^ h_bit7) | (h_bit3 ^ c_bit5) | (c_bit3 ^ c_bit5)
+
+
+class EmuRhythm:
+    """模拟 emu2413 rhythm 模式 (6 个 slot: BD1,BD2, HH, SD, TOM, CYM)
+    完整移植 update_output 的 rhythm 分支."""
+    def __init__(self):
+        # 鼓声音色: patch 16 -> slots 12(mod),13(car); patch 17 -> 14(mod),15(car); patch 18 -> 16(mod),17(car)
+        bd_mod_p, bd_car_p = dump_to_patch(DEFAULT_INST[16])
+        hh_sd_p_mod, hh_sd_p_car = dump_to_patch(DEFAULT_INST[17])
+        tom_cym_p_mod, tom_cym_p_car = dump_to_patch(DEFAULT_INST[18])
+
+        # 6 个 rhythm slot (对应 opll->slot[12..17])
+        self.slots = []
+        for i in range(6):
+            self.slots.append(Slot(12 + i))
+        # slot 类型: BD1=0(mod), BD2=1(car), HH=3(single), SD=3(single), TOM=3(single), CYM=3(single)
+        self.slots[0].type = 0  # BD mod
+        self.slots[1].type = 1  # BD car
+        self.slots[2].type = 3  # HH
+        self.slots[2].pg_keep = 1
+        self.slots[3].type = 3  # SD
+        self.slots[4].type = 3  # TOM
+        self.slots[5].type = 3  # CYM
+        self.slots[5].pg_keep = 1
+
+        # 分配 patch
+        self.slots[0].patch = bd_mod_p   # BD mod = patch 16 mod
+        self.slots[1].patch = bd_car_p   # BD car = patch 16 car
+        self.slots[2].patch = hh_sd_p_mod  # HH = patch 17 mod
+        self.slots[3].patch = hh_sd_p_car  # SD = patch 17 car
+        self.slots[4].patch = tom_cym_p_mod  # TOM = patch 18 mod
+        self.slots[5].patch = tom_cym_p_car  # CYM = patch 18 car
+
+        for s in self.slots:
+            s.eg_state = RELEASE
+            s.eg_out = EG_MUTE
+            commit_slot_update(s)
+
+        # 默认频率 (从真实 VGM OPLDRV 始终不变的寄存器值解码):
+        #   BD (CH7):   reg0x16=0x20, reg0x26=0x05 → fnum=288, block=2, freq≈109Hz
+        #   HH/SD (CH8): reg0x17=0x50, reg0x27=0x05 → fnum=336, block=2, freq≈127Hz
+        #   TOM/CYM (CH9): reg0x18=0xc0, reg0x28=0x01 → fnum=448, block=0, freq≈43Hz
+        for s in self.slots[:2]:  # BD mod + car (CH7)
+            s.fnum, s.blk = 288, 2
+            s.blk_fnum = (2 << 9) | 288
+            commit_slot_update(s)
+        for s in self.slots[2:4]:  # HH + SD (CH8)
+            s.fnum, s.blk = 336, 2
+            s.blk_fnum = (2 << 9) | 336
+            commit_slot_update(s)
+        for s in self.slots[4:6]:  # TOM + CYM (CH9)
+            s.fnum, s.blk = 448, 0
+            s.blk_fnum = (0 << 9) | 448
+            commit_slot_update(s)
+
+        self.eg_counter = 0
+        self.pm_phase = 0
+        self.am_phase = 0
+        self.lfo_am = 0
+        self.noise = 0x1
+        self.short_noise = 0
+
+    # 各鼓 key_on: 按照真实 YM2413 update_key_status 的 rhythm 分支
+    def key_bd(self):
+        """Bass Drum: slots 0(BD1 mod) + 1(BD2 car) 都 key on"""
+        slot_on(self.slots[0])
+        slot_on(self.slots[1])
+
+    def key_hh(self):
+        slot_on(self.slots[2])
+
+    def key_sd(self):
+        slot_on(self.slots[3])
+
+    def key_tom(self):
+        slot_on(self.slots[4])
+
+    def key_cym(self):
+        slot_on(self.slots[5])
+
+    def render_one_bass_drum(self):
+        """BD: 标准二运算器调制 (CH7 -> calc_slot_car(6, calc_slot_mod(6))), _RO 输出"""
+        # update_ampm
+        self.pm_phase = (self.pm_phase + 1) & 0xffffffff
+        self.am_phase += 1
+        self.lfo_am = am_table[(self.am_phase >> 6) % len(am_table)]
+        # update_slots
+        self.eg_counter += 1
+        for s in self.slots[:2]:  # BD mod + car
+            calc_envelope(s, self.eg_counter)
+            calc_phase(s, self.pm_phase)
+        # BD: 标准调制
+        mo = calc_slot_mod(self.slots[0], self.lfo_am)
+        co = calc_slot_car(self.slots[1], mo, self.lfo_am)
+        # noise: CH7 后 update_noise(opll, 14)
+        self.noise = update_noise(self.noise, 14)
+        return co  # _RO(x) = x
+
+    def render_one_sd_hh(self):
+        """Snare + HiHat: CH8 分支, 包含 update_noise(2)
+        返回 (snare, hihat)"""
+        self.pm_phase = (self.pm_phase + 1) & 0xffffffff
+        self.am_phase += 1
+        self.lfo_am = am_table[(self.am_phase >> 6) % len(am_table)]
+        self.eg_counter += 1
+        # update short_noise (在 update_slots 之前, 和 emu2413 顺序一致)
+        pg_hh = self.slots[2].pg_out
+        pg_cym = self.slots[5].pg_out
+        self.short_noise = update_short_noise(pg_hh, pg_cym)
+        # update HH, SD slots
+        for s in self.slots[2:4]:
+            calc_envelope(s, self.eg_counter)
+            calc_phase(s, self.pm_phase)
+        # HiHat: calc_slot_hat -> slot MOD(7) = slots[2]
+        slot_hh = self.slots[2]
+        if self.short_noise:
+            phase = _PD(0x2d0) if (self.noise & 1) else _PD(0x234)
+        else:
+            phase = _PD(0x34) if (self.noise & 1) else _PD(0xd0)
+        hihat = to_linear(slot_hh.wave_table[phase], slot_hh, 0)
+        # Snare: calc_slot_snare -> slot CAR(7) = slots[3]
+        slot_sd = self.slots[3]
+        if (slot_sd.pg_out >> (PG_BITS - 2)) & 1:
+            phase = _PD(0x300) if (self.noise & 1) else _PD(0x200)
+        else:
+            phase = _PD(0x0) if (self.noise & 1) else _PD(0x100)
+        snare = to_linear(slot_sd.wave_table[phase], slot_sd, 0)
+        # noise: CH8 后 update_noise(opll, 2)
+        self.noise = update_noise(self.noise, 2)
+        return snare, hihat  # 都是 _RO
+
+    def render_one_tom_cym(self):
+        """Tom + Cymbal: CH9 分支, 包含 update_noise(2)
+        返回 (tom, cym)"""
+        self.pm_phase = (self.pm_phase + 1) & 0xffffffff
+        self.am_phase += 1
+        self.lfo_am = am_table[(self.am_phase >> 6) % len(am_table)]
+        self.eg_counter += 1
+        for s in self.slots[4:6]:
+            calc_envelope(s, self.eg_counter)
+            calc_phase(s, self.pm_phase)
+        # Tom: calc_slot_tom -> slot MOD(8) = slots[4]
+        slot_tom = self.slots[4]
+        tom = to_linear(slot_tom.wave_table[slot_tom.pg_out], slot_tom, 0)
+        # Cymbal: calc_slot_cym -> slot CAR(8) = slots[5]
+        slot_cym = self.slots[5]
+        phase = _PD(0x300) if self.short_noise else _PD(0x100)
+        cym = to_linear(slot_cym.wave_table[phase], slot_cym, 0)
+        # noise: CH9 后 update_noise(opll, 2)
+        self.noise = update_noise(self.noise, 2)
+        return tom, cym  # 都是 _RO
+
+    def render_one_all(self):
+        """渲染一个采样, 返回混合输出 (BD+SD+HH+TOM+CYM)"""
+        bd = self.render_one_bass_drum()
+        sd, hh = self.render_one_sd_hh()
+        tom, cym = self.render_one_tom_cym()
+        return bd + sd + hh + tom + cym
+
+
+# ============================================================
 #  频率 -> (fnum, blk) 转换
 # ============================================================
 INTERNAL_RATE = 49715.9028  # 3579545 / 72
@@ -579,8 +785,7 @@ def freq_to_fnum_blk(freq):
 #  主渲染函数
 # ============================================================
 def render_emu2413(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
-    """完整 emu2413 渲染. 用真实内部采样率 INTERNAL_RATE (49716Hz).
-    返回 (samples_at_internal_rate)."""
+    """完整 emu2413 旋律通道渲染."""
     mod_patch, car_patch = dump_to_patch(DEFAULT_INST[inst_idx])
     ch = EmuChannel(mod_patch, car_patch)
     fnum, blk = freq_to_fnum_blk(freq)
@@ -597,6 +802,33 @@ def render_emu2413(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
         if i == n_keyon:
             ch.key_off()
         out.append(ch.render_one())
+    return out
+
+
+def render_drum(drum_type, dur_keyon=0.5, dur_keyoff=1.5):
+    """渲染单个鼓声.
+    drum_type: 'bd'/'sd'/'tom'/'hh'/'cym'
+    dur_keyon: 鼓声触发后持续渲染时间 (鼓声无 key_off, 自然衰减)
+    dur_keyoff: 衰减后继续渲染静音部分
+    返回 samples (INTERNAL_RATE)."""
+    rhy = EmuRhythm()
+    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
+
+    out = []
+    # key on 对应鼓声
+    if drum_type == 'bd':
+        rhy.key_bd()
+    elif drum_type == 'hh':
+        rhy.key_hh()
+    elif drum_type == 'sd':
+        rhy.key_sd()
+    elif drum_type == 'tom':
+        rhy.key_tom()
+    elif drum_type == 'cym':
+        rhy.key_cym()
+
+    for _ in range(n_total):
+        out.append(rhy.render_one_all())
     return out
 
 
@@ -753,7 +985,7 @@ def main():
     DUR_KEYOFF = 1.0
 
     print("=" * 72)
-    print("YM2413 15 音色 WAV 生成 (完整 emu2413 移植 + V3 简化对比)")
+    print("YM2413 15 音色 + 5 鼓声 WAV 生成 (完整 emu2413 移植 + V3 简化对比)")
     print(f"  频率: {FREQ} Hz")
     print(f"  时长: {DUR_KEYON}s keyon + {DUR_KEYOFF}s keyoff")
     print(f"  采样率: {SR} Hz (从 49716 重采样近似)")
@@ -770,6 +1002,14 @@ def main():
               f"car[AR={car_p.AR} DR={car_p.DR} SL={car_p.SL} RR={car_p.RR} EG={car_p.EG} ML={car_p.ML} WS={car_p.WS} KL={car_p.KL}] "
               f"-> {os.path.basename(fname)}")
 
+    print("\n--- emu2413 鼓声 ---")
+    drum_map = [('bd', 'BassDrum'), ('sd', 'SnareDrum'), ('tom', 'TomTom'), ('hh', 'HiHat'), ('cym', 'TopCymbal')]
+    for dtype, dname in drum_map:
+        samples = render_drum(dtype, dur_keyon=0.3, dur_keyoff=1.7)
+        fname = os.path.join(OUT_DIR, f"emu2413_drum_{dtype}.wav")
+        save_wav(fname, samples)
+        print(f"  {dname:<16} -> {os.path.basename(fname)}")
+
     print("\n--- fm_v3 (下位机简化核心) ---")
     for i in range(1, 16):
         mod_p, car_p = dump_to_patch(DEFAULT_INST[i])
@@ -781,7 +1021,7 @@ def main():
               f"-> {os.path.basename(fname)}")
 
     print(f"\n{'='*72}")
-    print(f"完成! 30 个 WAV 已输出到 tools/")
+    print(f"完成! 35 个 WAV 已输出到 tools/")
     print(f"{'='*72}")
 
 
