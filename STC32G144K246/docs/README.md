@@ -11,13 +11,14 @@ STC32G144K246 是 STC32G12K128 的升级型号（144KB Flash, 12-bit DAC, USB HI
 1. **USB CDC 单串口** — 纯源码 USB 栈（无 LIB 依赖），COM24 虚拟串口
 2. **PLL 72MHz 超频** — 24M HIRC → HPLL → 72MHz，USB 走独立 IRC48M 不受影响
 3. **DAC1 12-bit PGA1 Buffer** — P0.7 输出，音质远超 PWMB 8-bit
-4. **AY8910 + SN76489 + SCC(K051649) + NES APU + GB DMG 六音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
+4. **AY8910 + SN76489 + SCC(K051649) + NES APU + NES FDS + GB DMG 七音源** — 同 ISR 混音，开机音 C4/E4/G4 和弦 2 秒
 5. **VGM 播放** — USB CDC 接收 AY(0xA0)/SN(0x50)/SCC(0xD2)/NES(0xB4)/NES-DMC(0xB6)/GB(0xB3)/Reset(0xF0) 命令，vgm_player.py 通过 COM24 播放
 6. **@STCISP# 自动下载** — STC-ISP 软件一键烧录，续命匹配优先避免和 0x50 冲突
 7. **环形缓冲** — RX1_Buffer 2048 字节，满时丢弃不越界不死机
 8. **PRODUCTDESC** — "STC32G144K Chiptune"
 9. **SCC 核心对齐 RPFM** — 全球首创在 STC32G 单片机上唱响 SCC，相位重置/共享波表/双精度 step
 10. **NES APU 5 通道完美** — 2x 方波(包络+扫频, 对齐 libvgm Delek 修复) + 三角 + 噪声 + DMC (16KB 采样缓冲覆盖 $C000-$FFFF, 预存/流式混合策略自动选择) + **Deflemask DAC stream (0x90-0x95) 支持** (7-bit DAC 直写 $4011, PCM 鼓声/采样)
+11. **NES FDS (Famicom Disk System) FM 音源** — 任天堂自制频率调制 (非雅马哈式 FM), 64 步载波+调制器波形表, RC 低通滤波, 8KB PCM ring buffer. 移植自 libvgm np_nes_fds.c
 11. **AY8910 envelope 对齐 libvgm** — env_step 从 0x0F 递减 + attack 用 4-bit mask (0x00/0x0F)，修复渐强/渐弱反向导致的漏音
 12. **全局采样率 22050Hz** — 四音源 base_incr 全部对齐（曾试 44100 因 DAC 精度限制回退）
 13. **Playlist 模式** — 顺序播放整个目录，n/b/q 键切歌，--loop N 循环
