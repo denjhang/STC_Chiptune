@@ -38,14 +38,22 @@
 - 包络 level(0~31) **线性**，env_cnt/env_step **u8**，round-robin 每 16 采样 tick 一个 op
 - 输出 `(wave × (level+1) × (tl+1)) >> 10`，结果 s8，最后 `<<1`
 
-### 当前状态（commit 93bc777，实测最佳）
+### 当前状态（旋律+鼓声实现完成）
 通过只改数值/表修复了以下问题，实机听感最接近 emu2413：
-- **AR/DR/RR 三张表**（commit 93f7cb6）：替换 ym_env_cnt 单表，反推自 emu2413 速率
-- **key_on env_cnt=0**（commit 1f45584）：消除 attack 启动延迟（旧值 250 导致延迟 4000 采样）
+- **AR/DR/RR 三张表**（commit 93f7cb6）：替换 ym_env_cnt 单表
+- **key_on env_cnt=0**（commit 1f45584）：消除 attack 启动延迟
 - **env_tick 加法计数器**（commit 1f45584）：修正旧减法 reset 250 的累积误差
-- **AR≥7 瞬间到顶**（commit d84dee0）：atk≤2 时跳过 attack，解决 round-robin 精度下限
-- **EG 语义修正**（commit 93bc777）：EG=1 sustaining 保持 / EG=0 non-sustaining 继续降（之前写反了）
-- **car.tl 映射修正**（commit 93bc777）：`tl = vol>>1`（之前 `31-vol>>1` 写反，导致最大音量时输出极小）
+- **AR≥7 瞬间到顶**（commit d84dee0）：atk≤2 时跳过 attack
+- **EG 语义修正**（commit 93bc777）：EG=1 sustaining / EG=0 non-sustaining
+- **car.tl 映射修正**（commit 93bc777）：`tl = vol>>1`
+- **旋律只渲染 ch0-5**（commit 435f6e6）：6通道，省 ISR 开销
+- **鼓声单 op 简化路径**：BD/TOM/HH/CYM/SD 独立 YM_DRUM
+- **ISR 性能瓶颈**：6通道同发偶尔卡死，**FM 渲染优化是下一步重点**
+
+### 鼓声参数（试听确定）
+- BD: sin 100Hz vol=16 ~20ms | TOM: sin 214Hz(ml5) vol=8 ~20ms
+- HH: noise 334Hz vol=2 ~65ms | CYM: noise 334Hz vol=2 ~360ms
+- SD: noise 25Hz vol=8 ~40ms (单op; 真2op听感好但卡ISR, 待优化)
 
 ### EG 语义（对齐 emu2413 get_parameter_rate）
 - **EG=1 = sustaining**：sustain 阶段保持 SL 不降（step=0）

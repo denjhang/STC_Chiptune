@@ -160,27 +160,34 @@ step 公式正确, 但整体高一个八度.
 对照 YM2413 规格书 + emu2413 源码, 修复 6 个 ADSR 行为差异
 (EG type / sus_flag / AR=0,15 / release 速率).
 
-## 5. 当前状态 (2026-06-24, commit 93bc777, 实测最佳)
+## 5. 当前状态 (2026-06-24, 5鼓声实现完成)
 
-- ✅ 寄存器完整兼容 YM2413
-- ✅ 音高完全正确 (blk-1 修正)
-- ✅ 音色接近 (15 个内置乐器, 实机听感最接近 emu2413)
-- ✅ ADSR 行为对齐 (EG 语义修正: EG=1 保持 / EG=0 继续降)
-- ✅ 音量正常 (car.tl 映射修正, 最大音量满输出)
-- ✅ attack 响应接近弹奏乐器 (AR≥7 瞬间到顶)
-- ✅ WS 波形选择 (sin / halfsin)
-- ⚠️ **鼓声未实现** (rhythm mode ch6/7/8 跳过)
-- ⚠️ EG=0 音色 sustain 下降斜率比 emu 稍快 (可继续微调 DR 表)
+### 旋律
+- ✅ 寄存器完整兼容 YM2413 (ch0-5, 6通道渲染)
+- ✅ 音高正确 (blk-1 修正)
+- ✅ 包络对齐 emu2413 (AR/DR/RR 三表 + EG语义 + key_on/env_tick修正)
+- ✅ 音量正常 (car.tl 映射修正)
+- ⚠️ **ISR 性能瓶颈: 6通道同发偶尔卡死, 是当前优化重点**
+- ⚠️ ch6-8 不走旋律渲染 (留给鼓声/性能余量)
+
+### 鼓声 (单 op 简化路径)
+- ✅ BD: sin 100Hz, vol=16, ~20ms
+- ✅ TOM: sin 214Hz (ml=5), vol=8, ~20ms
+- ✅ HH: noise 334Hz, vol=2, ~65ms
+- ✅ CYM: noise 334Hz, vol=2, ~360ms
+- ⚠️ SD: noise 25Hz, vol=8, ~40ms (单op; 真2op听感好但卡ISR)
+- ✅ 边沿触发 (reg 0x0E bit 0→1)
+- ✅ oneshot (衰减完自动清除, 不占CPU)
+
+### 性能现状
+- ISR 22050Hz, 旋律只渲染 ch0-5 (6通道)
+- 鼓声单 op 简化路径 (只有 active 时才有开销)
+- **6通道同发仍偶尔卡死**, FM 渲染优化是下一步重点
 
 ### PC 验证工具
-- `tools/ym2413_wav_gen.py`: 忠实 emu2413 移植 (render_emu2413) + V3 s8 调参核心
-- `tools/fw_real_sim.py`: **严格 1:1 下位机 PC 仿真** (render_fw_real), 改下位机前必须在此验证
-
-### 正确流程 (必须遵守)
-1. 先在 PC 仿真验证 (fw_real_sim.py), 对照 emu2413 逐个乐器看 level 曲线
-2. fw_real_sim.py 必须和下位机 1:1 同步
-3. 只改数值/表, 不改架构 (round-robin/env_tick 逻辑/输出公式/波形/相位/ml/结构体)
-4. PC 验证通过再改下位机, 编译通过再烧录
+- `tools/ym2413_wav_gen.py`: 忠实 emu2413 移植 + V3 调参核心
+- `tools/fw_real_sim.py`: 严格 1:1 下位机旋律仿真
+- `tools/drum_fw_sim.py`: 鼓声 PC 仿真 (参数固化)
 
 ## 6. 被证伪的假设
 
