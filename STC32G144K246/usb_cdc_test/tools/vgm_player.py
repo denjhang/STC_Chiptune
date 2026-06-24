@@ -577,11 +577,10 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False, ym
             print(f"  ->{name}")
 
     # YM2413-only 模式 (--ym2413 参数): 只发 YM2413 命令, 忽略其他芯片 (下位机算力不足)
-    # 其他芯片命令 (SN/AY/GB/NES/SAA/SCC) 只跳过不发送, wait 正常处理保持节拍
     if ym_only:
         other_chips = [n for n, _ in chips_used if n != 'YM2413']
         if other_chips:
-            print(f"  [YM2413-only] 忽略其他芯片: {', '.join(other_chips)} (算力不足)")
+            print(f"  skip:{','.join(n.lower().replace(' ', '') for n in other_chips)}")
 
     # 时钟下发 (NES + AY; YM2413 固定 3.579545MHz, 下位机 init 硬编码, 不需下发)
     if stats['nes'] > 0 and not ym_only:
