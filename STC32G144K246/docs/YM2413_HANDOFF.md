@@ -226,28 +226,49 @@ FW_HALFSIN = [
 
 加一张表 + 一个计数器, SUSTAIN 阶段查表替代线性减法, 模拟指数衰减:
 ```
-FW_SUS_HOLD = [1, 122,122,71,50,39,32,27,23,20,18,16,15,14,13,
-               12,11,10,10,9,9,8,8,8,7,7,6,6,6,6,6,5]
+FW_SUS_HOLD = [1, 134,134,78,55,43,35,29,25,22,20,18,16,15,14,
+               13,12,11,11,10,10,9,8,8,8,7,7,7,7,6,6,6]  # scale=0.44 精调
 // SUSTAIN 阶段 (env_step=1 让 sus_hold 接管):
 sus_cnt++;
 if (sus_cnt >= sus_hold[level]) { sus_cnt=0; level--; }
 ```
 - sus_hold[level] = 该 level 停留几个 round-robin tick (高 level 慢降, 低 level 快降)
 - **纯查表+计数器, 无除法无指数运算, STC32 可跑** (6FM+5节奏满负荷下 OK)
-- tau≈88ms (scale=0.4 实测对齐 emu, 从 tau=221ms 基础表缩放)
+- tau≈97ms (scale=0.44 精调对齐, 从 tau=221ms 基础表缩放)
 
 **配套改动**:
 - decay→sustain 转换: `env_step = 0 if EG else 1` (env_step=1 让 sus_hold 接管, 不被外层节流)
 - DR_TAB/RR_TAB 4~10 档改快 2.2× (旧表系统性偏慢)
 
-## harpsichord 对齐结果 (440Hz, 1s keyon+1s keyoff)
+### release 也用指数查表 (FW_REL_HOLD)
+release 原来线性 `level-=1` (受 env_step 节流), keyoff 后从低 level 瞬间归零.
+改成和 sustain 一样的指数查表机制:
+```
+FW_REL_HOLD = [max(1, h//10) for h in FW_SUS_HOLD]  # release 比 sustain 快 ~10×
+// RELEASE 阶段 (fw_key_off 设 env_step=1, sus_cnt=0):
+sus_cnt++;
+if (sus_cnt >= rel_hold[level]) { sus_cnt=0; level--; }
+```
+- release 整体 ~75-100ms 归零 (对齐 emu release 跨度)
+- **不再依赖 emu 的 RELEASE 速率规则** (固定7/sus?5/EG?RR), 直接用查表拟合 emu 输出形态
+
+## harpsichord 对齐结果 (440Hz, 1s keyon+1s keyoff, scale=0.44)
 | t_ms | emu | fw | diff |
 |---|---|---|---|
-| 100 | -2.7 | -3.5 | -0.8 |
-| 500 | -13.7 | -16.0 | -2.3 |
-| 950 | -26.1 | -27.4 | -1.3 |
-| release@1050 | -43.2 | 归零 | 略快 |
-全程偏差 < 4dB, 指数形态对齐 ✓ (wav: tools/wav_sus_final/)
+| 100 | -2.7 | -3.6 | -0.9 |
+| 300 | -8.2 | -9.0 | -0.8 |
+| 500 | -13.6 | -15.3 | -1.7 |
+| 700 | -19.1 | -19.2 | -0.1 |
+| 900 | -24.7 | -22.9 | +1.8 |
+| 999 (ko尾) | -29.7 | -27.9 | +1.8 |
+sustain 段全程偏差 ±2dB 内 ✓ (wav: tools/wav_harp_now/)
+
+**已知限制 - release 尾巴台阶**:
+- release 末期卡在 -27.9dB (level=1) 然后跳变 -99 (level=0)
+- 根因: **level 只有 32 级**, 最后一级 (1→0) 就是 -27.9→-99 硬跳变
+- emu eg_out 128 级能平滑过渡, fw 32 级无法表达 -30~-99dB 精细衰减
+- 调 rel_hold 无效 (扫描 div 5~30 都卡 -27.9, 数据证明)
+- **听感上音尾突然消失, 但 sustain 段已对齐, 整体可接受**
 
 ## 下一步 (剩余 14 乐器逐个调)
 sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,
@@ -259,8 +280,11 @@ sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/E
 
 ## 教训补充 (2026-06-25)
 - **线性 level 无法拟合指数衰减** — 必须查表, 纯改速度不行 (扫描证明)
-- **加表+简单运算是允许的** — sus_hold 查表不是"改架构", 是"加表+改运算规则"
+- **加表+简单运算是允许的** — sus_hold/rel_hold 查表不是"改架构", 是"加表+改运算规则"
+- **拟合 emu 输出即可, emu 内部规则无意义** — release 用什么速率不重要, 输出曲线对齐就行
 - **STC32 算力有限** — 6FM+5节奏已满负荷, 不能用除法/指数运算, 查表+计数器才行
 - **先算幅度对比再听** — 包络偏差从 RMS 曲线直接可见, 不用听就能定位
 - **逐个击破** — 15 乐器不要一起调, 先 harpsichord 跑通流程再逐个来
+- **level 32 级是硬限制** — release 末期的 -30~-99dB 衰减无法平滑, 调表无效
+- **别光调不出 wav** — 调参后立刻出 wav 给听感核对, 不要只看数值
 

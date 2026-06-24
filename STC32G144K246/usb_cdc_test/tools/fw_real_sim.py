@@ -47,11 +47,14 @@ FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
 FW_AR_TAB = [0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1]
 FW_DR_TAB = [0, 255, 255, 255, 75, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
 FW_RR_TAB = [0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
-# SUSTAIN 指数衰减查表 (2026-06-25 新增): sus_hold[level] = 该 level 停留几个 round-robin tick
-# 模拟 emu 指数输出衰减 (fw level 线性, 必须查表拟合指数). tau≈88ms (scale=0.4 实测对齐 emu)
+# SUSTAIN 指数衰减查表 (2026-06-25): sus_hold[level] = 该 level 停留几个 round-robin tick
+# 模拟 emu 指数输出衰减. tau≈97ms (scale=0.44 实测对齐 emu harpsichord, score=6.1)
 # SUSTAIN 阶段: sus_cnt++; if (sus_cnt >= sus_hold[level]) { sus_cnt=0; level--; }
-FW_SUS_HOLD = [1, 122, 122, 71, 50, 39, 32, 27, 23, 20, 18, 16, 15, 14, 13,
-               12, 11, 10, 10, 9, 9, 8, 8, 8, 7, 7, 6, 6, 6, 6, 6, 5]
+FW_SUS_HOLD = [1, 134, 134, 78, 55, 43, 35, 29, 25, 22, 20, 18, 16, 15, 14,
+               13, 12, 11, 11, 10, 10, 9, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6]
+# RELEASE 指数衰减查表: rel_hold[level] = release 阶段该 level 停留 tick 数
+# release 比 sustain 快 (整体 ~100ms 归零), 用 sus_hold 缩放. 复用 sus_cnt 计数器.
+FW_REL_HOLD = [max(1, h//10) for h in FW_SUS_HOLD]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
 # step 常数 (8.8 定点, 1:1 照搬 ym2413.c:237, blk-1 修正)
@@ -115,11 +118,10 @@ def fw_key_on(mod, car):
             op['env_state'] = 1; op['env_step'] = op['atk']
 
 def fw_key_off(mod, car):
-    """1:1 照搬 ym_key_off (RELEASE 速率对齐 emu get_parameter_rate line 505-512)
-    sus_flag -> 5; EG=1 -> RR(rr); EG=0 -> 固定 7"""
+    """keyoff -> RELEASE. release 用 FW_REL_HOLD 指数查表 (env_step=1 让计数器接管)"""
     mod['env_state'] = 4; car['env_state'] = 4
-    # RELEASE 速率: sus_flag?5 : (EG? RR : 7)
-    mod['env_step'] = FW_RR_TAB[5] if mod['sus_flag'] else (mod['rel'] if mod['eg_type'] else FW_RR_TAB[7])
+    mod['env_step'] = 1; mod['sus_cnt'] = 0
+    car['env_step'] = 1; car['sus_cnt'] = 0
     car['env_step'] = FW_RR_TAB[5] if car['sus_flag'] else (car['rel'] if car['eg_type'] else FW_RR_TAB[7])
 
 def fw_env_tick(op):
@@ -151,8 +153,14 @@ def fw_env_tick(op):
                 op['level'] -= 1
                 if op['level'] == 0:
                     op['env_state'] = 0
-    elif st == 4:  # release
-        if op['level'] > 0: op['level'] -= 1
+    elif st == 4:  # release (指数查表衰减, 拟合 emu release 形态)
+        if op['level'] > 0:
+            op['sus_cnt'] += 1
+            if op['sus_cnt'] >= FW_REL_HOLD[op['level']]:
+                op['sus_cnt'] = 0
+                op['level'] -= 1
+                if op['level'] == 0:
+                    op['env_state'] = 0
 
 def fw_render_fm(mod, car, wait_tick, ch):
     """1:1 照搬 ym_render_fm (8.8 定点). 返回 s16 输出"""
