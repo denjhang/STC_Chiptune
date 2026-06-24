@@ -529,51 +529,77 @@ static void ym_drum_trigger(u8 idx) {
     d->env_cnt = 0;
 }
 
-/* SD 真 2-op 独立路径 (data区, oneshot, 完全对齐 ym_render_fm 公式) */
-/* mod=noise(25Hz) 调制 car=sin(240Hz), FB=2, 各自 oneshot 包络 */
+/* SD 真 2-op 独立路径 (data区, oneshot, 对齐 ch6 版包络+反馈) */
+/* mod=noise(25Hz,FB=2) 调制 car=sin(240Hz) */
+/* mod 包络: 快到0 (sul=0, 快decay). car 包络: 降到 sul=19 再慢降 */
 static u8 data sd_mod_level;
 static u8 data sd_car_level;
 static u8 data sd_mod_cnt;
 static u8 data sd_car_cnt;
+static u8 data sd_mod_state;   /* 0=decay 1=sustain 2=done */
+static u8 data sd_car_state;
 static u16 data sd_mod_pos;
 static u16 data sd_car_pos;
-static u8 data sd_mod_tl = 15;     /* mod 调制深度 */
-static u8 data sd_car_tl = 31;     /* car 音量 */
-static u8 data sd_fb_val;          /* 反馈值 */
-#define SD_MOD_ENVSTEP  7    /* noise 快衰减 */
-#define SD_CAR_ENVSTEP  28   /* sine 慢衰减 */
-#define SD_MOD_STEP     0x0012  /* noise 25Hz 8.8 */
-#define SD_CAR_STEP     0x00B3  /* sin 240Hz 8.8 */
-#define SD_FB           2
+static u8 data sd_fb_val;
+#define SD_MOD_DEC   7    /* mod decay 步进 (快) */
+#define SD_MOD_SUL   0    /* mod 降到0 */
+#define SD_MOD_REL   7
+#define SD_CAR_DEC   7    /* car decay 步进 */
+#define SD_CAR_SUL   19   /* car 降到19再慢降 */
+#define SD_CAR_REL   28   /* car sustain后慢降 */
+#define SD_MOD_STEP  0x0012
+#define SD_CAR_STEP  0x00B3
+#define SD_MOD_TL    15
+#define SD_CAR_TL    31
+#define SD_FB        2
 
 static void ym_sd_trigger(void) {
     sd_mod_level = 31; sd_mod_cnt = 0; sd_mod_pos = 0; sd_fb_val = 0;
+    sd_mod_state = 0;  /* decay */
     sd_car_level = 31; sd_car_cnt = 0; sd_car_pos = 0;
+    sd_car_state = 0;  /* decay */
 }
 
 static s16 ym_render_sd(void) {
     s8 mod_wv, car_wv;
     s8 mod_out;
     s8 car_out;
-    if (sd_car_level == 0) return 0;
+    if (sd_car_level == 0 && sd_mod_level == 0) return 0;
 
-    /* mod 包络 (每采样 tick) */
-    if (sd_mod_cnt < SD_MOD_ENVSTEP) sd_mod_cnt++;
-    else { sd_mod_cnt = 0; if (sd_mod_level > 0) sd_mod_level--; }
-    /* car 包络 */
-    if (sd_car_cnt < SD_CAR_ENVSTEP) sd_car_cnt++;
-    else { sd_car_cnt = 0; if (sd_car_level > 0) sd_car_level--; }
+    /* mod 包络: decay→sul(0)→done */
+    if (sd_mod_state == 0) {  /* decay */
+        if (sd_mod_cnt < SD_MOD_DEC) sd_mod_cnt++;
+        else { sd_mod_cnt = 0;
+            if (sd_mod_level > SD_MOD_SUL) sd_mod_level--;
+            else sd_mod_state = 1;  /* → sustain(到0继续降) */
+        }
+    } else if (sd_mod_state == 1) {  /* sustain: 继续降到0 */
+        if (sd_mod_cnt < SD_MOD_REL) sd_mod_cnt++;
+        else { sd_mod_cnt = 0; if (sd_mod_level > 0) sd_mod_level--; }
+    }
 
-    /* OP1 (mod): 完全对齐 ym_render_fm 公式 */
+    /* car 包络: decay→sul(19)→sustain(慢降到0) */
+    if (sd_car_state == 0) {  /* decay */
+        if (sd_car_cnt < SD_CAR_DEC) sd_car_cnt++;
+        else { sd_car_cnt = 0;
+            if (sd_car_level > SD_CAR_SUL) sd_car_level--;
+            else sd_car_state = 1;  /* → sustain */
+        }
+    } else if (sd_car_state == 1) {  /* sustain: 慢降到0 */
+        if (sd_car_cnt < SD_CAR_REL) sd_car_cnt++;
+        else { sd_car_cnt = 0; if (sd_car_level > 0) sd_car_level--; }
+    }
+
+    /* OP1 (mod): noise + FB, 对齐 ym_render_fm */
     sd_mod_pos += SD_MOD_STEP;
-    mod_wv = ym_noise[(u8)(sd_mod_pos >> 8) & 0x3F];
-    mod_out = (s8)(((s16)mod_wv * (s16)(sd_mod_level + 1) * (s16)(sd_mod_tl + 1)) >> 10);
+    mod_wv = ym_noise[((u8)(sd_mod_pos >> 8) + sd_fb_val) & 0x3F];
+    mod_out = (s8)(((s16)mod_wv * (s16)(sd_mod_level + 1) * (s16)(SD_MOD_TL + 1)) >> 10);
     sd_fb_val = (s8)(mod_out >> SD_FB);
 
-    /* OP2 (car): mod_out 调制相位 + fb, 完全对齐 ym_render_fm */
+    /* OP2 (car): sin + mod_out 调制相位, 对齐 ym_render_fm */
     sd_car_pos += SD_CAR_STEP;
     car_wv = ym_sin[((u8)(sd_car_pos >> 8) + (u8)mod_out) & 0x3F];
-    car_out = (s8)(((s16)car_wv * (s16)(sd_car_level + 1) * (s16)(sd_car_tl + 1)) >> 10);
+    car_out = (s8)(((s16)car_wv * (s16)(sd_car_level + 1) * (s16)(SD_CAR_TL + 1)) >> 10);
     return car_out;
 }
 
