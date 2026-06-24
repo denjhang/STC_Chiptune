@@ -24,12 +24,12 @@ static const s8 code ym_sin[64] = {
      0, -3, -6, -9,-12,-15,-17,-20,-22,-24,-26,-28,-29,-30,-31,-31,
    -31,-31,-31,-30,-29,-28,-26,-24,-22,-20,-17,-15,-12, -9, -6, -3
 };
-/* WS=1: 半正弦 (abssin, 负半周取绝对值, 产生八度叠加感) */
+/* WS=1: 半正弦 (后半周静音, 对齐 emu2413.c:383-387 halfsin=0xfff; 旧版镜像正值是 bug) */
 static const s8 code ym_halfsin[64] = {
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
-     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
-    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 /* 噪声表 (64 点假随机 ±31, 用于鼓声 HH/CYM) */
 static const s8 code ym_noise[64] = {
@@ -46,13 +46,25 @@ static const s8 code ym_noise[64] = {
 static const u8 code ym_ar_tab[16] = {
     0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1
 };
-/* DR 表: decay 31 步 (近似最大) */
+/* DR 表: decay (2026-06-25 校准, 旧表 4~10 偏慢 2.2×) */
 static const u8 code ym_dr_tab[16] = {
-    0, 255, 255, 175, 88, 44, 22, 11, 6, 3, 1, 1, 1, 1, 1, 1
+    0, 255, 255, 255, 75, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1
 };
-/* RR 表: release 16 步 (sul≈15 近似), EG=1 时用 */
+/* RR 表: release/sustain 速率 (2026-06-25 校准) */
 static const u8 code ym_rr_tab[16] = {
-    0, 255, 255, 255, 170, 85, 42, 21, 11, 5, 3, 1, 1, 1, 1, 1
+    0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1
+};
+/* SUSTAIN/RELEASE 指数衰减查表 (2026-06-25): 拟合 emu 指数输出衰减
+ * sus_hold[level] = sustain 阶段该 level 停留 tick 数 (scale=0.44, tau≈97ms)
+ * rel_hold[level] = release 阶段 (sus_hold//10, 整体~100ms)
+ * 用法: sus_cnt++; if (sus_cnt >= hold[level]) { sus_cnt=0; level--; } */
+static const u8 code ym_sus_hold[32] = {
+    1, 134,134,78, 55, 43, 35, 29, 25, 22, 20, 18, 16, 15, 14, 13,
+   12, 11, 11, 10, 10,  9,  8,  8,  8,  7,  7,  7,  7,  6,  6,  6
+};
+static const u8 code ym_rel_hold[32] = {
+    1, 13, 13, 7, 5, 4, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 
 /* ===== ML 查表 (YM2413 multiple, ml=0 时 0.5) ===== */
@@ -126,6 +138,7 @@ typedef struct {
     u8 env_cnt;
     u8 env_step;
     u8 level;
+    u8 sus_cnt;          /* SUSTAIN/RELEASE 指数查表计数器 (2026-06-25) */
 } YM_OP;
 
 /* ===== 通道 (9 旋律 + rhythm) ===== */
@@ -258,6 +271,7 @@ static void ym_key_on(u8 ch) {
     ym_ch[ch].key_on = 1;
     mod->pos = 0; car->pos = 0;
     mod->fb_val = 0;
+    mod->sus_cnt = 0; car->sus_cnt = 0;   /* 重置指数查表计数器 */
     /* AR 值 (查表后) 含义: 0=不启动, 1~2=瞬间到顶(AR>=7), 3~255=线性 attack */
     /* env_cnt=0: 立即开始计時 */
     mod->level = 0; car->level = 0;
@@ -281,11 +295,9 @@ static void ym_key_off(u8 ch) {
     YM_OP *mod = &ym_ch[ch].mod;
     YM_OP *car = &ym_ch[ch].car;
     ym_ch[ch].key_on = 0;
-    mod->env_state = 4; car->env_state = 4;
-    /* Release 速率 (行为对齐 YM2413):
-     *   sus_flag=1 → 固定速率 5 (ym_rr_tab[5]) */
-    if (mod->sus_flag) mod->env_step = ym_rr_tab[5]; else mod->env_step = mod->rel;
-    if (car->sus_flag) car->env_step = ym_rr_tab[5]; else car->env_step = car->rel;
+    /* → release: env_step=1 让 rel_hold 指数查表接管 (2026-06-25) */
+    mod->env_state = 4; mod->env_step = 1; mod->sus_cnt = 0;
+    car->env_state = 4; car->env_step = 1; car->sus_cnt = 0;
 }
 
 /* ===== 更新 key 状态 (reg 0x20-0x28 或 0x0E 改变时) ===== */
@@ -341,17 +353,30 @@ static void ym_env_tick(YM_OP *op) {
         if (op->level > op->sul) op->level--;
         else {
             op->env_state = 3;   /* → sustain */
-            /* Sustain 速率 (对齐 emu2413 get_parameter_rate):
-             *   EG=1 (sustaining) → 保持 SL, step=0
-             *   EG=0 (non-sustaining) → 继续降, step=RR */
-            op->env_step = op->eg_type ? 0 : op->rel;
+            op->sus_cnt = 0;
+            /* EG=1 sustaining: step=0 保持; EG=0 non-sus: step=1 让 sus_hold 接管 */
+            op->env_step = op->eg_type ? 0 : 1;
         }
         break;
-    case 3: /* sustain: EG=1 step=0 不进这里(保持); EG=0 step=rel 继续降 */
-        if (op->level > 0) op->level--;
+    case 3: /* sustain: EG=0 用 sus_hold 指数查表衰减 (EG=1 step=0 不进这里) */
+        if (op->level > 0) {
+            op->sus_cnt++;
+            if (op->sus_cnt >= ym_sus_hold[op->level]) {
+                op->sus_cnt = 0;
+                op->level--;
+                if (op->level == 0) op->env_state = 0;
+            }
+        }
         break;
-    case 4: /* release: level→0 */
-        if (op->level > 0) op->level--;
+    case 4: /* release: 用 rel_hold 指数查表衰减 (env_step=1 让计数器接管) */
+        if (op->level > 0) {
+            op->sus_cnt++;
+            if (op->sus_cnt >= ym_rel_hold[op->level]) {
+                op->sus_cnt = 0;
+                op->level--;
+                if (op->level == 0) op->env_state = 0;
+            }
+        }
         break;
     default: break;
     }
@@ -578,7 +603,8 @@ static s16 ym_render_fm(u8 ch) {
         idx += (u8)mod->fb_val;
         wave_val = mod->wave[idx & 0x3F];
         ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
-        if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> mod->fb);
+        /* FB+4 移位压低反馈 (对齐 emu 反馈强度, 2026-06-25) */
+        if (mod->fb > 0) mod->fb_val = (s8)((s8)ch_out >> (mod->fb + 4));
         else mod->fb_val = 0;
     }
 
