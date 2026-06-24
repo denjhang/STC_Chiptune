@@ -2,10 +2,26 @@
 """render_fw_real: 严格 1:1 忠实下位机 da1cf8a 的 PC 仿真.
 所有限制完全照搬, 不偷用 emu 精度.
 用于看下位机真实输出 vs emu2413 的偏差."""
-import sys, math, os
+import sys, math, os, struct, wave
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ym2413_wav_gen import (DEFAULT_INST, NAMES, dump_to_patch, INTERNAL_RATE,
                             TLL_TABLE, ml_table, EG_MUTE, render_emu2413, save_wav)
+
+
+def save_fw_wav(filepath, samples):
+    """保存下位机仿真输出 (采样率 FW_ISR_RATE=22050, 不降采样, 只归一化).
+    不能用 ym2413_wav_gen.save_wav (它假设输入是 49716)."""
+    peak = max(abs(s) for s in samples) if samples else 1
+    if peak == 0:
+        norm = samples
+    else:
+        scale = (32767 * 0.85) / peak
+        norm = [int(max(-32768, min(32767, s * scale))) for s in samples]
+    with wave.open(filepath, 'w') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(FW_ISR_RATE)
+        w.writeframes(struct.pack(f'<{len(norm)}h', *norm))
 
 # ============================================================
 # 下位机真实表 (1:1 照搬 da1cf8a ym2413.c)
@@ -17,12 +33,13 @@ FW_SIN = [
      0, -3, -6, -9,-12,-15,-17,-20,-22,-24,-26,-28,-29,-30,-31,-31,
    -31,-31,-31,-30,-29,-28,-26,-24,-22,-20,-17,-15,-12, -9, -6, -3
 ]
-# halfsin: 负半周镜像 (取绝对值, 不是 emu 的静音!)
+# halfsin: 负半周静音 (对齐 emu2413.c:383-387, halfsin后半周=0xfff→输出0)
+# 注意: 旧版用镜像(取绝对值)是 bug, 导致 carrier 后半周输出正值→直流偏置→失真
 FW_HALFSIN = [
      0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
     31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3,
-     0,  3,  6,  9, 12, 15, 17, 20, 22, 24, 26, 28, 29, 30, 31, 31,
-    31, 31, 31, 30, 29, 28, 26, 24, 22, 20, 17, 15, 12,  9,  6,  3
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 ]
 # env_cnt: 下位机旧 ADSR 速度表 (已废弃, 保留作参考)
 FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
@@ -32,8 +49,11 @@ FW_DR_TAB = [0, 255, 255, 175, 88, 44, 22, 11, 6, 3, 1, 1, 1, 1, 1, 1]
 FW_RR_TAB = [0, 255, 255, 255, 170, 85, 42, 21, 11, 5, 3, 1, 1, 1, 1, 1]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
-# step 常数 (16.16 定点, blk-1 修正)
-FW_STEP_CONST = 3579545.0 * 64.0 * 65536.0 / (72.0 * 262144.0 * 22050.0)
+# step 常数 (8.8 定点, 1:1 照搬 ym2413.c:237, blk-1 修正)
+# pos/step 都是 u16, idx = pos>>8 & 0x3F, 一个周期 = 64×256 = 16384
+FW_STEP_CONST = 3579545.0 * 64.0 * 256.0 / (72.0 * 262144.0 * 22050.0)
+# 下位机 ISR 采样率 (不是 emu 的 49716!)
+FW_ISR_RATE = 22050
 
 def fw_decode(dump):
     """1:1 照搬 ym_decode_patch (注意: 不解码 KR/AM/PM/KL, 下位机没用)"""
@@ -71,9 +91,9 @@ def fw_apply_patch(p):
     return mod, car
 
 def fw_calc_step(fnum, blk, ml):
-    """1:1 照搬 ym_calc_step (float 算一次, 16.16 定点)"""
+    """1:1 照搬 ym_calc_step (float 算一次, 8.8 定点, 返回 u16)"""
     base = fnum * (1 << blk) * FW_STEP_CONST
-    return int(base * ml / 2.0)
+    return int(base * ml / 2.0) & 0xFFFF
 
 def fw_key_on(mod, car):
     """1:1 照搬 ym_key_on (和下位机 commit 1f45584/d84dee0 同步)
@@ -122,12 +142,12 @@ def fw_env_tick(op):
         if op['level'] > 0: op['level'] -= 1
 
 def fw_render_fm(mod, car, wait_tick, ch):
-    """1:1 照搬 ym_render_fm. 返回 s16 输出"""
+    """1:1 照搬 ym_render_fm (8.8 定点). 返回 s16 输出"""
     if mod['step'] == 0:
         return 0
-    # OP1 (modulator)
-    mod['pos'] = (mod['pos'] + mod['step']) & 0xFFFFFFFF
-    idx = (mod['pos'] >> 16) & 0x3F
+    # OP1 (modulator) — pos/step u16, idx = pos>>8 & 0x3F
+    mod['pos'] = (mod['pos'] + mod['step']) & 0xFFFF
+    idx = (mod['pos'] >> 8) & 0x3F
     idx = (idx + (mod['fb_val'] & 0xFF)) & 0x3F
     wave_val = mod['wave'][idx]
     if wait_tick == (ch & 0x0F):
@@ -146,8 +166,8 @@ def fw_render_fm(mod, car, wait_tick, ch):
         mod['fb_val'] = 0
 
     # OP2 (carrier)
-    car['pos'] = (car['pos'] + car['step']) & 0xFFFFFFFF
-    idx = (car['pos'] >> 16) & 0x3F
+    car['pos'] = (car['pos'] + car['step']) & 0xFFFF
+    idx = (car['pos'] >> 8) & 0x3F
     idx = (idx + (ch_out & 0xFF)) & 0x3F
     wave_val = car['wave'][idx]
     if wait_tick == (ch & 0x0F):
@@ -170,11 +190,18 @@ def render_fw_real(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
     if blk > 0: blk -= 1
     mod['step'] = fw_calc_step(fnum, blk, mod['ml'])
     car['step'] = fw_calc_step(fnum, blk, car['ml'])
-    # carrier tl: vol=0(reg_vol=15最小)→tl=0(静音), vol=60(reg_vol=0最大)→tl=30(满)
-    car['tl'] = max(0, min(31, volume >> 1))
+    # carrier tl 映射: 和下位机 ym2413.c:500-502 一致
+    #   下位机: vol = (15 - (reg_val & 0x0F)) << 2  (reg_val=0最大→vol=60, =15最小→vol=0)
+    #           car.tl = vol >> 1  (vol=60→tl=30满, vol=0→tl=0静音)
+    #   本函数 volume 参数语义和 emu2413 一致: 0=最大音量 (reg_vol=0), 60=最小
+    #   故 下位机内部 vol = 60 - volume, car.tl = (60 - volume) >> 1
+    fw_vol = 60 - volume
+    if fw_vol < 0: fw_vol = 0
+    if fw_vol > 60: fw_vol = 60
+    car['tl'] = max(0, min(31, fw_vol >> 1))
 
-    n_total = int((dur_keyon + dur_keyoff) * INTERNAL_RATE)
-    n_keyon = int(dur_keyon * INTERNAL_RATE)
+    n_total = int((dur_keyon + dur_keyoff) * FW_ISR_RATE)
+    n_keyon = int(dur_keyon * FW_ISR_RATE)
 
     fw_key_on(mod, car)
 

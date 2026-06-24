@@ -120,3 +120,76 @@ FB: mod fb_val 反馈到 mod 自己相位
 2. SD 恢复 2-op: 用 2407ccb 的独立 data 区路径
 3. 鼓声 round-robin 仿真: fw_real_sim 需要加鼓声仿真支持
 4. BD 音量/时长: 可能还需微调
+
+---
+
+# 2026-06-25 音色准确度调试 (harpsichord 过反馈)
+
+## 本次重大发现 (颠覆之前记录)
+
+### 发现1: fw_real_sim.py 一直没和下位机同步 (违反 AGENTS.md 铁律!)
+- **仿真器**: 注释写"16.16 定点", pos 用 u32 (`&0xFFFFFFFF`), idx=`pos>>16`, step 常数 `×65536`, 渲染采样率 `INTERNAL_RATE=49716`
+- **下位机** (ym2413.c:122-123, 237, 577): **8.8 定点**, pos/step 都是 **u16**, idx=`pos>>8 & 0x3F`, step 常数 `×256`, ISR **22050Hz**
+- **后果**: 仿真器频率 = 下位机频率 × (49716/22050) = **2.255×** → 听感高一个八度+2个半音
+  - harpsichord 440Hz: 仿真器输出 992Hz, 下位机实际 438.7Hz (正确!)
+- **教训**: 之前所有仿真结论 (过反馈/halfsin 扫描) 都建立在错误频率上, 不可信
+
+### 发现2: halfsin 负半周镜像 vs 静音 (AGENTS.md 记录是错的)
+- AGENTS.md 写: "halfsin 负半周**镜像** (不是静音)" — 当成下位机真实限制记录
+- **对照 emu2413.c:383-387**: halfsin 后半周 = `0xfff` (静音!), 不是镜像
+- 下位机 `ym_halfsin[64]` (ym2413.c:28-33): 后半周是镜像正值 (bug)
+- **影响**: carrier 用 halfsin 时, 后半周本该静音却输出正值 → 直流偏置 + 失真
+
+### 发现3: mod.tl 映射翻转会导致音高变化 (改动过大, 已否决)
+- 现状: `mod.tl = 31 - (tl_raw>>1)` (TL=3 → tl=30 几乎满)
+- 试过改成 `tl_raw>>1` (TL=3 → tl=1): 反馈占周期从 25%→1.6% 接近 emu 1.2%
+- **但听感音高变了** (FM 边带偏移), 影响所有乐器, 已否决
+
+## 本次修复 (仅 fw_real_sim.py, 下位机未动)
+
+### 修复1: 仿真器改 8.8 定点对齐下位机 (fw_real_sim.py)
+```python
+# 4 处改动:
+FW_STEP_CONST = 3579545.0 * 64.0 * 256.0 / (72.0 * 262144.0 * 22050.0)  # ×256 非 ×65536
+FW_ISR_RATE = 22050  # 新增, 非 INTERNAL_RATE 49716
+
+def fw_calc_step(...): return int(base * ml / 2.0) & 0xFFFF  # u16
+def fw_render_fm(...):
+    mod['pos'] = (mod['pos'] + mod['step']) & 0xFFFF   # u16 非 u32
+    idx = (mod['pos'] >> 8) & 0x3F                      # >>8 非 >>16
+    car 同理
+def render_fw_real(...): n_total/n_keyon 用 FW_ISR_RATE
+
+def save_fw_wav(filepath, samples):  # 新增, 按 22050 保存, 不降采样
+    # 不能用 ym2413_wav_gen.save_wav (它假设输入 49716)
+```
+**验证**: harpsichord 440Hz → 仿真器 441.0Hz, emu 440.0Hz, 比例 1.002 (修复前 2.255) ✓
+
+### 修复2: halfsin 后半周改静音 (fw_real_sim.py, 下位机待同步)
+```python
+FW_HALFSIN = [
+     0,3,6,...,31, 31,...,3,     # 前半周 (正弦)
+     0,0,0,...,0, 0,...,0,       # 后半周静音 (对齐 emu, 旧版是镜像正值)
+]
+```
+
+### 修复3: volume 映射 bug (fw_real_sim.py)
+- 旧: `car.tl = volume>>1` (volume=0 → tl=0 → 静音, 语义反了)
+- 新: `car.tl = (60-volume)>>1` (volume=0 最大音量 → tl=30 满)
+- 对照下位机 ym2413.c:500-502: `vol=(15-reg_vol)<<2; car.tl=vol>>1`
+
+## 当前验证状态
+- harpsichord 1s+1s wav: `tools/wav_fw_sync/harp_fw.wav` vs `harp_emu.wav`
+- 频率已对齐 (441 vs 440), 待听感确认音色/反馈
+
+## 下一步 (频率对齐后重新评估)
+1. **听 harp_fw.wav vs emu**: 确认过反馈是否还在 (频率对齐后重新判断)
+2. **重新做反馈扫描**: 之前扫描结论因频率错而无效, 需重跑 FB=0~7
+3. **halfsin mute 是否保留**: 频率对齐后再听对照
+4. **下位机同步**: 仿真验证通过后才改 ym2413.c (halfsin 表 + 可能的反馈调整)
+
+## 教训补充
+- **fw_real_sim.py 不同步是万恶之源** — 频率错 2.255× 导致所有调参白做
+- **听感最准** — 用户听出"高八度+2半音"直接定位到频率 bug, 比所有数值分析都快
+- **改 mod.tl 这种全局映射会动音高** — FM 调制量级变化影响边带, 不是纯调参
+
