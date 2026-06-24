@@ -529,27 +529,52 @@ static void ym_drum_trigger(u8 idx) {
     d->env_cnt = 0;
 }
 
-/* SD 真 2-op: ch6 mod=noise 调制 car=sin, 双包络 (听感最佳版) */
+/* SD 真 2-op 独立路径 (data区, oneshot, 不走旋律通道) */
+/* mod=noise(25Hz) 调制 car=sin(240Hz), FB=2, 各自 oneshot 包络 */
+static u8 data sd_mod_level;
+static u8 data sd_car_level;
+static u8 data sd_mod_cnt;
+static u8 data sd_car_cnt;
+static u16 data sd_mod_pos;
+static u16 data sd_car_pos;
+#define SD_MOD_ENVSTEP  7    /* noise 快衰减 ~5ms */
+#define SD_CAR_ENVSTEP  28   /* sine 慢衰减 ~20ms */
+#define SD_MOD_STEP     0x0012  /* noise 25Hz 8.8 */
+#define SD_CAR_STEP     0x00B3  /* sin 240Hz 8.8 */
+#define SD_FB           2
+
 static void ym_sd_trigger(void) {
-    YM_OP *mod = &ym_ch[6].mod;
-    YM_OP *car = &ym_ch[6].car;
-    /* mod: noise 25Hz, FB=2, 快衰减 (noise先消失) */
-    mod->wave = ym_noise;
-    mod->step = 0x0012;      /* 25Hz @22050 8.8定点 */
-    mod->fb = 2;
-    mod->fb_val = 0;
-    mod->pos = 0;
-    mod->level = 31; mod->env_state = 2; mod->env_cnt = 0;
-    mod->env_step = 7;       /* 快衰减 */
-    mod->tl = 15; mod->eg_type = 0;
-    /* car: sin 240Hz, 慢衰减 (sine尾巴) */
-    car->wave = ym_sin;
-    car->step = 0x00B3;      /* 240Hz @22050 8.8定点 */
-    car->pos = 0;
-    car->level = 31; car->env_state = 2; car->env_cnt = 0;
-    car->env_step = 14;      /* 慢衰减 */
-    car->tl = 31; car->eg_type = 0;
-    ym_ch[6].key_on = 1;
+    sd_mod_level = 31; sd_mod_cnt = 0; sd_mod_pos = 0;
+    sd_car_level = 31; sd_car_cnt = 0; sd_car_pos = 0;
+}
+
+static s16 ym_render_sd(void) {
+    s8 mod_wv, car_wv;
+    s16 mod_out, car_out;
+    if (sd_car_level == 0) return 0;
+
+    /* mod 包络 (每采样 tick) */
+    if (sd_mod_cnt < SD_MOD_ENVSTEP) sd_mod_cnt++;
+    else { sd_mod_cnt = 0; if (sd_mod_level > 0) sd_mod_level--; }
+    /* car 包络 */
+    if (sd_car_cnt < SD_CAR_ENVSTEP) sd_car_cnt++;
+    else { sd_car_cnt = 0; if (sd_car_level > 0) sd_car_level--; }
+
+    /* mod: noise 查表 × level × tl */
+    sd_mod_pos += SD_MOD_STEP;
+    mod_wv = ym_noise[(u8)(sd_mod_pos >> 8) & 0x3F];
+    mod_out = ((s16)mod_wv * (s16)((sd_mod_level + 1) * 16)) >> 10;
+    if (mod_out > 31) mod_out = 31; if (mod_out < -31) mod_out = -31;
+
+    /* car: sin + mod 调制相位, FB */
+    sd_car_pos += SD_CAR_STEP;
+    {
+        s16 fb = mod_out >> SD_FB;
+        car_wv = ym_sin[((u8)(sd_car_pos >> 8) + (u8)mod_out + (u8)fb) & 0x3F];
+    }
+    car_out = ((s16)car_wv * (s16)((sd_car_level + 1) * 8)) >> 6;
+    if (car_out > 127) car_out = 127; if (car_out < -128) car_out = -128;
+    return car_out;
 }
 
 /* SD 真 2-op 已废弃: 真 2-op (ch6 ym_render_fm) 听感最好但卡 ISR */
@@ -627,18 +652,11 @@ s16 ym2413_render(void) {
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
 
-    /* ch0-5 旋律 + ch6 SD 2-op */
-    for (ch = 0; ch < 7; ch++) {
+    /* ch0-5 旋律 */
+    for (ch = 0; ch < 6; ch++) {
         /* 跳过无声通道 */
         if (ym_ch[ch].mod.step == 0) continue;
         if (!ym_ch[ch].key_on && ym_ch[ch].car.env_state == 0) continue;
-        /* SD (ch6) 衰减完后自动 key_off */
-        if (ch == 6 && ym_ch[ch].car.level == 0 && ym_ch[ch].mod.level == 0) {
-            ym_ch[ch].key_on = 0;
-            ym_ch[ch].car.env_state = 0;
-            ym_ch[ch].mod.env_state = 0;
-            continue;
-        }
         if (ym_ch[ch].car.env_state == 4 && ym_ch[ch].car.level == 0) {
             ym_ch[ch].car.env_state = 0;
             continue;
@@ -652,7 +670,7 @@ s16 ym2413_render(void) {
         total += ym_render_drum(1);  /* TOM */
         total += ym_render_drum(2);  /* HH */
         total += ym_render_drum(3);  /* CYM */
-        /* SD 走 ch6 真 2-op, 在旋律循环里渲染 */
+        total += ym_render_sd();     /* SD (独立 2-op) */
     }
 
     total <<= 1;
