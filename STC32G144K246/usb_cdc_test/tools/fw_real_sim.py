@@ -43,10 +43,15 @@ FW_HALFSIN = [
 ]
 # env_cnt: 下位机旧 ADSR 速度表 (已废弃, 保留作参考)
 FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
-# AR/DR/RR 三张表 (和下位机 commit 93f7cb6 同步, 反推自 emu2413 速率)
+# AR/DR/RR 三张表 (反推自 emu2413 速率, 2026-06-25 校准: 旧表 RR/DR 4~10 偏慢 2.2×)
 FW_AR_TAB = [0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1]
-FW_DR_TAB = [0, 255, 255, 175, 88, 44, 22, 11, 6, 3, 1, 1, 1, 1, 1, 1]
-FW_RR_TAB = [0, 255, 255, 255, 170, 85, 42, 21, 11, 5, 3, 1, 1, 1, 1, 1]
+FW_DR_TAB = [0, 255, 255, 255, 75, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
+FW_RR_TAB = [0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
+# SUSTAIN 指数衰减查表 (2026-06-25 新增): sus_hold[level] = 该 level 停留几个 round-robin tick
+# 模拟 emu 指数输出衰减 (fw level 线性, 必须查表拟合指数). tau≈88ms (scale=0.4 实测对齐 emu)
+# SUSTAIN 阶段: sus_cnt++; if (sus_cnt >= sus_hold[level]) { sus_cnt=0; level--; }
+FW_SUS_HOLD = [1, 122, 122, 71, 50, 39, 32, 27, 23, 20, 18, 16, 15, 14, 13,
+               12, 11, 10, 10, 9, 9, 8, 8, 8, 7, 7, 6, 6, 6, 6, 6, 5]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
 # step 常数 (8.8 定点, 1:1 照搬 ym2413.c:237, blk-1 修正)
@@ -82,7 +87,7 @@ def fw_apply_patch(p):
             # 运行时状态
             'pos': 0, 'step': 0, 'fb_val': 0,
             'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
-            'sus_flag': 0,
+            'sus_flag': 0, 'sus_cnt': 0,  # sus_cnt: SUSTAIN 指数查表计数器
         }
     mod = make_op(p['mod_ml'], p['mod_tl'], p['mod_fb'], p['mod_eg'], p['mod_ws'],
                   p['mod_ar'], p['mod_dr'], p['mod_sl'], p['mod_rr'])
@@ -110,10 +115,12 @@ def fw_key_on(mod, car):
             op['env_state'] = 1; op['env_step'] = op['atk']
 
 def fw_key_off(mod, car):
-    """1:1 照搬 ym_key_off"""
+    """1:1 照搬 ym_key_off (RELEASE 速率对齐 emu get_parameter_rate line 505-512)
+    sus_flag -> 5; EG=1 -> RR(rr); EG=0 -> 固定 7"""
     mod['env_state'] = 4; car['env_state'] = 4
-    mod['env_step'] = FW_RR_TAB[5] if mod['sus_flag'] else mod['rel']
-    car['env_step'] = FW_RR_TAB[5] if car['sus_flag'] else car['rel']
+    # RELEASE 速率: sus_flag?5 : (EG? RR : 7)
+    mod['env_step'] = FW_RR_TAB[5] if mod['sus_flag'] else (mod['rel'] if mod['eg_type'] else FW_RR_TAB[7])
+    car['env_step'] = FW_RR_TAB[5] if car['sus_flag'] else (car['rel'] if car['eg_type'] else FW_RR_TAB[7])
 
 def fw_env_tick(op):
     """1:1 照搬 ym_env_tick (加法计数器, 和下位机 commit 1f45584 同步)"""
@@ -135,9 +142,15 @@ def fw_env_tick(op):
             op['level'] -= 1
         else:
             op['env_state'] = 3
-            op['env_step'] = 0 if op['eg_type'] else op['rel']  # EG=1保持, EG=0继续降
-    elif st == 3:  # sustain
-        if op['level'] > 0: op['level'] -= 1
+            op['env_step'] = 0 if op['eg_type'] else 1  # EG=1保持; EG=0 进 sustain, env_step=1 让 sus_hold 接管速率
+    elif st == 3:  # sustain (EG=0 non-sustaining: 指数查表衰减; EG=1 不会进这里因 env_step=0)
+        if op['level'] > 0:
+            op['sus_cnt'] += 1
+            if op['sus_cnt'] >= FW_SUS_HOLD[op['level']]:
+                op['sus_cnt'] = 0
+                op['level'] -= 1
+                if op['level'] == 0:
+                    op['env_state'] = 0
     elif st == 4:  # release
         if op['level'] > 0: op['level'] -= 1
 

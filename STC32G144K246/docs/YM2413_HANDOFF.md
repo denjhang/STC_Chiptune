@@ -193,3 +193,74 @@ FW_HALFSIN = [
 - **听感最准** — 用户听出"高八度+2半音"直接定位到频率 bug, 比所有数值分析都快
 - **改 mod.tl 这种全局映射会动音高** — FM 调制量级变化影响边带, 不是纯调参
 
+---
+
+# 2026-06-25 harpsichord 包络对齐 (sus_hold 指数查表)
+
+## 触发
+频率对齐后听感确认: harpsichord 仍过反馈 + 包络行为差太远.
+直接算幅度对比 (无需听) 发现:
+- keyoff 后 fw 3824ms 才归零 (emu ~100ms)
+- keyon 期间 fw 几乎不衰减 (-2.5dB@900ms), emu 持续衰减 (-24.7dB@900ms)
+
+## 根因: emu 5 阶段速率映射 (get_parameter_rate line 498-516)
+
+| env_state | emu 速率 | fw 旧实现 | 问题 |
+|---|---|---|---|
+| ATTACK | AR | AR | ✓ |
+| DECAY | DR | DR | ✓ |
+| SUSTAIN | `EG?0:RR` | `EG?0:rel(RR)` | ✓ 速率对但**形态错** (见下) |
+| RELEASE | `sus?5:(EG?RR:7)` | `sus?5:rel(RR)` | ❌ **EG=0 应用固定 7, 旧用 RR** |
+| DAMP | DAMPER_RATE | - | - |
+
+### 关键 bug: RELEASE(EG=0) 速率映射错
+- 旧: `env_step = rel` (=RR_TAB[rr], 慢) → keyoff 3824ms
+- 新: `env_step = sus?5:(EG?rel:RR_TAB[7])` → keyoff ~100ms (对齐 emu)
+
+### 关键 bug: SUSTAIN 线性 vs emu 指数形态差异
+- emu: eg_out 对数域线性递增 → 输出**指数衰减** (前期慢后期也慢, 持续衰减)
+- fw : level 线性递减 → 输出**线性衰减** (前期慢后期快, level 小时迅速归零)
+- **纯改 cnt 无法拟合**: 扫描 cnt=5~30, 要么前期太快要么后期死掉
+
+## 解决: sus_hold[32] 指数衰减查表 (2026-06-25 新增)
+
+加一张表 + 一个计数器, SUSTAIN 阶段查表替代线性减法, 模拟指数衰减:
+```
+FW_SUS_HOLD = [1, 122,122,71,50,39,32,27,23,20,18,16,15,14,13,
+               12,11,10,10,9,9,8,8,8,7,7,6,6,6,6,6,5]
+// SUSTAIN 阶段 (env_step=1 让 sus_hold 接管):
+sus_cnt++;
+if (sus_cnt >= sus_hold[level]) { sus_cnt=0; level--; }
+```
+- sus_hold[level] = 该 level 停留几个 round-robin tick (高 level 慢降, 低 level 快降)
+- **纯查表+计数器, 无除法无指数运算, STC32 可跑** (6FM+5节奏满负荷下 OK)
+- tau≈88ms (scale=0.4 实测对齐 emu, 从 tau=221ms 基础表缩放)
+
+**配套改动**:
+- decay→sustain 转换: `env_step = 0 if EG else 1` (env_step=1 让 sus_hold 接管, 不被外层节流)
+- DR_TAB/RR_TAB 4~10 档改快 2.2× (旧表系统性偏慢)
+
+## harpsichord 对齐结果 (440Hz, 1s keyon+1s keyoff)
+| t_ms | emu | fw | diff |
+|---|---|---|---|
+| 100 | -2.7 | -3.5 | -0.8 |
+| 500 | -13.7 | -16.0 | -2.3 |
+| 950 | -26.1 | -27.4 | -1.3 |
+| release@1050 | -43.2 | 归零 | 略快 |
+全程偏差 < 4dB, 指数形态对齐 ✓ (wav: tools/wav_sus_final/)
+
+## 下一步 (剩余 14 乐器逐个调)
+sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,
+衰减时间常数不同。可能需要:
+1. sus_hold 按 RR 档位缩放 (不同乐器不同 tau)
+2. flute 等已知问题: AR/DR 太慢, 单独调 AR_TAB/DR_TAB
+3. 逐乐器对照 emu, 找各自的包络偏差
+**注**: sus_hold 目前是单一 tau, 多乐器共用可能要改成 tau 随 RR 变化
+
+## 教训补充 (2026-06-25)
+- **线性 level 无法拟合指数衰减** — 必须查表, 纯改速度不行 (扫描证明)
+- **加表+简单运算是允许的** — sus_hold 查表不是"改架构", 是"加表+改运算规则"
+- **STC32 算力有限** — 6FM+5节奏已满负荷, 不能用除法/指数运算, 查表+计数器才行
+- **先算幅度对比再听** — 包络偏差从 RMS 曲线直接可见, 不用听就能定位
+- **逐个击破** — 15 乐器不要一起调, 先 harpsichord 跑通流程再逐个来
+
