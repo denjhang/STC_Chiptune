@@ -531,7 +531,7 @@ static void ym_drum_trigger(u8 idx) {
 
 /* SD 走 ch9 通用 2-op FM, 触发后固定时间自动 key_off */
 static u16 data sd_koff_timer;  /* key_off 倒计时 (0=不触发) */
-#define SD_KOFF_DELAY  20
+#define SD_KOFF_DELAY  100  /* ~4.5ms 后 key_off */
 
 static void ym_sd_trigger(void) {
     YM_OP *mod = &ym_ch[9].mod;
@@ -651,11 +651,13 @@ s16 ym2413_render(void) {
         /* SD 走 ch9 通用 2-op, 在旋律循环里渲染 */
     }
 
-    /* SD 自动 key_off (写死时长) */
+    /* SD 自动 key_off: 同时强制 mod+car 进 release, 快速衰减 */
     if (sd_koff_timer > 0) {
         sd_koff_timer--;
         if (sd_koff_timer == 0 && ym_ch[9].key_on) {
-            ym_key_off(9);  /* 触发 release */
+            ym_ch[9].key_on = 0;
+            ym_ch[9].mod.env_state = 4; ym_ch[9].mod.env_step = 1;
+            ym_ch[9].car.env_state = 4; ym_ch[9].car.env_step = 1;
         }
     }
 
