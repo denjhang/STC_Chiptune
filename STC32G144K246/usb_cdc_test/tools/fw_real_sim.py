@@ -47,13 +47,14 @@ FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
 FW_AR_TAB = [0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1]
 FW_DR_TAB = [0, 255, 255, 255, 75, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
 FW_RR_TAB = [0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
-# SUSTAIN 指数衰减查表 (2026-06-25): sus_hold[level] = 该 level 停留几个 round-robin tick
-# 模拟 emu 指数输出衰减. tau≈97ms (scale=0.44 实测对齐 emu harpsichord, score=6.1)
-# SUSTAIN 阶段: sus_cnt++; if (sus_cnt >= sus_hold[level]) { sus_cnt=0; level--; }
-FW_SUS_HOLD = [1, 134, 134, 78, 55, 43, 35, 29, 25, 22, 20, 18, 16, 15, 14,
-               13, 12, 11, 11, 10, 10, 9, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6]
-# RELEASE 指数衰减查表: rel_hold[level] = release 阶段该 level 停留 tick 数
-# release 比 sustain 快 (整体 ~100ms 归零), 用 sus_hold 缩放. 复用 sus_cnt 计数器.
+# SUSTAIN 指数衰减基础表 (tau=221ms): sus_hold[level] = 该 level 停留 tick 数 (未缩放)
+# 实际 sustain 用 sus_hold[level] × sus_scale_x16[rr] >> 4 (按 RR 缩放)
+FW_SUS_HOLD = [0, 305, 305, 178, 126, 98, 80, 68, 59, 52, 46, 42, 38, 35, 33,
+               30, 28, 27, 25, 24, 23, 21, 20, 20, 19, 18, 17, 17, 16, 15, 15, 14]
+# sus_scale_x16[RR]: SUSTAIN 衰减缩放 (×16 定点), 按 RR 档位 (emu 实测反推)
+# RR 小=慢衰减(长 sustain, vibraphone RR=2), RR 大=快衰减. RR=4 ≈ 0.44 (harpsichord 基准)
+FW_SUS_SCALE_X16 = [0, 122, 27, 14, 7, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# RELEASE 指数衰减: rel_hold[level] (固定, 比 sustain 快 ~10×). 复用 sus_cnt.
 FW_REL_HOLD = [max(1, h//10) for h in FW_SUS_HOLD]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
@@ -87,10 +88,11 @@ def fw_apply_patch(p):
             'atk': FW_AR_TAB[ar], 'decy': FW_DR_TAB[dr],
             'sul': 0 if sl >= 15 else (31 - sl * 2),
             'rel': FW_RR_TAB[rr],
+            'sus_scale_x16': FW_SUS_SCALE_X16[rr],  # SUSTAIN 按 RR 缩放 (×16 定点)
             # 运行时状态
             'pos': 0, 'step': 0, 'fb_val': 0,
             'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
-            'sus_flag': 0, 'sus_cnt': 0,  # sus_cnt: SUSTAIN 指数查表计数器
+            'sus_flag': 0, 'sus_cnt': 0,  # sus_cnt: SUSTAIN/RELEASE 指数查表计数器
         }
     mod = make_op(p['mod_ml'], p['mod_tl'], p['mod_fb'], p['mod_eg'], p['mod_ws'],
                   p['mod_ar'], p['mod_dr'], p['mod_sl'], p['mod_rr'])
@@ -145,10 +147,12 @@ def fw_env_tick(op):
         else:
             op['env_state'] = 3
             op['env_step'] = 0 if op['eg_type'] else 1  # EG=1保持; EG=0 进 sustain, env_step=1 让 sus_hold 接管速率
-    elif st == 3:  # sustain (EG=0 non-sustaining: 指数查表衰减; EG=1 不会进这里因 env_step=0)
+    elif st == 3:  # sustain (EG=0 non-sus: 指数查表按 RR 缩放衰减; EG=1 step=0 不进)
         if op['level'] > 0:
             op['sus_cnt'] += 1
-            if op['sus_cnt'] >= FW_SUS_HOLD[op['level']]:
+            threshold = (FW_SUS_HOLD[op['level']] * op['sus_scale_x16']) >> 4
+            if threshold < 1: threshold = 1
+            if op['sus_cnt'] >= threshold:
                 op['sus_cnt'] = 0
                 op['level'] -= 1
                 if op['level'] == 0:
