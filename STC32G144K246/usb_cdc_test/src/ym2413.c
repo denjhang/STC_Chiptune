@@ -529,7 +529,7 @@ static void ym_drum_trigger(u8 idx) {
     d->env_cnt = 0;
 }
 
-/* SD 真 2-op 独立路径 (data区, oneshot, 不走旋律通道) */
+/* SD 真 2-op 独立路径 (data区, oneshot, 完全对齐 ym_render_fm 公式) */
 /* mod=noise(25Hz) 调制 car=sin(240Hz), FB=2, 各自 oneshot 包络 */
 static u8 data sd_mod_level;
 static u8 data sd_car_level;
@@ -537,20 +537,24 @@ static u8 data sd_mod_cnt;
 static u8 data sd_car_cnt;
 static u16 data sd_mod_pos;
 static u16 data sd_car_pos;
-#define SD_MOD_ENVSTEP  7    /* noise 快衰减 ~5ms */
-#define SD_CAR_ENVSTEP  28   /* sine 慢衰减 ~20ms */
+static u8 data sd_mod_tl = 15;     /* mod 调制深度 */
+static u8 data sd_car_tl = 31;     /* car 音量 */
+static u8 data sd_fb_val;          /* 反馈值 */
+#define SD_MOD_ENVSTEP  7    /* noise 快衰减 */
+#define SD_CAR_ENVSTEP  28   /* sine 慢衰减 */
 #define SD_MOD_STEP     0x0012  /* noise 25Hz 8.8 */
 #define SD_CAR_STEP     0x00B3  /* sin 240Hz 8.8 */
 #define SD_FB           2
 
 static void ym_sd_trigger(void) {
-    sd_mod_level = 31; sd_mod_cnt = 0; sd_mod_pos = 0;
+    sd_mod_level = 31; sd_mod_cnt = 0; sd_mod_pos = 0; sd_fb_val = 0;
     sd_car_level = 31; sd_car_cnt = 0; sd_car_pos = 0;
 }
 
 static s16 ym_render_sd(void) {
     s8 mod_wv, car_wv;
-    s16 mod_out, car_out;
+    s8 mod_out;
+    s8 car_out;
     if (sd_car_level == 0) return 0;
 
     /* mod 包络 (每采样 tick) */
@@ -560,20 +564,16 @@ static s16 ym_render_sd(void) {
     if (sd_car_cnt < SD_CAR_ENVSTEP) sd_car_cnt++;
     else { sd_car_cnt = 0; if (sd_car_level > 0) sd_car_level--; }
 
-    /* mod: noise 查表 × level × tl */
+    /* OP1 (mod): 完全对齐 ym_render_fm 公式 */
     sd_mod_pos += SD_MOD_STEP;
     mod_wv = ym_noise[(u8)(sd_mod_pos >> 8) & 0x3F];
-    mod_out = ((s16)mod_wv * (s16)((sd_mod_level + 1) * 16)) >> 10;
-    if (mod_out > 31) mod_out = 31; if (mod_out < -31) mod_out = -31;
+    mod_out = (s8)(((s16)mod_wv * (s16)(sd_mod_level + 1) * (s16)(sd_mod_tl + 1)) >> 10);
+    sd_fb_val = (s8)(mod_out >> SD_FB);
 
-    /* car: sin + mod 调制相位, FB */
+    /* OP2 (car): mod_out 调制相位 + fb, 完全对齐 ym_render_fm */
     sd_car_pos += SD_CAR_STEP;
-    {
-        s16 fb = mod_out >> SD_FB;
-        car_wv = ym_sin[((u8)(sd_car_pos >> 8) + (u8)mod_out + (u8)fb) & 0x3F];
-    }
-    car_out = ((s16)car_wv * (s16)((sd_car_level + 1) * 8)) >> 6;
-    if (car_out > 127) car_out = 127; if (car_out < -128) car_out = -128;
+    car_wv = ym_sin[((u8)(sd_car_pos >> 8) + (u8)mod_out) & 0x3F];
+    car_out = (s8)(((s16)car_wv * (s16)(sd_car_level + 1) * (s16)(sd_car_tl + 1)) >> 10);
     return car_out;
 }
 
