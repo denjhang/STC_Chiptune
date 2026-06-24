@@ -179,7 +179,7 @@ def fw_render_fm(mod, car, wait_tick, ch):
     if ch_out > 127: ch_out = 127
     elif ch_out < -128: ch_out = -128
     if mod['fb'] > 0:
-        fb_val = ch_out >> mod['fb']
+        fb_val = ch_out >> (mod['fb'] + 4)   # FB+4 移位压低反馈 (对齐 emu 反馈强度, 2026-06-25)
         if fb_val > 127: fb_val = 127
         elif fb_val < -128: fb_val = -128
         mod['fb_val'] = fb_val
