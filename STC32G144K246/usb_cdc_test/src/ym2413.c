@@ -55,16 +55,22 @@ static const u8 code ym_rr_tab[16] = {
     0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1
 };
 /* SUSTAIN/RELEASE 指数衰减查表 (2026-06-25): 拟合 emu 指数输出衰减
- * sus_hold[level] = sustain 阶段该 level 停留 tick 数 (scale=0.44, tau≈97ms)
- * rel_hold[level] = release 阶段 (sus_hold//10, 整体~100ms)
+ * sus_hold[level] = 基础停留 tick 数 (tau=221ms, 未缩放)
+ * 实际 sustain 用 sus_hold[level] × sus_scale_x16[rr] >> 4 (按 RR 缩放)
+ * rel_hold[level] = release 阶段 (sus_hold//10, 固定)
  * 用法: sus_cnt++; if (sus_cnt >= hold[level]) { sus_cnt=0; level--; } */
-static const u8 code ym_sus_hold[32] = {
-    1, 134,134,78, 55, 43, 35, 29, 25, 22, 20, 18, 16, 15, 14, 13,
-   12, 11, 11, 10, 10,  9,  8,  8,  8,  7,  7,  7,  7,  6,  6,  6
+static const u16 code ym_sus_hold[32] = {
+    0, 305,305,178,126, 98, 80, 68, 59, 52, 46, 42, 38, 35, 33, 30,
+   28, 27, 25, 24, 23, 21, 20, 20, 19, 18, 17, 17, 16, 15, 15, 14
+};
+/* sus_scale_x16[RR]: sustain 缩放 (×16 定点), 按 RR 档位 (emu 实测反推)
+ * RR 小=慢衰减(长 sustain), RR=4≈0.44 (harpsichord 基准), RR≥6 极快 */
+static const u8 code ym_sus_scale_x16[16] = {
+    0, 122, 27, 14, 7, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 static const u8 code ym_rel_hold[32] = {
-    1, 13, 13, 7, 5, 4, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+   30, 30, 30, 17, 12, 9,  8,  6,  5,  5,  4,  4,  3, 3, 3, 3,
+    2,  2,  2,  2,  2,  2,  2,  2,  1,  1,  1,  1,  1, 1, 1, 1
 };
 
 /* ===== ML 查表 (YM2413 multiple, ml=0 时 0.5) ===== */
@@ -138,7 +144,8 @@ typedef struct {
     u8 env_cnt;
     u8 env_step;
     u8 level;
-    u8 sus_cnt;          /* SUSTAIN/RELEASE 指数查表计数器 (2026-06-25) */
+    u16 sus_cnt;          /* SUSTAIN/RELEASE 指数查表计数器 (RR=2 可达 515, 用 u16) */
+    u8 sus_scale_x16;    /* SUSTAIN 按 RR 缩放 (×16 定点, make_patch 时存) */
 } YM_OP;
 
 /* ===== 通道 (9 旋律 + rhythm) ===== */
@@ -235,6 +242,7 @@ static void ym_apply_patch(u8 ch) {
     mod->decy = ym_dr_tab[p->mod_dr];
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_rr_tab[p->mod_rr];
+    mod->sus_scale_x16 = ym_sus_scale_x16[p->mod_rr];
     car->fb = 0;
     car->eg_type = p->car_eg;
     car->wave = p->car_ws ? ym_halfsin : ym_sin;
@@ -242,6 +250,7 @@ static void ym_apply_patch(u8 ch) {
     car->decy = ym_dr_tab[p->car_dr];
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
     car->rel  = ym_rr_tab[p->car_rr];
+    car->sus_scale_x16 = ym_sus_scale_x16[p->car_rr];
 }
 
 /* ===== 算 step (8.8 定点, 参考 12K128 fm.c) ===== */
@@ -358,10 +367,12 @@ static void ym_env_tick(YM_OP *op) {
             op->env_step = op->eg_type ? 0 : 1;
         }
         break;
-    case 3: /* sustain: EG=0 用 sus_hold 指数查表衰减 (EG=1 step=0 不进这里) */
+    case 3: /* sustain: EG=0 用 sus_hold×RR缩放 指数查表衰减 (EG=1 step=0 不进这里) */
         if (op->level > 0) {
+            u16 thr = (ym_sus_hold[op->level] * op->sus_scale_x16) >> 4;
+            if (thr < 1) thr = 1;
             op->sus_cnt++;
-            if (op->sus_cnt >= ym_sus_hold[op->level]) {
+            if (op->sus_cnt >= thr) {
                 op->sus_cnt = 0;
                 op->level--;
                 if (op->level == 0) op->env_state = 0;
