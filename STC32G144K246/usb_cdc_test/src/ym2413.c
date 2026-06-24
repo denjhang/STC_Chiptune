@@ -531,7 +531,7 @@ static void ym_drum_trigger(u8 idx) {
 
 /* SD 走 ch9 通用 2-op FM, 触发后固定时间自动 key_off */
 static u16 data sd_koff_timer;  /* key_off 倒计时 (0=不触发) */
-#define SD_KOFF_DELAY  500  /* ~23ms 后 key_off */
+#define SD_KOFF_DELAY  20
 
 static void ym_sd_trigger(void) {
     YM_OP *mod = &ym_ch[9].mod;
