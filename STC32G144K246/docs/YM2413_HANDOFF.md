@@ -1,55 +1,122 @@
 # YM2413 工作交接 (2026-06-25)
 
-## 当前下位机状态 (commit 9327509)
-- ym2413.c 退回到 9327509 (u16 8.8 定点优化版, 稳定)
-- 旋律 ch0-8 (9通道), 只渲染 ch0-5 (6通道省CPU)
-- 鼓声: BD/TOM/HH/CYM 单 op 简化路径 (YM_DRUM 结构)
-- SD: 单 op noise 25Hz (独立2-op版本听感好但性能/包络问题待解决)
-- ISR 22050Hz, 偶尔卡 (6通道同发时)
+## 工作目录
+- 项目根: `D:\working\vscode-projects\STC_Chiptune`
+- 固件源码: `STC32G144K246\usb_cdc_test\src\ym2413.c`
+- 构建脚本: `STC32G144K246\usb_cdc_test\build.py`
+- PC 仿真工具: `STC32G144K246\usb_cdc_test\tools\`
+- VGM 测试文件: `vgm\opll\msxfan\`, `vgm\opll\opldrv\`
+- STC32G12K128 参考实现 (16通道FM不卡): `STC32G12K128\fm.c`
 
-## 鼓声参数 (当前 9327509 版)
+## 编译/烧录/播放命令
+```bash
+# 编译固件
+cd STC32G144K246\usb_cdc_test && py -3 build.py
+
+# 打包源码
+python tools\pack_144k_src.py
+
+# 播放 VGM 测试
+cd STC32G144K246\usb_cdc_test && py -3 tools\vgm_player.py --vgm-dir D:/working/vscode-projects/STC_Chiptune/vgm/opll/msxfan --port COM24 <编号>
+
+# PC 仿真 (旋律包络验证)
+cd STC32G144K246\usb_cdc_test && py -3 -c "
+import sys, math
+sys.path.insert(0, 'tools')
+from fw_real_sim import render_fw_real
+from ym2413_wav_gen import render_emu2413, NAMES
+# ... 对照 emu2413 看 level 曲线
+"
+
+# PC 鼓声仿真
+cd STC32G144K246\usb_cdc_test && py -3 tools\drum_fw_sim.py
 ```
-BD:  sin 100Hz, vol=16, env_step=14 (~20ms)
-TOM: sin 214Hz(ml5), vol=8, env_step=14 (~20ms)  
-HH:  noise 755Hz, vol=2, env_step=46 (~65ms)
-CYM: noise 755Hz, vol=2, env_step=255 (~360ms)
-SD:  noise 25Hz, vol=8, env_step=28 (~40ms) [单op]
+
+## git 常用
+```bash
+# 退回 ym2413.c 到某个 commit
+git checkout <commit> -- STC32G144K246/usb_cdc_test/src/ym2413.c
+
+# 查看某个 commit 的 SD 实现
+git show <commit>:STC32G144K246/usb_cdc_test/src/ym2413.c | grep -A20 "ym_sd_trigger"
+
+# 重要 commit:
+# 9327509 - u16 8.8定点优化 (当前稳定版, 退回这里)
+# 93bc777 - EG语义+tl映射修正 (旋律包络正确)
+# 2407ccb - SD独立2-op (data区oneshot, 听感短促可接受)
+# b1b022a - SD真2-op ch6 (听感最好但卡ISR)
+# 119dcc6 - 鼓声单op简化路径 (BD/TOM/HH/CYM)
+# 435f6e6 - 只渲染ch0-5 (6通道省CPU)
 ```
-注意: step 是 8.8 定点 (freq×64×256/22050)
 
-## SD 2-op 历史版本
-- **2407ccb**: 独立 2-op (data区 oneshot), 听感短促可接受
-  - mod=noise(25Hz,FB=2) 调制 car=sin(240Hz)
-  - mod: DEC=7 SUL=0 REL=7 TL=15 (快衰减)
-  - car: DEC=7 SUL=19 REL=28 TL=31 (慢衰减)
-  - 问题: 听感和真2op有区别 (之前完整2op走ym_render_fm听感最好)
-- **b1b022a**: ch6 真 2-op (ym_render_fm), 听感最好但和旋律抢round-robin + ISR卡
-- **ec8ab1b**: ch9 真 2-op (u16优化后), ADSR在round-robin下无限长
-- **结论**: SD 2-op 需要 data区独立路径(不走round-robin), 参考drum_fw_sim.py
+## 工作原则 (必须遵守)
+1. **先 PC 仿真验证, 再改下位机** — 不验证就改 = 浪费时间
+2. **fw_real_sim.py 必须和下位机 1:1 同步** — 不同步的仿真=假的
+3. **只改数值/表, 不改架构** — round-robin/env_tick逻辑/输出公式/波形/相位/ml/结构体 不能动
+4. **鼓声必须定长度 (oneshot)** — VGM 鼓声只有上升沿 key_on, 无 key_off, 不能依赖 VGM
+5. **鼓声不走 round-robin ADSR** — round-robin 下 ADSR 无限长, 用 data区 oneshot
+6. **8.8 定点** — pos/step 用 u16, 参考 STC32G12K128 fm.c (16通道不卡的秘诀)
+7. **ISR 22050Hz** — 不是 49716, step 要按 22050 算
+8. **level=0 跳过渲染** — 省CPU, level=0 的 op 跳过查表和乘法
 
-## 关键代码位置 (9327509)
-- YM_DRUM 结构: ym2413.c ~line 155
-- ym_drum_trigger: ~line 520
-- ym_render_drum: ~line 540
-- ym_render_fm: ~line 570 (旋律2-op, u16 8.8定点)
-- ym2413_render: ~line 620 (ch0-5旋律 + 鼓声)
-- 边沿触发: ym_update_keys ~line 310 (ym_prev_drum_bits)
-- 鼓声init参数: ~line 395
+## PC 仿真工具详解
 
-## PC 工具
-- `tools/drum_fw_sim.py`: 鼓声 PC 仿真 (参数固化, 但用的是onshot不是round-robin)
-- `tools/fw_real_sim.py`: 旋律 1:1 下位机仿真
-- `tools/ym2413_wav_gen.py`: emu2413 忠实移植 + V3 调参
+### tools/fw_real_sim.py (旋律 1:1 下位机仿真)
+- `render_fw_real(inst_idx, freq, dur_ko, dur_kf, volume)` — 严格复刻下位机旋律渲染
+- 用法: 对照 emu2413 看 level 曲线, 验证包络行为
+- 包含: AR/DR/RR 三表, key_on cnt=0, atk≤2瞬间, EG语义, tl映射
+- **注意**: 这个仿真器的 env_tick/key_on 等必须和下位机同步更新
 
-## 待解决问题
-1. **ISR 性能**: 6通道同发偶尔卡, 需进一步优化 ym_render_fm
-2. **SD 2-op**: 独立路径(2407ccb)听感可接受但不完美, data区 oneshot 方案
-3. **鼓声长度**: 需要在 PC 上用 round-robin 真实仿真验证
-4. **STC32G12K128 fm.c**: 16通道不卡的参考实现, 关键是 u16 8.8 定点
+### tools/drum_fw_sim.py (鼓声 PC 仿真)
+- `render_drum_fw(drum_type, dur)` — 鼓声仿真 (参数固化)
+- `DRUM_PARAMS` — 5 鼓声参数字典
+- **注意**: 用的是 oneshot 不是 round-robin, 和下位机单op鼓声一致
+- SD 参数是独立2-op (FM调制+FB), 但仿真和下位机有偏差
 
-## 规则
-- 先 PC 仿真验证, 再改下位机
-- fw_real_sim.py 必须和下位机同步
-- 只改数值/表, 不改架构
-- 鼓声是上升沿触发 (VGM reg 0x0E bit 0→1), 无显式 key_off
-- 鼓声必须定长度 (oneshot 自衰减), 不能依赖 VGM 的 key_off
+### tools/ym2413_wav_gen.py (emu2413 忠实移植)
+- `render_emu2413(inst, freq, dk, df)` — emu2413 旋律渲染 (对照标准)
+- `render_drum(drum_type)` — emu2413 鼓声渲染
+- 输出 WAV 到 wav_emu2413/ wav_fm_v3/ wav_fm_v3_fw/
+
+## 当前下位机状态 (9327509)
+- ym2413.c: u16 8.8 定点, 旋律 ch0-5 (6通道渲染), ch6-8 不渲染
+- 鼓声: BD/TOM/HH/CYM/SD 单 op (YM_DRUM 结构, oneshot 每采样tick)
+- ISR 偶尔卡 (6通道同发), 需进一步优化
+
+## 鼓声参数 (8.8定点, step=freq×64×256/22050)
+```
+BD:  sin,    step=0x004A(100Hz),  vol=16, env_step=14, ~20ms
+TOM: sin,    step=0x009F(214Hz),  vol=8,  env_step=14, ~20ms
+HH:  noise,  step=0x00F8(334Hz),  vol=2,  env_step=46, ~65ms
+CYM: noise,  step=0x00F8(334Hz),  vol=2,  env_step=255,~360ms
+SD:  noise,  step=0x0012(25Hz),   vol=8,  env_step=28, ~40ms [单op]
+```
+
+## SD 2-op 待恢复 (参考 2407ccb)
+独立 data 区 2-op 路径 (不走 round-robin):
+```
+mod: noise 25Hz(step=0x0012), FB=2, TL=15, DEC=7→SUL=0→REL=7
+car: sin 240Hz(step=0x00B3), TL=31, DEC=7→SUL=19→REL=28
+公式: (wave×(level+1)×(tl+1))>>10
+FB: mod fb_val 反馈到 mod 自己相位
+调制: car_idx += mod_out
+```
+触发: `ym_sd_trigger()` 设 data 区变量, 渲染: `ym_render_sd()` 每采样tick
+
+## 关键代码位置 (9327509, 行号可能偏移)
+- YM_DRUM 结构: ~155行
+- 鼓声 init 参数: ~395行
+- ym_drum_trigger: ~520行
+- ym_render_drum: ~540行
+- ym_render_fm (旋律2-op, u16): ~570行
+- ym2413_render (主循环): ~620行
+- 边沿触发 ym_prev_drum_bits: ~310行
+- env_tick: ~326行
+- AR/DR/RR 三表: ~39行
+- 噪声表 ym_noise[64]: ~34行
+
+## 待解决
+1. ISR 性能: 6通道同发卡, 参考 12K128 fm.c 优化
+2. SD 恢复 2-op: 用 2407ccb 的独立 data 区路径
+3. 鼓声 round-robin 仿真: fw_real_sim 需要加鼓声仿真支持
+4. BD 音量/时长: 可能还需微调
