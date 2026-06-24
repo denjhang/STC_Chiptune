@@ -199,6 +199,35 @@ step 公式正确, 但整体高一个八度.
 - `tools/fw_real_sim.py`: 严格 1:1 下位机旋律仿真
 - `tools/drum_fw_sim.py`: 鼓声 PC 仿真 (参数固化)
 
+## 5.1 2026-06-25 包络+反馈重大修复 (拨奏类乐器一并修复)
+
+### 发现的 bug
+1. **fw_real_sim.py 一直没和下位机同步** — 仿真器用 16.16 定点(49716Hz),
+   下位机是 8.8 定点(22050Hz), 频率高 2.255× (听感高八度+2半音). 已修.
+2. **halfsin 负半周镜像 vs 静音** — 旧版镜像正值是 bug, emu 是静音. 已修.
+3. **包络形态错** — fw 线性 level 衰减, emu 指数衰减, 纯改速度无法拟合.
+4. **RELEASE 速率映射错** — EG=0 的 release 应更快.
+5. **过反馈** — 反馈占周期 fw 15% vs emu 0.66% (22.9×).
+
+### 修复方案 (已同步下位机 commit 0bcd705, 编译通过)
+- **sus_hold[32] / rel_hold[32] 指数衰减查表**: SUSTAIN/RELEASE 用查表+计数器
+  模拟指数衰减 (纯查表无除法, STC32 可跑). tau≈97ms (scale=0.44 实测对齐 emu).
+- **FB+4 移位**: `fb_val = ch_out >> (fb+4)` 压低反馈环路, 反馈占周期 15%→0.78%.
+- **DR_TAB/RR_TAB 4~10 档改快 2.2×**.
+- **halfsin 后半周改静音**.
+
+### 意外收益: 拨奏类乐器一并修复
+sus_hold/rel_hold + FB+4 是**通用机制**, 不止修了 harpsichord, 还一并修复了
+所有「带反馈 + 持续衰减」的拨奏类乐器 (实机验证):
+- ✅ Guitar (吉他), Piano (钢琴), Vibraphone (颤音琴), Harpsichord (拨弦键琴)
+- 原因: 这些乐器共用 EG=0 (non-sustaining) + 反馈, 旧的线性衰减+过反馈让它们
+  全部失真, 新机制一次性解决.
+
+### 仍待调
+- flute 等吹奏类: AR/DR 可能偏慢 (sus_hold 单一 tau, 多乐器共用)
+- sus_hold 可能需按 RR 档位缩放 (不同乐器不同 tau)
+- 详细调试记录见 YM2413_HANDOFF.md
+
 ## 6. 被证伪的假设
 
 1. ❌ "完整 emu2413.c 能直接移植到 C251" — 错, 128KB tll_table + ISR 太慢
