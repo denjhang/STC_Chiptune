@@ -119,8 +119,8 @@ typedef struct {
     u8 eg_type;
     u8 sus_flag;
     const s8 code *wave;   /* 波形表指针 (ym_sin 或 ym_halfsin) */
-    u32 step;
-    u32 pos;
+    u16 step;              /* 8.8 定点相位步进 (省 CPU, 参考 12K128 fm.c) */
+    u16 pos;               /* 8.8 定点相位累加 */
     s8 fb_val;
     u8 env_state;
     u8 env_cnt;
@@ -161,8 +161,8 @@ typedef struct {
     u8 env_step;
     u8 vol;              /* 音量倍数 (2=标准, 4=2倍) */
     const s8 code *wave;
-    u32 step;
-    u32 pos;
+    u16 step;             /* 8.8 定点 */
+    u16 pos;              /* 8.8 定点 */
 } YM_DRUM;
 
 static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
@@ -183,7 +183,7 @@ static void ym_drum_trigger(u8 idx);  /* 前向声明 */
  *   存 16.16: step_q16 = freq_hz × 64 / 22050 × 65536
  *            = fnum × 2^blk × 3579545 / (72 × 262144) × 64 / 22050 × 65536
  */
-#define YM_STEP_CONST  (3579545.0f * 64.0f * 65536.0f / (72.0f * 262144.0f * 22050.0f))
+/* YM_STEP_CONST 在 ym_calc_step 处定义 (8.8 定点) */
 
 /* ===== 解码音色 dump ===== */
 static void ym_decode_patch(const u8 *dump, YM_VOICE_PATCH *p) {
@@ -231,12 +231,13 @@ static void ym_apply_patch(u8 ch) {
     car->rel  = ym_rr_tab[p->car_rr];
 }
 
-/* ===== 算 step (16.16 定点) ===== */
-static u32 ym_calc_step(u16 fnum, u8 blk, u8 ml) {
-    /* step = fnum × (1<<blk) × YM_STEP_CONST × ml / 2
-     * ml 是查表后的值 (ym_ml_table), 实际 = ml/2 */
+/* ===== 算 step (8.8 定点, 参考 12K128 fm.c) ===== */
+/* 64 点表, idx = pos >> 8 & 0x3F, 一个周期 = 64×256 = 16384 */
+/* step = freq × 64 × 256 / 22050 */
+#define YM_STEP_CONST  (3579545.0f * 64.0f * 256.0f / (72.0f * 262144.0f * 22050.0f))
+static u16 ym_calc_step(u16 fnum, u8 blk, u8 ml) {
     float base = (float)fnum * (float)(1 << blk) * YM_STEP_CONST;
-    u32 step = (u32)(base * (float)ml / 2.0f);
+    u16 step = (u16)(base * (float)ml / 2.0f);
     return step;
 }
 
@@ -394,11 +395,11 @@ void ym2413_init(void) {
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x4A4D;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x9F02;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0xF8CA;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0xF8CA;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x1293;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -550,7 +551,7 @@ static s16 ym_render_drum(u8 idx) {
 
     /* 单 op: 查表 × level × vol */
     d->pos += d->step;
-    wave_val = d->wave[(u8)(d->pos >> 16) & 0x3F];
+    wave_val = d->wave[(u8)(d->pos >> 8) & 0x3F];
     out = ((s16)wave_val * (s16)((d->level + 1) * d->vol)) >> 6;
     if (out > 127) out = 127;
     if (out < -128) out = -128;
@@ -569,12 +570,11 @@ static s16 ym_render_fm(u8 ch) {
     /* OP1 (modulator) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
     mod->pos += mod->step;
-    /* level=0 时输出必为 0, 跳过查表和乘法 */
     if (mod->level == 0) {
         ch_out = 0;
         mod->fb_val = 0;
     } else {
-        idx = (u8)(mod->pos >> 16) & 0x3F;
+        idx = (u8)(mod->pos >> 8) & 0x3F;
         idx += (u8)mod->fb_val;
         wave_val = mod->wave[idx & 0x3F];
         ch_out = (s8)(((s16)wave_val * (s16)(mod->level + 1) * (s16)(mod->tl + 1)) >> 10);
@@ -585,11 +585,10 @@ static s16 ym_render_fm(u8 ch) {
     /* OP2 (carrier) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
     car->pos += car->step;
-    /* level=0 时输出必为 0, 跳过查表和乘法 */
     if (car->level == 0) {
         return 0;
     }
-    idx = (u8)(car->pos >> 16) & 0x3F;
+    idx = (u8)(car->pos >> 8) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
     ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
