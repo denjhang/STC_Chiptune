@@ -549,7 +549,8 @@ static void ym_update_noise(void) {
 static void ym_drum_trigger(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
     d->active = 1;
-    d->level = 31;
+    /* HH(2)/CYM(3) 初始 level=21 (vol=2 偏响, 降 level 压低音量); 其余 31 */
+    d->level = (idx == 2 || idx == 3) ? 21 : 31;
     d->env_cnt = 0;
 }
 
