@@ -575,10 +575,18 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
             print(f"  ->{name} @{clk}")
         else:
             print(f"  ->{name}")
+
+    # YM2413-only 模式: VGM 含 YM2413 时, 忽略其他芯片 (下位机算力不足, 只能单芯片)
+    # 其他芯片命令 (SN/AY/GB/NES/SAA/SCC) 只跳过不发送, wait 正常处理保持节拍
+    ym_only = (hdr.get('ym2413_clock') or 0) != 0 and stats.get('ym', 0) > 0
+    other_chips = [n for n, _ in chips_used if n != 'YM2413']
+    if ym_only and other_chips:
+        print(f"  [YM2413-only] 忽略其他芯片: {', '.join(other_chips)} (算力不足)")
+
     # 时钟下发 (NES + AY; YM2413 固定 3.579545MHz, 下位机 init 硬编码, 不需下发)
-    if stats['nes'] > 0:
+    if stats['nes'] > 0 and not ym_only:
         ser.write(bytes([0xB5]) + struct.pack('<I', nes_clk))
-    if stats['ay'] > 0 and ay_eff > 0:
+    if stats['ay'] > 0 and ay_eff > 0 and not ym_only:
         ser.write(bytes([0xB7]) + struct.pack('<I', ay_eff))
     # NES DMC 采样: 按总大小自动选模式 (MCU nes_dmc_buf = 16KB).
     #   ≤ 16KB → 预存 (开播前一次性发完, 不占 samples_budget, 节拍稳)
@@ -590,7 +598,7 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
     dmc_stream_mode = total_dmc_bytes > DMC_PRELOAD_LIMIT
     dmc_stream_sent = 0  # 流式已发送累计字节 (主循环用)
     dmc_stream_seq = 0   # 流式块序号 (主循环用)
-    if dmc_blocks:
+    if dmc_blocks and not ym_only:
         mode_label = 'STREAM ' if dmc_stream_mode else 'PRELOAD'
         total_str = fmt_bytes(total_dmc_bytes)
         if not dmc_stream_mode:
@@ -695,9 +703,10 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     break
 
             elif b == 0x50:
-                # SN76489: [0x50][data] - 直接透传
+                # SN76489: [0x50][data] - 直接透传 (ym_only 时跳过)
                 if pos + 1 <= end:
-                    ser.write(data[pos-1:pos+1])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+1])
                     pos += 1
 
             elif b == 0x51:
@@ -707,33 +716,38 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
                     pos += 2
 
             elif b == 0xA0:
-                # AY8910: [0xA0][reg][data] - 直接透传
+                # AY8910: [0xA0][reg][data] - 直接透传 (ym_only 时跳过)
                 if pos + 2 <= end:
-                    ser.write(data[pos-1:pos+2])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+2])
                     pos += 2
 
             elif b == 0xB3:
-                # GB DMG: [0xB3][reg][data] - 直接透传
+                # GB DMG: [0xB3][reg][data] - 直接透传 (ym_only 时跳过)
                 if pos + 2 <= end:
-                    ser.write(data[pos-1:pos+2])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+2])
                     pos += 2
 
             elif b == 0xB4:
-                # NES APU: [0xB4][reg][data] - 直接透传
+                # NES APU: [0xB4][reg][data] - 直接透传 (ym_only 时跳过)
                 if pos + 2 <= end:
-                    ser.write(data[pos-1:pos+2])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+2])
                     pos += 2
 
             elif b == 0xBD:
-                # SAA1099: [0xBD][addr][data] - 直接透传
+                # SAA1099: [0xBD][addr][data] - 直接透传 (ym_only 时跳过)
                 if pos + 2 <= end:
-                    ser.write(data[pos-1:pos+2])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+2])
                     pos += 2
 
             elif b == 0xD2:
-                # SCC: [0xD2][port][reg][data] - 直接透传
+                # SCC: [0xD2][port][reg][data] - 直接透传 (ym_only 时跳过)
                 if pos + 3 <= end:
-                    ser.write(data[pos-1:pos+3])
+                    if not ym_only:
+                        ser.write(data[pos-1:pos+3])
                     pos += 3
 
             elif b == 0x61:
