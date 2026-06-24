@@ -467,7 +467,7 @@ for _i in range(0xE0, 0xF0): VGM_CMD_LEN[_i] = 5
 for _i in range(0xF0, 0x100): VGM_CMD_LEN[_i] = 5
 
 
-def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
+def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False, ym_only=False):
     global _kb_cmd
     """
     loop: 循环次数
@@ -576,12 +576,12 @@ def play_vgm(data, hdr, stats, ser, speed=1.0, loop=0, allow_interrupt=False):
         else:
             print(f"  ->{name}")
 
-    # YM2413-only 模式: VGM 含 YM2413 时, 忽略其他芯片 (下位机算力不足, 只能单芯片)
+    # YM2413-only 模式 (--ym2413 参数): 只发 YM2413 命令, 忽略其他芯片 (下位机算力不足)
     # 其他芯片命令 (SN/AY/GB/NES/SAA/SCC) 只跳过不发送, wait 正常处理保持节拍
-    ym_only = (hdr.get('ym2413_clock') or 0) != 0 and stats.get('ym', 0) > 0
-    other_chips = [n for n, _ in chips_used if n != 'YM2413']
-    if ym_only and other_chips:
-        print(f"  [YM2413-only] 忽略其他芯片: {', '.join(other_chips)} (算力不足)")
+    if ym_only:
+        other_chips = [n for n, _ in chips_used if n != 'YM2413']
+        if other_chips:
+            print(f"  [YM2413-only] 忽略其他芯片: {', '.join(other_chips)} (算力不足)")
 
     # 时钟下发 (NES + AY; YM2413 固定 3.579545MHz, 下位机 init 硬编码, 不需下发)
     if stats['nes'] > 0 and not ym_only:
@@ -1007,7 +1007,7 @@ def _kb_watcher():
             pass
 
 
-def play_playlist(ser, vgm_dir, speed=1.0, loop=0, start_idx=0):
+def play_playlist(ser, vgm_dir, speed=1.0, loop=0, start_idx=0, ym_only=False):
     """顺序播放整个目录
     按键: n=下一曲, b=上一曲, q=退出
     loop: 每首歌循环次数 (0=不循环)
@@ -1044,7 +1044,7 @@ def play_playlist(ser, vgm_dir, speed=1.0, loop=0, start_idx=0):
             data = load_vgm(filepath)
             hdr = parse_vgm_header(data)
             stats = scan_vgm_stats(data, hdr)
-            cmd = play_vgm(data, hdr, stats, ser=ser, speed=speed, loop=loop, allow_interrupt=True)
+            cmd = play_vgm(data, hdr, stats, ser=ser, speed=speed, loop=loop, allow_interrupt=True, ym_only=ym_only)
         except KeyboardInterrupt:
             cmd = 'q'
         except Exception as e:
@@ -1570,6 +1570,8 @@ def main():
                         help='Gigatron music directory')
     parser.add_argument('--gt-list', action='store_true',
                         help='List Gigatron .gbas.c tracks')
+    parser.add_argument('--ym2413', action='store_true',
+                        help='YM2413-only: 只发 YM2413 命令, 忽略其他芯片 (算力不足时用)')
     parser.add_argument('--gt-shift', type=float, default=0.0, metavar='OCT',
                         help='Gigatron octave shift (1 = -1 octave, -0.5 = +half octave)')
     args = parser.parse_args()
@@ -1679,7 +1681,7 @@ def main():
     try:
         if not args.song:
             # 无歌曲参数: 播放列表模式 (顺序播放整个目录)
-            play_playlist(ser, vgm_dir, speed=args.speed, loop=args.loop)
+            play_playlist(ser, vgm_dir, speed=args.speed, loop=args.loop, ym_only=args.ym2413)
         else:
             # 单曲模式
             filepath = resolve_song(args.song, vgm_dir)
@@ -1693,7 +1695,7 @@ def main():
             data = load_vgm(filepath)
             hdr = parse_vgm_header(data)
             stats = scan_vgm_stats(data, hdr)
-            play_vgm(data, hdr, stats, ser=ser, speed=args.speed, loop=args.loop)
+            play_vgm(data, hdr, stats, ser=ser, speed=args.speed, loop=args.loop, ym_only=args.ym2413)
     except KeyboardInterrupt:
         print("\n  Stopped.")
     finally:
