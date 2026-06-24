@@ -529,10 +529,7 @@ static void ym_drum_trigger(u8 idx) {
     d->env_cnt = 0;
 }
 
-/* SD 走 ch9 通用 2-op FM, 触发后固定时间自动 key_off */
-static u16 data sd_koff_timer;  /* key_off 倒计时 (0=不触发) */
-#define SD_KOFF_DELAY  100  /* ~4.5ms 后 key_off */
-
+/* SD 走 ch9 通用 2-op FM, 完整 ADSR 自衰减 (无 key_off, 参考 b1b022a) */
 static void ym_sd_trigger(void) {
     YM_OP *mod = &ym_ch[9].mod;
     YM_OP *car = &ym_ch[9].car;
@@ -543,17 +540,14 @@ static void ym_sd_trigger(void) {
     mod->fb_val = 0;
     mod->pos = 0;
     mod->level = 31; mod->env_state = 2; mod->env_cnt = 0;
-    mod->env_step = 1;  /* decay (round-robin 下 31×1×16=496采样≈22ms) */
-    mod->sul = 0; mod->rel = 1; mod->tl = 15; mod->eg_type = 0;
-    /* car: sin 240Hz, 慢衰减 */
+    mod->env_step = 7; mod->sul = 0; mod->rel = 7; mod->tl = 15; mod->eg_type = 0;
+    /* car: sin 240Hz, 慢衰减 (sul=19 后用 rel=7 慢降到 0) */
     car->wave = ym_sin;
     car->step = 0x00B3;
     car->pos = 0;
     car->level = 31; car->env_state = 2; car->env_cnt = 0;
-    car->env_step = 1;
-    car->sul = 19; car->rel = 3; car->tl = 31; car->eg_type = 0;
+    car->env_step = 7; car->sul = 19; car->rel = 7; car->tl = 31; car->eg_type = 0;
     ym_ch[9].key_on = 1;
-    sd_koff_timer = SD_KOFF_DELAY;
 }
 
 /* SD 真 2-op 已废弃: 真 2-op (ch6 ym_render_fm) 听感最好但卡 ISR */
@@ -649,16 +643,6 @@ s16 ym2413_render(void) {
         total += ym_render_drum(2);  /* HH */
         total += ym_render_drum(3);  /* CYM */
         /* SD 走 ch9 通用 2-op, 在旋律循环里渲染 */
-    }
-
-    /* SD 自动 key_off: 同时强制 mod+car 进 release, 快速衰减 */
-    if (sd_koff_timer > 0) {
-        sd_koff_timer--;
-        if (sd_koff_timer == 0 && ym_ch[9].key_on) {
-            ym_ch[9].key_on = 0;
-            ym_ch[9].mod.env_state = 4; ym_ch[9].mod.env_step = 1;
-            ym_ch[9].car.env_state = 4; ym_ch[9].car.env_step = 1;
-        }
     }
 
     total <<= 1;
