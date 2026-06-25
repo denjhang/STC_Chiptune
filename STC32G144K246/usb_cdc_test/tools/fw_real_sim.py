@@ -44,8 +44,10 @@ FW_HALFSIN = [
 # env_cnt: 下位机旧 ADSR 速度表 (已废弃, 保留作参考)
 FW_ENV_CNT = [0, 1, 2, 3, 4, 5, 7, 10, 13, 20, 29, 43, 64, 86, 128, 255]
 # AR/DR/RR 三张表 (反推自 emu2413 速率, 2026-06-25 校准)
-# AR 3~7 偏慢 2.3× (旧表), AR≥6 反推=1 (最快)
-FW_AR_TAB = [0, 116, 58, 12, 6, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+FW_AR_TAB = [0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1]
+# SUL 表: sl(0~15) -> sustain level. 注意: non-sus 乐器的 sul 是 sus_hold 起点
+# sl=0 保持峰值(sul=31), sl 越大衰减越深. 比 emu 温和 (避免 non-sus 双重衰减)
+FW_SUL_TAB = [31, 27, 23, 19, 15, 12, 9, 7, 5, 4, 3, 2, 1, 1, 0, 0]
 FW_DR_TAB = [0, 255, 255, 255, 75, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
 FW_RR_TAB = [0, 255, 255, 255, 76, 38, 19, 9, 5, 2, 1, 1, 1, 1, 1, 1]
 # SUSTAIN 指数衰减基础表 (tau=221ms): sus_hold[level] = 该 level 停留 tick 数 (未缩放)
@@ -113,7 +115,7 @@ def fw_apply_patch(p):
             'am': am, 'pm': pm,  # LFO 标志 (AM=tremolo, PM=vibrato)
             'wave': FW_HALFSIN if ws else FW_SIN,
             'atk': FW_AR_TAB[ar], 'decy': FW_DR_TAB[dr],
-            'sul': 0 if sl >= 15 else (31 - sl * 2),
+            'sul': FW_SUL_TAB[sl] if sl < 16 else 0,
             'rel': FW_RR_TAB[rr],
             'sus_scale_x16': FW_SUS_SCALE_X16[rr],  # SUSTAIN 按 RR 缩放 (×16 定点)
             # 运行时状态
@@ -152,7 +154,6 @@ def fw_key_off(mod, car):
     mod['env_state'] = 4; car['env_state'] = 4
     mod['env_step'] = 1; mod['sus_cnt'] = 0
     car['env_step'] = 1; car['sus_cnt'] = 0
-    car['env_step'] = FW_RR_TAB[5] if car['sus_flag'] else (car['rel'] if car['eg_type'] else FW_RR_TAB[7])
 
 def fw_env_tick(op):
     """1:1 照搬 ym_env_tick (加法计数器, 和下位机 commit 1f45584 同步)"""
@@ -165,8 +166,11 @@ def fw_env_tick(op):
         return
     op['env_cnt'] = 0
     st = op['env_state']
-    if st == 1:  # attack
-        if op['level'] < 31: op['level'] += 1
+    if st == 1:  # attack (指数递增: level 增量 = (31-level)>>s + 1, 拟合 emu eg_out 指数)
+        if op['level'] < 31:
+            # s=2 固定 (attack 形态), atk 控制速率 (tick 间隔). 低 level 大步进, 高 level 小步进
+            op['level'] += ((31 - op['level']) >> 2) + 1
+            if op['level'] > 31: op['level'] = 31
         if op['level'] >= 31:
             op['env_state'] = 2; op['env_step'] = op['decy']
     elif st == 2:  # decay

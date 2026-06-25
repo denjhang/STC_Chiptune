@@ -44,7 +44,7 @@ static const s8 code ym_noise[64] = {
  * 反推: cnt = emu_全程ms × rate / (步数 × 16), 限 u8 (1~255). */
 /* AR 表: attack 31 步, cnt=emu_atk_ms×rate/(31×16) */
 static const u8 code ym_ar_tab[16] = {
-    0, 116, 58, 12, 6, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1
 };
 /* DR 表: decay (2026-06-25 校准, 旧表 4~10 偏慢 2.2×) */
 static const u8 code ym_dr_tab[16] = {
@@ -373,8 +373,11 @@ static void ym_env_tick(YM_OP *op) {
     if (cnt < step) { op->env_cnt = cnt + 1; return; }
     op->env_cnt = 0;
     switch (op->env_state) {
-    case 1: /* attack: level 0→31 */
-        if (op->level < 31) op->level++;
+    case 1: /* attack: 指数递增 level += (31-level)>>2 + 1 (拟合 emu eg_out 指数, 2026-06-25) */
+        if (op->level < 31) {
+            op->level += ((31 - op->level) >> 2) + 1;
+            if (op->level > 31) op->level = 31;
+        }
         if (op->level >= 31) {
             op->env_state = 2;   /* → decay */
             op->env_step = op->decy;
