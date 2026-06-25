@@ -50,10 +50,13 @@
 - **鼓声单 op 简化路径**：BD/TOM/HH/CYM/SD 独立 YM_DRUM
 - **ISR 性能瓶颈**：6通道同发偶尔卡死，**FM 渲染优化是下一步重点**
 
-### 鼓声参数（试听确定）
-- BD: sin 100Hz vol=16 ~20ms | TOM: sin 214Hz(ml5) vol=8 ~20ms
-- HH: noise 334Hz vol=2 ~65ms | CYM: noise 334Hz vol=2 ~360ms
+### 鼓声参数（试听确定，2026-06-26 更新 commit 862c70d）
+- BD: sin 100Hz vol=16 ~20ms | TOM: sin 214Hz(ml5) vol=12 ~20ms
+- HH: noise 334Hz vol=4 ~65ms | CYM: noise 334Hz vol=4 ~360ms
 - SD: noise 25Hz vol=8 ~40ms (单op; 真2op听感好但卡ISR, 待优化)
+- **vol 调整记录**: TOM 8→12, HH/CYM 2→4 (解决 HH/CYM 相比 SD/BD 偏小)
+- 旧值 HH/CYM=2 被 base_vol 压到 SD 的 1/4, 现提到 4 (+6dB). 新比例 16:12:4:4:8
+- 待实机确认: CYM decay 长(~360ms), vol=4 若糊再降
 
 ### EG 语义（对齐 emu2413 get_parameter_rate）
 - **EG=1 = sustaining**：sustain 阶段保持 SL 不降（step=0）

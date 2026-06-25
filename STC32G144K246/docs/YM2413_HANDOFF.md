@@ -248,11 +248,15 @@ git show <commit>:STC32G144K246/usb_cdc_test/src/ym2413.c | grep -A20 "ym_sd_tri
 ## 鼓声参数 (8.8定点, step=freq×64×256/22050)
 ```
 BD:  sin,    step=0x004A(100Hz),  vol=16, env_step=14, ~20ms
-TOM: sin,    step=0x009F(214Hz),  vol=8,  env_step=14, ~20ms
-HH:  noise,  step=0x00F8(334Hz),  vol=2,  env_step=46, ~65ms
-CYM: noise,  step=0x00F8(334Hz),  vol=2,  env_step=255,~360ms
+TOM: sin,    step=0x009F(214Hz),  vol=12, env_step=14, ~20ms   (8→12 提音量)
+HH:  noise,  step=0x00F8(334Hz),  vol=4,  env_step=46, ~65ms   (2→4 提音量)
+CYM: noise,  step=0x00F8(334Hz),  vol=4,  env_step=255,~360ms  (2→4 提音量)
 SD:  noise,  step=0x0012(25Hz),   vol=8,  env_step=28, ~40ms [单op]
 ```
+> 2026-06-26 vol 调整 (commit 862c70d): TOM/HH/CYM base_vol 提音量, 解决 HH/CYM
+> 相比 SD/BD 偏小. 新比例 BD:TOM:HH:CYM:SD = 16:12:4:4:8. 只改 init 数值,
+> render/vol换算公式不动. 待实机听感确认 (CYM decay 长, vol=4 若糊再降).
+> 旧值: TOM=8 HH=2 CYM=2 (HH/CYM 被 base_vol=2 压到 SD 的 1/4).
 
 ## SD 2-op 待恢复 (参考 2407ccb)
 独立 data 区 2-op 路径 (不走 round-robin):
