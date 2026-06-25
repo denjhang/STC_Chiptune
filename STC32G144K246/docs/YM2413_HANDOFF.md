@@ -329,6 +329,36 @@ YM2413 的 LFO: PM (vibrato 频率调制) + AM (tremolo 振幅调制). 之前下
 - vibraphone 独有 car_am=1 (carrier tremolo)
 - violin mod_pm=1 (modulator 也 vibrato)
 
+## attack 指数递增 + SUL 表 + AR 退回 (2026-06-25)
+
+### attack 非线性 (拟合 emu `eg_out -= (eg_out>>s)+1`)
+emu attack 是指数: eg_out 大时减得多(快), 小时减得少(慢), 输出**前期快后期慢趋顶**.
+fw 旧版线性 `level += 1` (匀速), 吹奏乐器(flute)缺乏渐起感.
+**修复**: `level += (31-level)>>2 + 1` (镜像指数, 低level大步进/高level小步进)
+- 只动一个运算, 不动架构, STC32 可跑
+- flute 不再敲击(渐起), harpsichord/vib atk≤2 瞬间到顶不变
+
+### AR 表退回 (全局改快破坏吹奏乐器)
+曾把 AR_TAB 3~7 改快 2.3×, 导致 flute AR=6 产生敲击感(瞬间到顶).
+**退回原表**: 拨奏乐器 AR≥7 本就 atk≤2 瞬间到顶, 改快只影响吹奏.
+> AR 真正需要非线性速率映射(像 sus_hold), 而非全局改快. 待后续优化.
+
+### SUL 表 (sl→sustain level 映射)
+旧 `sul = 31 - sl*2` (线性), sl=2→sul=27 (太浅, 只-1dB).
+emu SL 是对数域, sl=2 对应 -9dB.
+**新 FW_SUL_TAB** (温和, 避免 non-sus 双重衰减):
+`[31,27,23,19,15,12,9,7,5,4,3,2,1,1,0,0]`
+- harpsichord sl=0→31 (不变), vib sl=1→27, flute sl=2→23
+- vibraphone 不再退化 (之前激进表让它 -18dB 太深)
+
+### 已非线性化的阶段
+| 阶段 | 旧 | 新 |
+|---|---|---|
+| Attack | 线性 level+=1 | **指数** level+=(31-level)>>2+1 |
+| Sustain | 线性 level-=1 | **sus_hold[32] 查表** (×RR缩放) |
+| Release | 线性 level-=1 | **rel_hold[32] 查表** |
+| Decay | 线性 level-=1 | ❌ 待非线性化 |
+
 ## 下一步 (剩余乐器逐个调)
 sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,
 衰减时间常数不同。可能需要:
