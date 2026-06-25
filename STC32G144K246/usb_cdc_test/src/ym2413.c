@@ -492,9 +492,9 @@ void ym2413_init(void) {
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
     ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].base_step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; ym_drum[0].base_vol = 16; /* BD */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8;  ym_drum[1].base_vol = 8; /* TOM */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2;  ym_drum[2].base_vol = 2; /* HH */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2;  ym_drum[3].base_vol = 2; /* CYM */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 12; ym_drum[1].base_vol = 12; /* TOM (8→12 提音量) */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 4;  ym_drum[2].base_vol = 4; /* HH (2→4 提音量) */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 4;  ym_drum[3].base_vol = 4; /* CYM (2→4 提音量) */
     ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8;  ym_drum[4].base_vol = 8; /* SD */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
