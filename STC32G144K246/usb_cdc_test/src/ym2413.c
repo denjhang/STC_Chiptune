@@ -304,21 +304,26 @@ static void ym_update_step(u8 ch) {
     ym_ch[ch].car.step = ym_calc_step(fnum, blk, ym_ch[ch].car.ml);
 }
 
-/* ===== 鼓声变频: rhythm mode 下 ch6(BD)/ch8(TOM) fnum 变化时换算 drum step ===== */
-/* OPLL 默认 fnum×2^blk: BD(ch6)=288×4=1152, TOM(ch8)=448×1=448 */
+/* ===== 鼓声变频: rhythm mode 下 ch6/7/8 fnum 变化时换算 drum step ===== */
+/* OPLL 默认 fnum×2^blk: BD(ch6)=288×4=1152, HH/SD(ch7)=336×4=1344, TOM/CYM(ch8)=448×1=448 */
 #define YM_DRUM_DEF_BD   1152u
-#define YM_DRUM_DEF_TOM  448u
+#define YM_DRUM_DEF_HHSD  1344u   /* ch7 HH/SD */
+#define YM_DRUM_DEF_TOM   448u    /* ch8 TOM/CYM */
 static void ym_update_drum_step(u8 ch) {
     u16 fnum = (u16)ym_reg[0x10 + ch] | ((u16)(ym_reg[0x20 + ch] & 1) << 8);
     u8 blk = (ym_reg[0x20 + ch] >> 1) & 7;
-    u32 fnum_blk = (u32)fnum << blk;   /* VGM 设定的 fnum×2^blk */
+    u32 fnum_blk = (u32)fnum << blk;
     if (fnum_blk == 0) return;
     if (ch == 6) {
-        /* BD: step = base_step × fnum_blk / 1152 */
         ym_drum[0].step = (u16)((u32)ym_drum[0].base_step * fnum_blk / YM_DRUM_DEF_BD);
+    } else if (ch == 7) {
+        /* HH(2) + SD(4) 共用 ch7 fnum */
+        ym_drum[2].step = (u16)((u32)ym_drum[2].base_step * fnum_blk / YM_DRUM_DEF_HHSD);
+        ym_drum[4].step = (u16)((u32)ym_drum[4].base_step * fnum_blk / YM_DRUM_DEF_HHSD);
     } else if (ch == 8) {
-        /* TOM: step = base_step × fnum_blk / 448 */
+        /* TOM(1) + CYM(3) 共用 ch8 fnum */
         ym_drum[1].step = (u16)((u32)ym_drum[1].base_step * fnum_blk / YM_DRUM_DEF_TOM);
+        ym_drum[3].step = (u16)((u32)ym_drum[3].base_step * fnum_blk / YM_DRUM_DEF_TOM);
     }
 }
 
@@ -553,7 +558,7 @@ void ym2413_wr(u8 reg, u8 val) {
     case 0x15: case 0x16: case 0x17: case 0x18:
         ch = reg - 0x10;
         ym_update_step(ch);
-        if (ym_rhythm_mode && (ch == 6 || ch == 8)) ym_update_drum_step(ch);
+        if (ym_rhythm_mode && ch >= 6) ym_update_drum_step(ch);
         break;
     /* f-number high / block / sus / key-on 0x20-0x28 */
     case 0x20: case 0x21: case 0x22: case 0x23: case 0x24:
@@ -565,7 +570,7 @@ void ym2413_wr(u8 reg, u8 val) {
         ym_ch[ch].car.sus_flag = (val >> 5) & 1;
         ym_ch[ch].mod.sus_flag = 0;
         ym_update_step(ch);
-        if (ym_rhythm_mode && (ch == 6 || ch == 8)) ym_update_drum_step(ch);
+        if (ym_rhythm_mode && ch >= 6) ym_update_drum_step(ch);
         ym_update_keys();
         break;
     /* instrument + volume 0x30-0x38 */
