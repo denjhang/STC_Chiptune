@@ -370,6 +370,8 @@ static void ym_update_keys(void) {
         if (new_bits & 0x04) ym_drum_trigger(1);  /* TOM */
         if (new_bits & 0x01) ym_drum_trigger(2);  /* HH */
         if (new_bits & 0x02) ym_drum_trigger(3);  /* CYM */
+    } else {
+        ym_prev_drum_bits = 0;  /* 关 rhythm 时清零, 下次开 rhythm 鼓声 bit 0->1 能触发 */
     }
 }
 

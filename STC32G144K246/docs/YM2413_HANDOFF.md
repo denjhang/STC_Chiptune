@@ -369,6 +369,15 @@ dB不均匀 (低音量区跳变剧烈, 高音量区迟钝).
 | Release | ✅ | rel_hold[32] 查表 |
 | Volume | ✅ | ym_vol_tab[62] 对数查表 |
 
+## 鼓声遗漏修复 (2026-06-25, Ys First Step Towards Wars)
+
+### bug: rhythm mode 频繁开关导致鼓声不触发
+VGM 模式: `0x35(R,鼓声) → 0x00(m,关rhythm) → 0x35(R,鼓声)` 快速循环.
+- 旧: `if (rhythm) { ... ym_prev_drum_bits = drum_bits; }` — rhythm=0 时**不更新 prev_bits**
+- 关 rhythm(0x00) 后 prev_bits 保持旧值(0x15), 再开 rhythm(0x35) 时
+  `new_bits = 0x15 & ~0x15 = 0` — **鼓声不触发!**
+**修复**: rhythm=0 时 `ym_prev_drum_bits = 0`, 下次开 rhythm 任何 bit 0->1 都能触发.
+
 ## 实测对比记录 (2026-06-25, Phantasy Star Town)
 
 4 个固件版本对比通道1 inst 3 (Piano) 衰减:
