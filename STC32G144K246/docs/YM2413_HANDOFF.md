@@ -364,10 +364,12 @@ dB不均匀 (低音量区跳变剧烈, 高音量区迟钝).
 | 阶段 | 旧 | 新 |
 |---|---|---|
 | Attack | 线性 level+=1 | **指数** level+=(31-level)>>2+1 |
+| Decay | 线性 level-=1 | **sus_hold[32] 查表** (×DR缩放, dr_scale_x16) |
 | Sustain | 线性 level-=1 | **sus_hold[32] 查表** (×RR缩放) |
 | Release | 线性 level-=1 | **rel_hold[32] 查表** |
 | Volume | 线性 tl=(60-vol)>>1 | **ym_vol_tab[62] 对数查表** |
-| Decay | 线性 level-=1 | ❌ 待非线性化 |
+
+**全部阶段非线性化完成** (2026-06-25). 相似度 80%+, decay 复用 sus_scale 分布.
 
 ## 下一步 (剩余乐器逐个调)
 sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,

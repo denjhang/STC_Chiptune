@@ -57,6 +57,8 @@ FW_SUS_HOLD = [0, 305, 305, 178, 126, 98, 80, 68, 59, 52, 46, 42, 38, 35, 33,
 # sus_scale_x16[RR]: SUSTAIN 衰减缩放 (×16 定点), 按 RR 档位 (emu 实测反推)
 # RR 小=慢衰减(长 sustain, vibraphone RR=2), RR 大=快衰减. RR=4 ≈ 0.44 (harpsichord 基准)
 FW_SUS_SCALE_X16 = [0, 122, 27, 14, 7, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# dr_scale_x16[DR]: DECAY 衰减缩放 (×16 定点), 按 DR 档位. 复用 sus 的分布
+FW_DR_SCALE_X16 = [0, 122, 122, 60, 30, 15, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1]
 # RELEASE 指数衰减: rel_hold[level] (固定, 比 sustain 快 ~10×). 复用 sus_cnt.
 FW_REL_HOLD = [max(1, h//10) for h in FW_SUS_HOLD]
 # ml_table: 下位机自己的 (和 emu 不同!)
@@ -124,6 +126,7 @@ def fw_apply_patch(p):
             'sul': FW_SUL_TAB[sl] if sl < 16 else 0,
             'rel': FW_RR_TAB[rr],
             'sus_scale_x16': FW_SUS_SCALE_X16[rr],  # SUSTAIN 按 RR 缩放 (×16 定点)
+            'dr_scale_x16': FW_SUS_SCALE_X16[dr],    # DECAY 按 DR 缩放 (复用 sus 分布)
             # 运行时状态
             'pos': 0, 'step': 0, 'fb_val': 0,
             'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
@@ -179,9 +182,14 @@ def fw_env_tick(op):
             if op['level'] > 31: op['level'] = 31
         if op['level'] >= 31:
             op['env_state'] = 2; op['env_step'] = op['decy']
-    elif st == 2:  # decay
+    elif st == 2:  # decay (指数查表衰减, 按 DR 缩放, 到 sul 停)
         if op['level'] > op['sul']:
-            op['level'] -= 1
+            op['sus_cnt'] += 1
+            threshold = (FW_SUS_HOLD[op['level']] * op['dr_scale_x16']) >> 4
+            if threshold < 1: threshold = 1
+            if op['sus_cnt'] >= threshold:
+                op['sus_cnt'] = 0
+                op['level'] -= 1
         else:
             op['env_state'] = 3
             op['env_step'] = 0 if op['eg_type'] else 1  # EG=1保持; EG=0 进 sustain, env_step=1 让 sus_hold 接管速率
