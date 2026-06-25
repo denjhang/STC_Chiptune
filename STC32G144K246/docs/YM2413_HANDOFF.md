@@ -376,41 +376,39 @@ VGM 模式: `0x35(R,鼓声) → 0x00(m,关rhythm) → 0x35(R,鼓声)` 快速循�
   `new_bits = 0x15 & ~0x15 = 0` — **鼓声不触发!**
 **修复**: rhythm=0 时 `ym_prev_drum_bits = 0`, 下次开 rhythm 任何 bit 0->1 都能触发.
 
-## 鼓声 vol 映射 bug + 连续鼓声 (2026-06-25, 待实现, BB3/CS6)
+## 鼓声 vol 映射 + 连续鼓声 + 变频 (2026-06-25, 已实现)
 
-### bug: reg 0x36-0x38 vol 没映射到 ym_drum
-下位机 reg 0x36-0x38 处理只改 `ym_ch[6-8].car.tl` (FM 通道), 但鼓声用独立的
-`ym_drum[5]` 结构, vol 字段 init 时固定, **reg 写入不更新**.
-正确映射 (rhythm mode):
-- 0x36 高4位 → BD vol
-- 0x37 高4位 → SD vol, 低4位 → HH vol
-- 0x38 高4位 → TOM vol, 低4位 → CYM vol
+### 1. 鼓声 vol 映射 (reg 0x36-0x38 -> ym_drum.vol)
+**bug 修复**: 旧版 reg 0x36-0x38 改 `ym_ch.car.tl` (FM 通道), 不影响鼓声.
+现在 rhythm mode 下实时映射到 ym_drum.vol (render 公式 `(wave×(level+1)×vol)>>6` 实时生效):
+```
+drum.vol = base_vol × (15 - reg_vol) / 15   (OPLL vol 0=最大反相)
+ch6(0x36) hi4 -> BD(drum[0])
+ch7(0x37) hi4 -> SD(drum[4]), lo4 -> HH(drum[2])
+ch8(0x38) hi4 -> TOM(drum[1]), lo4 -> CYM(drum[3])
+```
+base_vol: BD=16 TOM=8 HH=2 CYM=2 SD=8 (init 试听调参, YM_DRUM.base_vol 字段存)
 
-### BB3/CS6 连续粗糙长鼓声 (不是离散短敲击)
-BB3 在 rhythm mode 下用 **reg 0x36-0x38 vol 快速变化** (vol=0 静音 ↔ vol=15 响)
-+ 密集 keyon 模拟连续鼓声, 听感是**连续的长粗糙鼓**, 不是多个短促敲击.
-CS6 更极端: 旋律模式用 ch6-8 快速 keyon (但下位机 ch6-8 不渲染, 完全听不见).
+### 2. 连续鼓声模仿 (快速 keyon 续命)
+BB3/B-FIGHT 用 reg 0x36-0x38 vol 快速变化 (vol=0↔15) 模拟连续鼓声,
+不是离散短敲击. vol 实时映射后自然连起来.
+另外 trigger 续命: level>0 (还在响) 时只重置 env_cnt (延长), 不重置 level.
+一行改动, 零额外负载.
 
-### 真实 OPLL 的鼓声 keyon 行为 (emu2413 源码确认)
-emu keyon 流程: slotOn → **DAMP 状态** (eg_out 用 DAMPER_RATE=12 高速递增到 EG_MAX)
-→ start_envelope → ATTACK → DECAY → SUSTAIN...
-- DAMP 是强制快速静音, 不是合并
-- 重复 keyon: 重设 DAMP, 快速静音再 attack (不是延长)
-- 但 DAMP 速率快 (RATE=12), 密集 keyon 时 DAMP 未完成就被重置 → 连续 DAMP → 听感像延长
+### 3. 鼓声全部变频 (BD/HH/SD/TOM/CYM)
+rhythm mode 下 reg 0x16-0x18/0x26-0x28 写 ch6/7/8 时换算 drum step:
+```
+drum.step = base_step × (VGM fnum×2^blk) / (OPLL默认 fnum×2^默认blk)
+```
+OPLL 默认: BD(ch6)=288×4=1152, HH/SD(ch7)=336×4=1344, TOM/CYM(ch8)=448×1=448
+下位机 base_step: BD=0x004A TOM=0x009F HH/CYM=0x00F8 SD=0x0012
+YM_DRUM 加 base_step 字段. reg 写入时 ch>=6 触发 ym_update_drum_step.
 
-### 下位机当前鼓声机制 (oneshot)
-ym_drum: trigger 时 level=21/31, 每采样 tick 衰减, 衰减完 active=0.
-- 重复 trigger: 重置 level=31 (相当于直接 attack, 无 DAMP)
-- vol 变化: 不影响正在响的鼓声 (vol 只 init 时读)
-- **缺**: DAMP 阶段 (快速静音再响), vol 实时更新
+### 未实现 (低优先级)
+- **旋律模式 ch6-8 渲染**: CS6 类 VGM 在旋律模式用 ch6-8 keyon 模拟鼓声,
+  下位机只渲染 ch0-5, 完全听不见. 需扩渲染范围, 吃 ISR 算力.
 
-### 待实现 (优先级排序)
-1. **reg 0x36-0x38 vol 映射到 ym_drum** (修 BB3 vol 变化失效)
-2. **密集 keyon 合并/延长** (让连续鼓声能持续响, 不被 oneshot 衰减中断)
-3. **鼓声变频** (BD/TOM step 换算, 见下节)
-4. **旋律模式 ch6-8 渲染** (CS6 类, 但吃 ISR 算力, 低优先级)
-
-## 鼓声变频 (2026-06-25, 待实现)
+## 鼓声变频详情 (2026-06-25)
 
 ### OPLL 约定的默认鼓声频率 (从 f1/msxfan/ysms 多个 VGM 统计确认)
 rhythm mode 下, VGM 开头几乎都写 ch6/7/8 的 fnum/blk 到固定值:
