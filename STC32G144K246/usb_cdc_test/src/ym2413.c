@@ -72,6 +72,14 @@ static const u8 code ym_rel_hold[32] = {
    30, 30, 30, 17, 12, 9,  8,  6,  5,  5,  4,  4,  3, 3, 3, 3,
     2,  2,  2,  2,  2,  2,  2,  2,  1,  1,  1,  1,  1, 1, 1, 1
 };
+/* VOLUME 对数查表 (2026-06-25): fw_vol(0~61, 61=最大音量) -> tl(0~30)
+ * 拟合 emu 等dB间距 (音量旋钮手感均匀). 旧版 vol>>1 线性, dB不均匀 */
+static const u8 code ym_vol_tab[62] = {
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,    /* fw_vol 0~15 (静音区) */
+    0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,3,    /* 16~31 */
+    3,3,3,4,4,4,5,5,6,7,7,8,9,10,10,11, /* 32~47 */
+    13,14,15,16,18,19,21,23,25,28,30,30,30,30 /* 48~61 */
+};
 /* LFO 三角波表 (2026-06-25): PM(vibrato)/AM(tremolo) 共用, 210 项 0~13
  * round-robin 每 16 采样推进 lfo_idx (6.56Hz), 纯查表无性能障碍 */
 static const u8 code ym_lfo_tab[210] = {
@@ -559,7 +567,7 @@ void ym2413_wr(u8 reg, u8 val) {
                 }
                 /* volume: reg 低4位, YM2413 vol=0 最大 → tl 大 (输出大) */
                 ym_ch[ch].vol = (15 - (val & 0x0F)) << 2;
-                ym_ch[ch].car.tl = ym_ch[ch].vol >> 1;
+                ym_ch[ch].car.tl = ym_vol_tab[ym_ch[ch].vol];   /* 对数映射 (拟合 emu 等dB) */
                 if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 31;
             }
         }

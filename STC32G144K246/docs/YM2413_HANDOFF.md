@@ -351,12 +351,22 @@ emu SL 是对数域, sl=2 对应 -9dB.
 - harpsichord sl=0→31 (不变), vib sl=1→27, flute sl=2→23
 - vibraphone 不再退化 (之前激进表让它 -18dB 太深)
 
+### VOLUME 对数查表 (拟合 emu 等dB间距)
+emu volume 每+1 衰减 -0.72dB (等dB, 音量旋钮特性). fw 旧版 `car.tl=(60-vol)>>1` 线性,
+dB不均匀 (低音量区跳变剧烈, 高音量区迟钝).
+**新 ym_vol_tab[62]**: fw_vol(0~61) -> tl(0~30), 对数映射
+- fw_vol=61(volume=0最大) -> tl=30 (满输出)
+- fw_vol=0(volume=60静音) -> tl=0
+- 中高音量区 dB 间距均匀 (diff 1~4dB vs emu)
+- 低音量区(tl到0)受32级分辨率限制, 但-30dB以下实际影响小
+
 ### 已非线性化的阶段
 | 阶段 | 旧 | 新 |
 |---|---|---|
 | Attack | 线性 level+=1 | **指数** level+=(31-level)>>2+1 |
 | Sustain | 线性 level-=1 | **sus_hold[32] 查表** (×RR缩放) |
 | Release | 线性 level-=1 | **rel_hold[32] 查表** |
+| Volume | 线性 tl=(60-vol)>>1 | **ym_vol_tab[62] 对数查表** |
 | Decay | 线性 level-=1 | ❌ 待非线性化 |
 
 ## 下一步 (剩余乐器逐个调)
