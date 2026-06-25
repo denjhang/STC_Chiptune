@@ -72,6 +72,18 @@ static const u8 code ym_rel_hold[32] = {
    30, 30, 30, 17, 12, 9,  8,  6,  5,  5,  4,  4,  3, 3, 3, 3,
     2,  2,  2,  2,  2,  2,  2,  2,  1,  1,  1,  1,  1, 1, 1, 1
 };
+/* LFO 三角波表 (2026-06-25): PM(vibrato)/AM(tremolo) 共用, 210 项 0~13
+ * round-robin 每 16 采样推进 lfo_idx (6.56Hz), 纯查表无性能障碍 */
+static const u8 code ym_lfo_tab[210] = {
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1, 2,2,2,2,2,2,2,2, 3,3,3,3,3,3,3,3,
+    4,4,4,4,4,4,4,4, 5,5,5,5,5,5,5,5, 6,6,6,6,6,6,6,6, 7,7,7,7,7,7,7,7,
+    8,8,8,8,8,8,8,8, 9,9,9,9,9,9,9,9, 10,10,10,10,10,10,10,10, 11,11,11,11,11,11,11,11,
+    12,12,12,12,12,12,12,12, 13,13,13, 12,12,12,12,12,12,12,12,
+    11,11,11,11,11,11,11,11, 10,10,10,10,10,10,10,10, 9,9,9,9,9,9,9,9, 8,8,8,8,8,8,8,8,
+    7,7,7,7,7,7,7,7, 6,6,6,6,6,6,6,6, 5,5,5,5,5,5,5,5, 4,4,4,4,4,4,4,4,
+    3,3,3,3,3,3,3,3, 2,2,2,2,2,2,2,2, 1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0
+};
+static u8 data ym_lfo_idx = 0;   /* LFO 三角波索引 (round-robin 推进) */
 
 /* ===== ML 查表 (YM2413 multiple, ml=0 时 0.5) ===== */
 /* 用定点: 实际 = ml_table[ML] / 2, ml=0 → 0.5, ml=1 → 1, ml=2 → 2 ... */
@@ -123,6 +135,8 @@ typedef struct {
     u8 car_sl, car_rr;
     u8 mod_eg, car_eg;     /* EG type: 0=sustaining(保持SL), 1=non-sustaining(降到0) */
     u8 mod_ws, car_ws;     /* wave select: 0=sin, 1=half-sin(abssin) */
+    u8 mod_am, mod_pm;     /* AM(tremolo)/PM(vibrato) 标志 (2026-06-25) */
+    u8 car_am, car_pm;
 } YM_VOICE_PATCH;
 
 /* ===== Operator 状态 (极简 FM) ===== */
@@ -146,6 +160,8 @@ typedef struct {
     u8 level;
     u16 sus_cnt;          /* SUSTAIN/RELEASE 指数查表计数器 (RR=2 可达 515, 用 u16) */
     u8 sus_scale_x16;    /* SUSTAIN 按 RR 缩放 (×16 定点, make_patch 时存) */
+    u8 am;               /* AM (tremolo) 标志 (2026-06-25) */
+    u8 pm;               /* PM (vibrato) 标志 */
 } YM_OP;
 
 /* ===== 通道 (9 旋律 + rhythm) ===== */
@@ -209,8 +225,12 @@ static void ym_drum_trigger(u8 idx);  /* 前向声明 */
 static void ym_decode_patch(const u8 *dump, YM_VOICE_PATCH *p) {
     p->mod_ml = dump[0] & 0x0F;
     p->mod_eg = (dump[0] >> 5) & 1;   /* bit5 = EG type */
+    p->mod_am = (dump[0] >> 7) & 1;   /* bit7 = AM */
+    p->mod_pm = (dump[0] >> 6) & 1;   /* bit6 = PM */
     p->car_ml = dump[1] & 0x0F;
     p->car_eg = (dump[1] >> 5) & 1;
+    p->car_am = (dump[1] >> 7) & 1;
+    p->car_pm = (dump[1] >> 6) & 1;
     p->mod_tl = dump[2] & 0x3F;
     p->mod_fb = dump[3] & 0x07;
     p->mod_ws = (dump[3] >> 3) & 1;   /* bit3 */
@@ -243,6 +263,7 @@ static void ym_apply_patch(u8 ch) {
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_rr_tab[p->mod_rr];
     mod->sus_scale_x16 = ym_sus_scale_x16[p->mod_rr];
+    mod->am = p->mod_am;  mod->pm = p->mod_pm;
     car->fb = 0;
     car->eg_type = p->car_eg;
     car->wave = p->car_ws ? ym_halfsin : ym_sin;
@@ -251,6 +272,7 @@ static void ym_apply_patch(u8 ch) {
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
     car->rel  = ym_rr_tab[p->car_rr];
     car->sus_scale_x16 = ym_sus_scale_x16[p->car_rr];
+    car->am = p->car_am;  car->pm = p->car_pm;
 }
 
 /* ===== 算 step (8.8 定点, 参考 12K128 fm.c) ===== */
@@ -606,7 +628,15 @@ static s16 ym_render_fm(u8 ch) {
 
     /* OP1 (modulator) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    mod->pos += mod->step;
+    /* PM (vibrato): 操作 step 频率 (不是 pos), tri 三角波 ±1.5% (1/4 半音) */
+    {
+        s16 pm_off = 0;
+        if (mod->pm) {
+            s8 tri = (s8)ym_lfo_tab[ym_lfo_idx] - 6;   /* -6~+7 */
+            pm_off = ((s16)(mod->step >> 6) * tri) >> 3;
+        }
+        mod->pos += (u16)(mod->step + pm_off);
+    }
     if (mod->level == 0) {
         ch_out = 0;
         mod->fb_val = 0;
@@ -622,14 +652,30 @@ static s16 ym_render_fm(u8 ch) {
 
     /* OP2 (carrier) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-    car->pos += car->step;
+    /* PM (vibrato) carrier */
+    {
+        s16 pm_off = 0;
+        if (car->pm) {
+            s8 tri = (s8)ym_lfo_tab[ym_lfo_idx] - 6;
+            pm_off = ((s16)(car->step >> 6) * tri) >> 3;
+        }
+        car->pos += (u16)(car->step + pm_off);
+    }
     if (car->level == 0) {
         return 0;
     }
     idx = (u8)(car->pos >> 8) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
-    ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
+    /* AM (tremolo): carrier level 减 am_factor (三角波 0~13, level 减 0~6) */
+    {
+        s16 eff_lvl = car->level;
+        if (car->am) {
+            eff_lvl -= (s8)ym_lfo_tab[ym_lfo_idx] >> 1;
+            if (eff_lvl < 0) eff_lvl = 0;
+        }
+        ch_out = (s8)(((s16)wave_val * (s16)(eff_lvl + 1) * (s16)(car->tl + 1)) >> 10);
+    }
     return ch_out;
 }
 
@@ -640,6 +686,11 @@ s16 ym2413_render(void) {
 
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
+    /* LFO round-robin 推进 (每 16 采样, 6.56Hz vibrato/tremolo) */
+    if (ym_wait_cnt == 0) {
+        ym_lfo_idx++;
+        if (ym_lfo_idx >= 210) ym_lfo_idx = 0;
+    }
 
     /* 只渲染 ch0-5 旋律 (6通道) */
     for (ch = 0; ch < 6; ch++) {
