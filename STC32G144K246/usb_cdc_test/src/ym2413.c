@@ -205,8 +205,9 @@ typedef struct {
     u8 env_step;
     u8 vol;              /* 音量倍数 (2=标准, 4=2倍) */
     const s8 code *wave;
-    u16 step;             /* 8.8 定点 */
+    u16 step;             /* 8.8 定点 (变频后) */
     u16 pos;              /* 8.8 定点 */
+    u16 base_step;        /* 基础 step (init, 变频换算基准) */
 } YM_DRUM;
 
 static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
@@ -301,6 +302,24 @@ static void ym_update_step(u8 ch) {
     if (blk > 0) blk--;
     ym_ch[ch].mod.step = ym_calc_step(fnum, blk, ym_ch[ch].mod.ml);
     ym_ch[ch].car.step = ym_calc_step(fnum, blk, ym_ch[ch].car.ml);
+}
+
+/* ===== 鼓声变频: rhythm mode 下 ch6(BD)/ch8(TOM) fnum 变化时换算 drum step ===== */
+/* OPLL 默认 fnum×2^blk: BD(ch6)=288×4=1152, TOM(ch8)=448×1=448 */
+#define YM_DRUM_DEF_BD   1152u
+#define YM_DRUM_DEF_TOM  448u
+static void ym_update_drum_step(u8 ch) {
+    u16 fnum = (u16)ym_reg[0x10 + ch] | ((u16)(ym_reg[0x20 + ch] & 1) << 8);
+    u8 blk = (ym_reg[0x20 + ch] >> 1) & 7;
+    u32 fnum_blk = (u32)fnum << blk;   /* VGM 设定的 fnum×2^blk */
+    if (fnum_blk == 0) return;
+    if (ch == 6) {
+        /* BD: step = base_step × fnum_blk / 1152 */
+        ym_drum[0].step = (u16)((u32)ym_drum[0].base_step * fnum_blk / YM_DRUM_DEF_BD);
+    } else if (ch == 8) {
+        /* TOM: step = base_step × fnum_blk / 448 */
+        ym_drum[1].step = (u16)((u32)ym_drum[1].base_step * fnum_blk / YM_DRUM_DEF_TOM);
+    }
 }
 
 /* ===== key on/off (行为对齐 YM2413) ===== */
@@ -466,11 +485,11 @@ void ym2413_init(void) {
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].base_step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -534,6 +553,7 @@ void ym2413_wr(u8 reg, u8 val) {
     case 0x15: case 0x16: case 0x17: case 0x18:
         ch = reg - 0x10;
         ym_update_step(ch);
+        if (ym_rhythm_mode && (ch == 6 || ch == 8)) ym_update_drum_step(ch);
         break;
     /* f-number high / block / sus / key-on 0x20-0x28 */
     case 0x20: case 0x21: case 0x22: case 0x23: case 0x24:
@@ -545,6 +565,7 @@ void ym2413_wr(u8 reg, u8 val) {
         ym_ch[ch].car.sus_flag = (val >> 5) & 1;
         ym_ch[ch].mod.sus_flag = 0;
         ym_update_step(ch);
+        if (ym_rhythm_mode && (ch == 6 || ch == 8)) ym_update_drum_step(ch);
         ym_update_keys();
         break;
     /* instrument + volume 0x30-0x38 */
