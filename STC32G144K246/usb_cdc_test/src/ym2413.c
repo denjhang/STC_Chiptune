@@ -579,12 +579,14 @@ void ym2413_wr(u8 reg, u8 val) {
         ch = reg - 0x30;
         {
             if (ym_rhythm_mode && ch >= 6) {
-                /* rhythm mode: ch6/7/8 的高4位是鼓 volume (不是 instrument)
-                 * ch6=BD vol, ch7=SD vol(高4)/HH vol(低4), ch8=TOM vol(高4)/CYM vol(低4)
-                 * 简化: 用高4位作为 carrier volume */
-                u8 drum_vol = (val >> 4) & 0x0F;
-                ym_ch[ch].car.tl = drum_vol << 1;
-                if (ym_ch[ch].car.tl > 31) ym_ch[ch].car.tl = 31;
+                /* rhythm mode: ch6/7/8 是鼓 volume (不是 instrument)
+                 * ch6=BD(高4), ch7=SD(高4)/HH(低4), ch8=TOM(高4)/CYM(低4)
+                 * OPLL vol 0=最大15=最小(反相), 直接映射到 drum.vol (×2) */
+                u8 vhi = (15 - (val >> 4)) << 1;   /* 高4位反相×2 */
+                u8 vlo = (15 - (val & 0x0F)) << 1; /* 低4位反相×2 */
+                if (ch == 6) { ym_drum[0].vol = vhi; }  /* BD */
+                else if (ch == 7) { ym_drum[4].vol = vhi; ym_drum[2].vol = vlo; }  /* SD/HH */
+                else { ym_drum[1].vol = vhi; ym_drum[3].vol = vlo; }  /* TOM/CYM */
             } else {
                 u8 inst = (val >> 4) & 0x0F;
                 if (inst != ym_ch_patch[ch]) {
