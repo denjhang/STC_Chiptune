@@ -1,5 +1,52 @@
 # YM2413 工作交接 (2026-06-25)
 
+## 当前状态 (快速接续, 2026-06-25 末)
+
+### 当前生产固件 (commit c53f8e8, HEX 71018 bytes)
+已实现的 YM2413 改进 (本轮全部):
+- ✅ **8.8 定点同步** (仿真器+下位机, 频率对齐 emu)
+- ✅ **halfsin 后半周静音** (对齐 emu, 旧版镜像正值是 bug)
+- ✅ **attack 指数递增** `level+=(31-level)>>2+1` (非线性)
+- ✅ **sustain sus_hold[32] 查表** (×RR缩放, 指数衰减)
+- ✅ **release rel_hold[32] 查表** (指数衰减)
+- ✅ **volume ym_vol_tab[62] 对数查表** (等dB)
+- ✅ **FB+4 移位** (过反馈修复, 反馈占周期 15%→0.78%)
+- ✅ **鼓声遗漏修复** (rhythm=0 时 prev_drum_bits 清零)
+- ✅ **鼓声全部变频** (BD/HH/SD/TOM/CYM, base_step×fnum_blk/默认)
+- ✅ **鼓声 vol 映射+换算** (reg 0x36-0x38 → ym_drum.vol, base_vol×(15-reg_vol)/15)
+- ✅ **连续鼓声模仿** (trigger 续命 + vol 实时映射)
+- ⚠️ **AM/VIB 下位机暂关** (#if 0, 仿真+文档保留, 性能不足)
+- ❌ **DR 非线性回退** (decay 查表让 Piano 太慢, 退回线性)
+
+### 正在调试: 鼓声连不起来 (BB3/B-FIGHT)
+**问题**: BB3/B-FIGHT 用 reg 0x36-0x38 vol 快速变化模拟连续鼓声,
+但实机听感鼓声还是连不起来 (离散短敲击, 不是连续长鼓).
+**已做**: vol 实时映射到 ym_drum.vol (render 公式实时读 vol), trigger 续命.
+**可能原因** (待排查):
+1. 鼓声 oneshot 衰减太快 (env_step 太大), vol 变化时 level 已衰减完 (active=0)
+2. vol 变化间隔 vs 鼓声衰减时间: BB3 vol 变化间隔 ~37ms, BD env_step=14 →
+   衰减时间 = 31×14/22050×1000 ≈ 20ms, 比 vol 间隔短 → vol 变化时已静音
+3. 需要鼓声持续振荡 (不是 oneshot), 或延长衰减时间
+**测试 VGM**: `vgm/opll/msxfan/BB3.vgm`, `B-FIGHT1.vgm`, `B-FIGHT2.vgm`
+**下一步思路**:
+- 方案A: 鼓声 active 时不因 level=0 停止, 保持振荡 (vol=0 时静音), vol>0 恢复
+  (即鼓声变持续振荡器, vol 控制开关, 像 OPLL 真实行为)
+- 方案B: 延长鼓声衰减 (增大 env_step), 让 vol 变化期间鼓声还在响
+- 方案C: PC 鼓声仿真 (drum_fw_sim.py) 加 reg 0x36-0x38 支持, 数值验证
+
+### 本轮关键 commit (倒序)
+- c53f8e8 docs: 鼓声三功能记录
+- 53511f0 fix: 鼓声 vol 换算 (base_vol)
+- 0c33150 feat: 鼓声 vol 映射 (反相)
+- 5bb97e2 feat: 连续鼓声模仿 (续命)
+- c6b77fb feat: 鼓声全部变频
+- 7b05f07 feat: 鼓声 BD/TOM 变频
+- b199b88 fix: 鼓声遗漏 (rhythm=0 prev_bits)
+- 8aadd2f feat: volume 对数查表 (生产基线, decay 线性最佳)
+- 99c6604 feat: attack 指数递增
+- 28a5bd2 revert: DR 退回线性
+- 0bcd705 feat: harpsichord 下位机同步 (sus_hold/rel_hold/FB+4)
+
 ## 工作目录
 - 项目根: `D:\working\vscode-projects\STC_Chiptune`
 - 固件源码: `STC32G144K246\usb_cdc_test\src\ym2413.c`
