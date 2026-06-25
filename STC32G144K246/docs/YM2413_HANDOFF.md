@@ -361,15 +361,27 @@ dB不均匀 (低音量区跳变剧烈, 高音量区迟钝).
 - 低音量区(tl到0)受32级分辨率限制, 但-30dB以下实际影响小
 
 ### 已非线性化的阶段
-| 阶段 | 旧 | 新 |
+| 阶段 | 状态 | 实现 |
 |---|---|---|
-| Attack | 线性 level+=1 | **指数** level+=(31-level)>>2+1 |
-| Decay | 线性 level-=1 | **sus_hold[32] 查表** (×DR缩放, dr_scale_x16) |
-| Sustain | 线性 level-=1 | **sus_hold[32] 查表** (×RR缩放) |
-| Release | 线性 level-=1 | **rel_hold[32] 查表** |
-| Volume | 线性 tl=(60-vol)>>1 | **ym_vol_tab[62] 对数查表** |
+| Attack | ✅ | 指数 `level+=(31-level)>>2+1` |
+| Decay | ❌ **回退线性** | decay 查表让 Piano 衰减太慢, 实测退回线性最佳 |
+| Sustain | ✅ | sus_hold[32] 查表 (×RR缩放) |
+| Release | ✅ | rel_hold[32] 查表 |
+| Volume | ✅ | ym_vol_tab[62] 对数查表 |
 
-**全部阶段非线性化完成** (2026-06-25). 相似度 80%+, decay 复用 sus_scale 分布.
+## 实测对比记录 (2026-06-25, Phantasy Star Town)
+
+4 个固件版本对比通道1 inst 3 (Piano) 衰减:
+| 版本 | 内容 | Piano 衰减 | 评价 |
+|---|---|---|---|
+| 4cffb3d | attack 线性, decay 线性 | 正常但 attack 缺渐起 | 早期稳定版 |
+| 99c6604 | attack 指数, decay 线性 | 正常 | |
+| **8aadd2f** | **attack 指数 + volume 对数, decay 线性** | **正常** | **✅ 最佳** |
+| 776b0da | attack 指数 + volume 对数 + decay 查表 | **太慢(几乎不衰减)** | ❌ DR非线性失败 |
+
+**结论**: DR 非线性 (decay 查表) 让 Piano(inst3) 衰减变慢, 实测退回线性 (8aadd2f).
+DR 查表的 threshold 比 linear level-- 大太多, 衰减反而变慢. 待后续单独优化 DR 速率表.
+**当前生产版本: 8aadd2f** (HEX 69903 bytes)
 
 ## 下一步 (剩余乐器逐个调)
 sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,

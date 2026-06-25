@@ -168,7 +168,6 @@ typedef struct {
     u8 level;
     u16 sus_cnt;          /* SUSTAIN/RELEASE 指数查表计数器 (RR=2 可达 515, 用 u16) */
     u8 sus_scale_x16;    /* SUSTAIN 按 RR 缩放 (×16 定点, make_patch 时存) */
-    u8 dr_scale_x16;     /* DECAY 按 DR 缩放 (复用 sus_scale 分布) */
     u8 am;               /* AM (tremolo) 标志 (2026-06-25) */
     u8 pm;               /* PM (vibrato) 标志 */
 } YM_OP;
@@ -272,7 +271,6 @@ static void ym_apply_patch(u8 ch) {
     mod->sul  = (p->mod_sl >= 15) ? 0 : (31 - p->mod_sl * 2);
     mod->rel  = ym_rr_tab[p->mod_rr];
     mod->sus_scale_x16 = ym_sus_scale_x16[p->mod_rr];
-    mod->dr_scale_x16 = ym_sus_scale_x16[p->mod_dr];  /* decay 按 DR 缩放 */
     mod->am = p->mod_am;  mod->pm = p->mod_pm;
     car->fb = 0;
     car->eg_type = p->car_eg;
@@ -282,7 +280,6 @@ static void ym_apply_patch(u8 ch) {
     car->sul  = (p->car_sl >= 15) ? 0 : (31 - p->car_sl * 2);
     car->rel  = ym_rr_tab[p->car_rr];
     car->sus_scale_x16 = ym_sus_scale_x16[p->car_rr];
-    car->dr_scale_x16 = ym_sus_scale_x16[p->car_dr];
     car->am = p->car_am;  car->pm = p->car_pm;
 }
 
@@ -392,19 +389,11 @@ static void ym_env_tick(YM_OP *op) {
         if (op->level >= 31) {
             op->env_state = 2;   /* → decay */
             op->env_step = op->decy;
-            op->sus_cnt = 0;     /* 重置 decay 计数器 */
         }
         break;
-    case 2: /* decay: 指数查表衰减 (按 DR 缩放), level→sul */
-        if (op->level > op->sul) {
-            u16 thr = (ym_sus_hold[op->level] * op->dr_scale_x16) >> 4;
-            if (thr < 1) thr = 1;
-            op->sus_cnt++;
-            if (op->sus_cnt >= thr) {
-                op->sus_cnt = 0;
-                op->level--;
-            }
-        } else {
+    case 2: /* decay: level 31→sul */
+        if (op->level > op->sul) op->level--;
+        else {
             op->env_state = 3;   /* → sustain */
             op->sus_cnt = 0;
             /* EG=1 sustaining: step=0 保持; EG=0 non-sus: step=1 让 sus_hold 接管 */
