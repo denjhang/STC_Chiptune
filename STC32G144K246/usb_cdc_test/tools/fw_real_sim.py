@@ -58,6 +58,29 @@ FW_SUS_SCALE_X16 = [0, 122, 27, 14, 7, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 FW_REL_HOLD = [max(1, h//10) for h in FW_SUS_HOLD]
 # ml_table: 下位机自己的 (和 emu 不同!)
 FW_ML_TABLE = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24, 24, 24]
+# PM (vibrato) 表: pm_table[fnum>>6 & 7][pm_phase>>10 & 7] = fnum 偏移 (对齐 emu2413)
+FW_PM_TABLE = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 1, 0, 0, 0,-1, 0],
+    [0, 1, 2, 1, 0,-1,-2,-1],
+    [0, 1, 3, 1, 0,-1,-3,-1],
+    [0, 2, 4, 2, 0,-2,-4,-2],
+    [0, 2, 5, 2, 0,-2,-5,-2],
+    [0, 3, 6, 3, 0,-3,-6,-3],
+    [0, 3, 7, 3, 0,-3,-7,-3],
+]
+# AM (tremolo) 表: am_table[am_phase>>6 % 210] = 0~13 振幅衰减 (对齐 emu2413)
+FW_AM_TABLE = [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1, 2,2,2,2,2,2,2,2, 3,3,3,3,3,3,3,3,
+    4,4,4,4,4,4,4,4, 5,5,5,5,5,5,5,5, 6,6,6,6,6,6,6,6, 7,7,7,7,7,7,7,7,
+    8,8,8,8,8,8,8,8, 9,9,9,9,9,9,9,9, 10,10,10,10,10,10,10,10, 11,11,11,11,11,11,11,11,
+    12,12,12,12,12,12,12,12, 13,13,13, 12,12,12,12,12,12,12,12,
+    11,11,11,11,11,11,11,11, 10,10,10,10,10,10,10,10, 9,9,9,9,9,9,9,9, 8,8,8,8,8,8,8,8,
+    7,7,7,7,7,7,7,7, 6,6,6,6,6,6,6,6, 5,5,5,5,5,5,5,5, 4,4,4,4,4,4,4,4,
+    3,3,3,3,3,3,3,3, 2,2,2,2,2,2,2,2, 1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0]
+# LFO 索引 (round-robin 每 16 采样推进一次, 不是每采样)
+# am/pm 共用 am_table (210 项三角波), 每次推进 +1
+# 频率: 22050/16/210 = 6.56Hz (vibrato/tremolo 标准 5~7Hz)
+_fw_lfo_idx = 0
 # step 常数 (8.8 定点, 1:1 照搬 ym2413.c:237, blk-1 修正)
 # pos/step 都是 u16, idx = pos>>8 & 0x3F, 一个周期 = 64×256 = 16384
 FW_STEP_CONST = 3579545.0 * 64.0 * 256.0 / (72.0 * 262144.0 * 22050.0)
@@ -65,10 +88,12 @@ FW_STEP_CONST = 3579545.0 * 64.0 * 256.0 / (72.0 * 262144.0 * 22050.0)
 FW_ISR_RATE = 22050
 
 def fw_decode(dump):
-    """1:1 照搬 ym_decode_patch (注意: 不解码 KR/AM/PM/KL, 下位机没用)"""
+    """1:1 照搬 ym_decode_patch (AM/PM 2026-06-25 新增解码)"""
     return {
         'mod_ml': dump[0] & 0x0F, 'mod_eg': (dump[0] >> 5) & 1,
+        'mod_am': (dump[0] >> 7) & 1, 'mod_pm': (dump[0] >> 6) & 1,
         'car_ml': dump[1] & 0x0F, 'car_eg': (dump[1] >> 5) & 1,
+        'car_am': (dump[1] >> 7) & 1, 'car_pm': (dump[1] >> 6) & 1,
         'mod_tl': dump[2] & 0x3F, 'mod_fb': dump[3] & 0x07,
         'mod_ws': (dump[3] >> 3) & 1, 'car_ws': (dump[3] >> 4) & 1,
         'mod_ar': (dump[4] >> 4) & 0x0F, 'mod_dr': dump[4] & 0x0F,
@@ -79,11 +104,12 @@ def fw_decode(dump):
 
 def fw_apply_patch(p):
     """1:1 照搬 ym_apply_patch. 返回 (mod_op, car_op) 字典"""
-    def make_op(ml_val, tl_raw, fb, eg, ws, ar, dr, sl, rr):
+    def make_op(ml_val, tl_raw, fb, eg, ws, ar, dr, sl, rr, am=0, pm=0):
         return {
             'ml': FW_ML_TABLE[ml_val],
             'tl': max(0, min(31, 31 - (tl_raw >> 1))),  # mod_tl: 31 - tl/2
             'fb': fb, 'eg_type': eg,
+            'am': am, 'pm': pm,  # LFO 标志 (AM=tremolo, PM=vibrato)
             'wave': FW_HALFSIN if ws else FW_SIN,
             'atk': FW_AR_TAB[ar], 'decy': FW_DR_TAB[dr],
             'sul': 0 if sl >= 15 else (31 - sl * 2),
@@ -93,11 +119,12 @@ def fw_apply_patch(p):
             'pos': 0, 'step': 0, 'fb_val': 0,
             'env_state': 0, 'env_cnt': 0, 'env_step': 0, 'level': 0,
             'sus_flag': 0, 'sus_cnt': 0,  # sus_cnt: SUSTAIN/RELEASE 指数查表计数器
+            'fnum': 0,  # PM 查表用 (set_note 时存)
         }
     mod = make_op(p['mod_ml'], p['mod_tl'], p['mod_fb'], p['mod_eg'], p['mod_ws'],
-                  p['mod_ar'], p['mod_dr'], p['mod_sl'], p['mod_rr'])
+                  p['mod_ar'], p['mod_dr'], p['mod_sl'], p['mod_rr'], p['mod_am'], p['mod_pm'])
     car = make_op(p['car_ml'], 0, 0, p['car_eg'], p['car_ws'],
-                  p['car_ar'], p['car_dr'], p['car_sl'], p['car_rr'])
+                  p['car_ar'], p['car_dr'], p['car_sl'], p['car_rr'], p['car_am'], p['car_pm'])
     return mod, car
 
 def fw_calc_step(fnum, blk, ml):
@@ -166,12 +193,32 @@ def fw_env_tick(op):
                 if op['level'] == 0:
                     op['env_state'] = 0
 
+def fw_lfo_tick():
+    """LFO 推进 (round-robin 每 16 采样调一次, 不是每采样). 索引 +1."""
+    global _fw_lfo_idx
+    _fw_lfo_idx = (_fw_lfo_idx + 1) % len(FW_AM_TABLE)
+
+def fw_pm_offset(op):
+    """PM (vibrato): 操作 step (频率), 三角波让频率平滑 ±1.5% (1/4 半音).
+    round-robin 更新 (每 16 采样变化一次, 不需每采样)."""
+    if not op['pm']:
+        return 0
+    tri = FW_AM_TABLE[_fw_lfo_idx]  # 0~13 三角波
+    delta_base = op['step'] >> 6    # step 的 1.5% (1/4 半音)
+    return (delta_base * (tri - 6)) >> 3   # (tri-6) -6~+7, 映射 ±1.5%
+
+def fw_am_factor(op):
+    """AM (tremolo): 返回 0~13 (0=不衰减). round-robin 更新."""
+    if not op['am']:
+        return 0
+    return FW_AM_TABLE[_fw_lfo_idx]
+
 def fw_render_fm(mod, car, wait_tick, ch):
     """1:1 照搬 ym_render_fm (8.8 定点). 返回 s16 输出"""
     if mod['step'] == 0:
         return 0
     # OP1 (modulator) — pos/step u16, idx = pos>>8 & 0x3F
-    mod['pos'] = (mod['pos'] + mod['step']) & 0xFFFF
+    mod['pos'] = (mod['pos'] + mod['step'] + fw_pm_offset(mod)) & 0xFFFF
     idx = (mod['pos'] >> 8) & 0x3F
     idx = (idx + (mod['fb_val'] & 0xFF)) & 0x3F
     wave_val = mod['wave'][idx]
@@ -191,13 +238,17 @@ def fw_render_fm(mod, car, wait_tick, ch):
         mod['fb_val'] = 0
 
     # OP2 (carrier)
-    car['pos'] = (car['pos'] + car['step']) & 0xFFFF
+    car['pos'] = (car['pos'] + car['step'] + fw_pm_offset(car)) & 0xFFFF
     idx = (car['pos'] >> 8) & 0x3F
     idx = (idx + (ch_out & 0xFF)) & 0x3F
     wave_val = car['wave'][idx]
     if wait_tick == (ch & 0x0F):
         fw_env_tick(car)
-    ch_out = ((wave_val * (car['level'] + 1) * (car['tl'] + 1)) >> 10)
+    # AM (tremolo): am_factor 0~13 加到衰减 (level 对数域减). 简化: 输出 × am_scale
+    am_f = fw_am_factor(car)
+    eff_level = car['level'] - (am_f >> 1)  # am 0~13, level 减 0~6
+    if eff_level < 0: eff_level = 0
+    ch_out = ((wave_val * (eff_level + 1) * (car['tl'] + 1)) >> 10)
     if ch_out > 127: ch_out = 127
     elif ch_out < -128: ch_out = -128
     return ch_out
@@ -215,6 +266,7 @@ def render_fw_real(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
     if blk > 0: blk -= 1
     mod['step'] = fw_calc_step(fnum, blk, mod['ml'])
     car['step'] = fw_calc_step(fnum, blk, car['ml'])
+    mod['fnum'] = fnum; car['fnum'] = fnum  # PM 查表用
     # carrier tl 映射: 和下位机 ym2413.c:500-502 一致
     #   下位机: vol = (15 - (reg_val & 0x0F)) << 2  (reg_val=0最大→vol=60, =15最小→vol=0)
     #           car.tl = vol >> 1  (vol=60→tl=30满, vol=0→tl=0静音)
@@ -236,6 +288,8 @@ def render_fw_real(inst_idx, freq, dur_keyon, dur_keyoff, volume=0):
         if s == n_keyon:
             fw_key_off(mod, car)
         wait_cnt = (wait_cnt + 1) & 0x0F
+        if wait_cnt == 0:
+            fw_lfo_tick()   # LFO round-robin 推进 (每 16 采样)
         # 1:1 照搬 ym2413_render 主循环
         total = 0
         # 只渲染这一个通道 (模拟单通道)

@@ -301,6 +301,30 @@ sus_hold/rel_hold 指数查表 + FB+4 是**通用机制**, 不止修了 harpsich
 **原因**: 这些乐器共用 EG=0 (non-sustaining) + 反馈, 旧的线性衰减 + 过反馈
 让它们全部失真, sus_hold/rel_hold + FB+4 一次性解决.
 
+## AM/VIB (LFO) 查表实现 (2026-06-25)
+
+YM2413 的 LFO: PM (vibrato 频率调制) + AM (tremolo 振幅调制). 之前下位机完全没实现.
+
+### 实现 (纯查表, 无性能障碍)
+- **LFO 推进**: round-robin 每 16 采样索引 +1 (不是每采样), 省算力
+  - 频率: 22050/16/210 = 6.56Hz (标准 vibrato 5~7Hz)
+- **FW_AM_TABLE[210]**: 三角波 0~13 (PM/AM 共用)
+- **PM (vibrato)**: 操作 **step (频率)** 不是 pos (相位)!
+  - `pos += step + (step>>6) × (tri-6) >> 3`  (±1.5% 频率, 1/4 半音)
+  - 操作 pos 会相位突变产生泛音, 操作 step 频率连续平滑
+- **AM (tremolo)**: carrier level 减 am_factor
+  - `eff_level = level - (am_factor >> 1)`  (am 0~13, level 减 0~6)
+
+### 每个 op 独立 AM/PM 标志
+- patch 解码: mod_am/pm 在 dump[0] bit7/6, car_am/pm 在 dump[1] bit7/6
+- make_op 加 am/pm 字段, render_fm 按 op 标志决定是否调制
+- **坑**: car 的 make_op 调用必须传 am/pm (默认 0, 漏传则 car 无颤音)
+
+### 乐器 AM/PM 分布
+- 大部分乐器 car_pm=1 (carrier vibrato): violin/flute/trumpet/horn/synth/vib/bass/guitar
+- vibraphone 独有 car_am=1 (carrier tremolo)
+- violin mod_pm=1 (modulator 也 vibrato)
+
 ## 下一步 (剩余乐器逐个调)
 sus_hold 表是**全局**的 (所有乐器 SUSTAIN 共用), 但各乐器 RR/SL/EG 不同,
 衰减时间常数不同。可能需要:
