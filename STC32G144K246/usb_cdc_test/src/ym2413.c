@@ -44,7 +44,7 @@ static const s8 code ym_noise[64] = {
  * 反推: cnt = emu_全程ms × rate / (步数 × 16), 限 u8 (1~255). */
 /* AR 表: attack 31 步, cnt=emu_atk_ms×rate/(31×16) */
 static const u8 code ym_ar_tab[16] = {
-    0, 116, 58, 29, 14, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1
+    0, 116, 58, 12, 6, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 /* DR 表: decay (2026-06-25 校准, 旧表 4~10 偏慢 2.2×) */
 static const u8 code ym_dr_tab[16] = {
