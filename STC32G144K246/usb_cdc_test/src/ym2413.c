@@ -203,7 +203,8 @@ typedef struct {
     u8 level;
     u8 env_cnt;
     u8 env_step;
-    u8 vol;              /* 音量倍数 (2=标准, 4=2倍) */
+    u8 vol;              /* 音量倍数 (变频后, reg 0x36-0x38 实时更新) */
+    u8 base_vol;         /* 基础音量 (init, vol 换算基准) */
     const s8 code *wave;
     u16 step;             /* 8.8 定点 (变频后) */
     u16 pos;              /* 8.8 定点 */
@@ -490,11 +491,11 @@ void ym2413_init(void) {
     /* 鼓声 oneshot: 每采样 tick, env_step = 采样数/31步 */
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
-    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].base_step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; /* BD */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8; /* TOM */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2; /* HH */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2; /* CYM */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8; /* SD noise 25Hz */
+    ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].base_step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; ym_drum[0].base_vol = 16; /* BD */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 8;  ym_drum[1].base_vol = 8; /* TOM */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 2;  ym_drum[2].base_vol = 2; /* HH */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 2;  ym_drum[3].base_vol = 2; /* CYM */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8;  ym_drum[4].base_vol = 8; /* SD */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -580,13 +581,17 @@ void ym2413_wr(u8 reg, u8 val) {
         {
             if (ym_rhythm_mode && ch >= 6) {
                 /* rhythm mode: ch6/7/8 是鼓 volume (不是 instrument)
-                 * ch6=BD(高4), ch7=SD(高4)/HH(低4), ch8=TOM(高4)/CYM(低4)
-                 * OPLL vol 0=最大15=最小(反相), 直接映射到 drum.vol (×2) */
-                u8 vhi = (15 - (val >> 4)) << 1;   /* 高4位反相×2 */
-                u8 vlo = (15 - (val & 0x0F)) << 1; /* 低4位反相×2 */
-                if (ch == 6) { ym_drum[0].vol = vhi; }  /* BD */
-                else if (ch == 7) { ym_drum[4].vol = vhi; ym_drum[2].vol = vlo; }  /* SD/HH */
-                else { ym_drum[1].vol = vhi; ym_drum[3].vol = vlo; }  /* TOM/CYM */
+                 * OPLL vol 0=最大15=最小(反相), 换算: vol = base_vol × (15-reg_vol) / 15 */
+                u8 rv_hi = 15 - (val >> 4);    /* 反相高4位 */
+                u8 rv_lo = 15 - (val & 0x0F);  /* 反相低4位 */
+                if (ch == 6) { ym_drum[0].vol = (u8)((u16)ym_drum[0].base_vol * rv_hi / 15); }
+                else if (ch == 7) {
+                    ym_drum[4].vol = (u8)((u16)ym_drum[4].base_vol * rv_hi / 15);
+                    ym_drum[2].vol = (u8)((u16)ym_drum[2].base_vol * rv_lo / 15);
+                } else {
+                    ym_drum[1].vol = (u8)((u16)ym_drum[1].base_vol * rv_hi / 15);
+                    ym_drum[3].vol = (u8)((u16)ym_drum[3].base_vol * rv_lo / 15);
+                }
             } else {
                 u8 inst = (val >> 4) & 0x0F;
                 if (inst != ym_ch_patch[ch]) {
