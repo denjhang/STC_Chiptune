@@ -628,15 +628,19 @@ static s16 ym_render_fm(u8 ch) {
 
     /* OP1 (modulator) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(mod);
-    /* PM (vibrato): 操作 step 频率 (不是 pos), tri 三角波 ±1.5% (1/4 半音) */
+    /* PM (vibrato): 操作 step 频率 (不是 pos), tri 三角波 ±1.5% (1/4 半音)
+     * 性能不足暂时关闭, 仅保留仿真+文档成果 (2026-06-25), 日后优化 ISR 再启用 */
+#if 0
     {
         s16 pm_off = 0;
         if (mod->pm) {
-            s8 tri = (s8)ym_lfo_tab[ym_lfo_idx] - 6;   /* -6~+7 */
+            s8 tri = (s8)ym_lfo_tab[ym_lfo_idx] - 6;
             pm_off = ((s16)(mod->step >> 6) * tri) >> 3;
         }
         mod->pos += (u16)(mod->step + pm_off);
     }
+#endif
+    mod->pos += mod->step;
     if (mod->level == 0) {
         ch_out = 0;
         mod->fb_val = 0;
@@ -652,7 +656,8 @@ static s16 ym_render_fm(u8 ch) {
 
     /* OP2 (carrier) */
     if (ym_wait_cnt == (ch & 0x0F)) ym_env_tick(car);
-    /* PM (vibrato) carrier */
+    /* PM (vibrato) carrier - 性能不足暂时关闭 (#if 0), 见 OP1 注释 */
+#if 0
     {
         s16 pm_off = 0;
         if (car->pm) {
@@ -661,13 +666,16 @@ static s16 ym_render_fm(u8 ch) {
         }
         car->pos += (u16)(car->step + pm_off);
     }
+#endif
+    car->pos += car->step;
     if (car->level == 0) {
         return 0;
     }
     idx = (u8)(car->pos >> 8) & 0x3F;
     idx += (u8)ch_out;
     wave_val = car->wave[idx & 0x3F];
-    /* AM (tremolo): carrier level 减 am_factor (三角波 0~13, level 减 0~6) */
+    /* AM (tremolo): carrier level 减 am_factor - 性能不足暂时关闭 (#if 0) */
+#if 0
     {
         s16 eff_lvl = car->level;
         if (car->am) {
@@ -676,6 +684,9 @@ static s16 ym_render_fm(u8 ch) {
         }
         ch_out = (s8)(((s16)wave_val * (s16)(eff_lvl + 1) * (s16)(car->tl + 1)) >> 10);
     }
+#else
+    ch_out = (s8)(((s16)wave_val * (s16)(car->level + 1) * (s16)(car->tl + 1)) >> 10);
+#endif
     return ch_out;
 }
 
@@ -686,11 +697,13 @@ s16 ym2413_render(void) {
 
     ym_wait_cnt++;
     ym_wait_cnt &= 0x0F;
-    /* LFO round-robin 推进 (每 16 采样, 6.56Hz vibrato/tremolo) */
+    /* LFO round-robin 推进 - 性能不足暂时关闭 (#if 0), 日后优化 ISR 再启用 */
+#if 0
     if (ym_wait_cnt == 0) {
         ym_lfo_idx++;
         if (ym_lfo_idx >= 210) ym_lfo_idx = 0;
     }
+#endif
 
     /* 只渲染 ch0-5 旋律 (6通道) */
     for (ch = 0; ch < 6; ch++) {
