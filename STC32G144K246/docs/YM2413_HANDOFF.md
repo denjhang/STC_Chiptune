@@ -370,13 +370,54 @@ dB不均匀 (低音量区跳变剧烈, 高音量区迟钝).
 | Volume | ✅ | ym_vol_tab[62] 对数查表 |
 
 ## 鼓声遗漏修复 (2026-06-25, Ys First Step Towards Wars)
-
-### bug: rhythm mode 频繁开关导致鼓声不触发
 VGM 模式: `0x35(R,鼓声) → 0x00(m,关rhythm) → 0x35(R,鼓声)` 快速循环.
 - 旧: `if (rhythm) { ... ym_prev_drum_bits = drum_bits; }` — rhythm=0 时**不更新 prev_bits**
 - 关 rhythm(0x00) 后 prev_bits 保持旧值(0x15), 再开 rhythm(0x35) 时
   `new_bits = 0x15 & ~0x15 = 0` — **鼓声不触发!**
 **修复**: rhythm=0 时 `ym_prev_drum_bits = 0`, 下次开 rhythm 任何 bit 0->1 都能触发.
+
+## 鼓声变频 (2026-06-25, 待实现)
+
+### OPLL 约定的默认鼓声频率 (从 f1/msxfan/ysms 多个 VGM 统计确认)
+rhythm mode 下, VGM 开头几乎都写 ch6/7/8 的 fnum/blk 到固定值:
+
+| 通道 | OPLL 默认 fnum | blk | OPLL 频率 | 对应鼓声 |
+|---|---|---|---|---|
+| ch6 | **288** | **2** | 218.5 Hz | BD (低音鼓) |
+| ch7 | **336** | **2** | 254.9 Hz | HH (踩镲) / SD (军鼓) |
+| ch8 | **448** | **0** | 85.0 Hz | TOM (嗵嗵) / CYM (吊镲) |
+
+这是 OPLL rhythm mode 的**约定默认频率**. 部分 VGM (如 Big Don, Constructor, Ys) 会
+改 ch6 的 fnum 实现 BD 变频 (如 288/blk2→480/blk1, 218Hz→182Hz 降调).
+
+### 下位机自定义鼓声频率 (试听调参, 不同于 OPLL 默认)
+| 鼓声 | 下位机频率 | step (8.8) | vs OPLL |
+|---|---|---|---|
+| BD | 100 Hz | 0x004A | ×0.46 (比 OPLL 218Hz 低) |
+| TOM | 214 Hz | 0x009F | ×2.5 (比 OPLL 85Hz 高) |
+| HH | 334 Hz | 0x00F8 | 噪声 (频率=噪声速率) |
+| CYM | 334 Hz | 0x00F8 | 噪声 |
+| SD | 25 Hz | 0x0012 | 噪声 |
+
+### 换算公式 (VGM fnum → 下位机 step)
+VGM 写的 fnum 是基于 **OPLL 默认频率**的音高. 下位机有自己的默认频率, 必须换算:
+```
+新 step = 下位机基础 step × (VGM fnum×2^blk) / (OPLL默认 fnum×2^默认blk)
+```
+例: BD VGM 改成 480/blk1, 默认 288/blk2:
+```
+BD_new_step = 0x004A × (480×2) / (288×4) = 0x004A × 960/1152 = 0x004A × 0.833
+```
+
+### 实现范围
+- **BD (ch6 fnum)**: 变频明显, 必须换算. rhythm mode 下 reg 0x16/0x26 写入时更新 BD step
+- **TOM (ch8 fnum)**: 变频较少, 换算同 BD. reg 0x18/0x28 写入时更新 TOM step
+- **HH/CYM/SD**: 噪声, 变频听感不明显, 暂保持固定 step
+
+### 待实现
+1. 存 OPLL 默认 fnum_blk 常数 (BD: 288×4=1152, TOM: 448×1=448)
+2. rhythm mode 下 ch6/ch8 写 fnum 时, 按比例更新 drum[0]/drum[1].step
+3. 注意: reg 0x16/0x18 (fnum_lo) 和 0x26/0x28 (fnum_hi+blk) 都要处理
 
 ## 实测对比记录 (2026-06-25, Phantasy Star Town)
 
