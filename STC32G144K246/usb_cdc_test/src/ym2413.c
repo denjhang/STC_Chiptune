@@ -198,6 +198,15 @@ static u8 data ym_prev_drum_bits;  /* reg 0x0E 鼓声 bit 上次值 (边沿检�
 
 /* ===== 鼓声状态 (单 op, 简化路径) ===== */
 /* BD/TOM/HH/CYM/SD 各 1 个单 op */
+/* CYM 专用非线性衰减表 (拟合 emu2413 指数衰减, tau=42.7ms, level 21→0)
+ * 高 level 停留短 (快降, 拟合 emu 前期快衰), 低 level 停留长 (慢降, 避免台阶归零)
+ * round-robin ÷4 (每4采样 tick 一次), 值已 ÷4 装进 u8.
+ * HH/SD/BD/TOM 不用此表, 保持线性 env_step 衰减. */
+static const u8 code ym_cym_hold[22] = {
+    1,236,236,138, 98, 76, 62, 52,
+   45, 40, 36, 32, 30, 27, 25, 24,
+   22, 20, 20, 18, 18, 16,
+};
 typedef struct {
     u8 active;
     u8 level;
@@ -209,6 +218,8 @@ typedef struct {
     u16 step;             /* 8.8 定点 (变频后) */
     u16 pos;              /* 8.8 定点 */
     u16 base_step;        /* 基础 step (init, 变频换算基准) */
+    u8 hold_cnt;          /* CYM 非线性衰减计数器 (其他鼓不用) */
+    u8 sub_cnt;           /* CYM round-robin ÷4 分频 (其他鼓不用) */
 } YM_DRUM;
 
 static YM_DRUM xdata ym_drum[5];  /* 0=BD 1=TOM 2=HH 3=CYM 4=SD */
@@ -492,9 +503,9 @@ void ym2413_init(void) {
     /* BD ~100ms TOM ~80ms HH ~29ms CYM ~150ms SD ~60ms */
     /* 鼓声 oneshot, step 按 22050Hz ISR 算: step = freq×64×65536/22050 */
     ym_drum[0].wave = ym_sin;     ym_drum[0].step = 0x004A;  ym_drum[0].base_step = 0x004A;  ym_drum[0].env_step = 14;  ym_drum[0].vol = 16; ym_drum[0].base_vol = 16; /* BD */
-    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 12; ym_drum[1].base_vol = 12; /* TOM (8→12 提音量) */
-    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 4;  ym_drum[2].base_vol = 4; /* HH (2→4 提音量) */
-    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00F8;  ym_drum[3].base_step = 0x00F8;  ym_drum[3].env_step = 255; ym_drum[3].vol = 4;  ym_drum[3].base_vol = 4; /* CYM (2→4 提音量) */
+    ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 9;  ym_drum[1].base_vol = 9; /* TOM (8→9 提音量) */
+    ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 4;  ym_drum[2].base_vol = 4; /* HH 334Hz (2→4 提音量) */
+    ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00FB;  ym_drum[3].base_step = 0x00FB;  ym_drum[3].env_step = 0;   ym_drum[3].vol = 4;  ym_drum[3].base_vol = 4; /* CYM 338Hz, env_step=0 (走 ym_cym_hold 非线性表) */
     ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8;  ym_drum[4].base_vol = 8; /* SD */
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
@@ -536,6 +547,9 @@ void ym2413_wr(u8 reg, u8 val) {
                     ym_ch[ch].patch = &ym_patch[13 + ch];
                     ym_apply_patch(ch);
                     ym_update_step(ch);
+                    ym_update_drum_step(ch);  /* bug fix: rhythm 开启时补算鼓声 step
+                                               * 否则 rhythm 开启前写的 ch6/7/8 fnum 不生效,
+                                               * 鼓声停留在 init base_step (MFANBGM_2.vgm 实证) */
                 }
             } else {
                 /* 退 rhythm mode: ch6/7/8 恢复用户音色 */
@@ -631,6 +645,7 @@ static void ym_drum_trigger(u8 idx) {
     /* 连续鼓声模仿: 还在响(level>0)时只续命(重置env_cnt延长), 不重置level */
     if (d->level == 0) {
         d->level = (idx == 2 || idx == 3) ? 21 : 31;
+        if (idx == 3) { d->hold_cnt = 0; d->sub_cnt = 0; }  /* CYM 非线性衰减重置 */
     }
     d->env_cnt = 0;
 }
@@ -646,13 +661,26 @@ static s16 ym_render_drum(u8 idx) {
 
     if (!d->active) return 0;
 
-    /* 包络: 每采样 tick (不走 round-robin, env_step 直接 = 采样数/步) */
-    if (d->env_step > 0) {
-        if (d->env_cnt < d->env_step) d->env_cnt++;
-        else {
-            d->env_cnt = 0;
-            if (d->level > 0) d->level--;
-            else { d->active = 0; return 0; }
+    if (idx == 3) {
+        /* CYM 专用: 非线性查表衰减 (拟合 emu 指数), round-robin ÷4 分频 */
+        d->sub_cnt++;
+        if ((d->sub_cnt & 3) == 0) {   /* 每 4 采样 tick 一次 */
+            d->hold_cnt++;
+            if (d->hold_cnt >= ym_cym_hold[d->level]) {
+                d->hold_cnt = 0;
+                if (d->level > 0) d->level--;
+                else { d->active = 0; return 0; }
+            }
+        }
+    } else {
+        /* HH/SD/BD/TOM: 线性衰减 (每采样 tick, env_step = 采样数/步) */
+        if (d->env_step > 0) {
+            if (d->env_cnt < d->env_step) d->env_cnt++;
+            else {
+                d->env_cnt = 0;
+                if (d->level > 0) d->level--;
+                else { d->active = 0; return 0; }
+            }
         }
     }
 
