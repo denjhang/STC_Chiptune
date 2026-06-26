@@ -248,13 +248,33 @@ git show <commit>:STC32G144K246/usb_cdc_test/src/ym2413.c | grep -A20 "ym_sd_tri
 ## 鼓声参数 (8.8定点, step=freq×64×256/22050)
 ```
 BD:  sin,    step=0x004A(100Hz),  vol=16, env_step=14, ~20ms
-TOM: sin,    step=0x009F(214Hz),  vol=12, env_step=14, ~20ms   (8→12 提音量)
+TOM: sin,    step=0x009F(214Hz),  vol=9,  env_step=14, ~20ms   (8→9 提音量)
 HH:  noise,  step=0x00F8(334Hz),  vol=4,  env_step=46, ~65ms   (2→4 提音量)
-CYM: noise,  step=0x00F8(334Hz),  vol=4,  env_step=255,~360ms  (2→4 提音量)
-SD:  noise,  step=0x0012(25Hz),   vol=8,  env_step=28, ~40ms [单op]
+CYM: noise,  step=0x00FB(338Hz),  vol=4,  ym_cym_hold非线性, ~231ms  (334→338, 非线性表)
+SD:  PM_swap(sine调noise相位), vol=1, ym_sd_hold非线性(sf配置), 见下方
 ```
-> 2026-06-26 vol 调整 (commit 862c70d): TOM/HH/CYM base_vol 提音量, 解决 HH/CYM
-> 相比 SD/BD 偏小. 新比例 BD:TOM:HH:CYM:SD = 16:12:4:4:8. 只改 init 数值,
+
+### SD 方案 (2026-06-26 定稿, 大量扫频仿真确定)
+
+**机制: PM_swap = sine 调制 noise 相位, sf 双独立包络**
+- sine 240Hz (TOM+2半音), FAST 快衰 tau=8ms (前段打击瞬态)
+- noise 25Hz, SLOW 慢衰 tau=20ms (后段尾巴主体)
+- PM: sine 偏移 noise 查表索引 (无记忆, 每采样独立)
+- 输出 = noise[被PM调制] (sine 只是调制源, 不直接输出)
+
+**为什么是 PM_swap (扫频实证):**
+- 试过 8 种调制 (add/sub/mul/div/am/pm/fm/pwm) × 6 噪声频率 (25-150Hz)
+- 试过 mod/car 角色对调 (noise调sine vs sine调noise)
+- 试过包络方向 (nf_fast noise先衰 vs sf_fast sine先衰)
+- 最终: **PM_swap + sf配置 + 25Hz** 最接近 emu SD
+- emu SD 本质: pg_out bit8(方波) × noise_bit(开关) = 相位切换, noise 慢衰是尾巴
+
+**仿真依据 (tools/wav_sd_pmfm_swap_20_30/PM_n25.wav):**
+- 20-30Hz 每 1Hz 扫频, PM_n25 最佳
+- PM vs 真 FM 对比: PM 纹理稳定更干净, FM 频率波动更脏 → PM 胜
+- 之前 bug 修正: ns/ss 计数器在 swap 版没自增, 导致包络不生效 (已修)
+
+> 2026-06-26 vol 调整 (commit 862c70d): TOM/HH/CYM base_vol 提音量, 解决 HH/CYM 相比 SD/BD 偏小. 新比例 BD:TOM:HH:CYM:SD = 16:9:4:4:8. 只改 init 数值,
 > render/vol换算公式不动. 待实机听感确认 (CYM decay 长, vol=4 若糊再降).
 > 旧值: TOM=8 HH=2 CYM=2 (HH/CYM 被 base_vol=2 压到 SD 的 1/4).
 

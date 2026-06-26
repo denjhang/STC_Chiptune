@@ -207,6 +207,28 @@ static const u8 code ym_cym_hold[22] = {
    45, 40, 36, 32, 30, 27, 25, 24,
    22, 20, 20, 18, 18, 16,
 };
+/* SD 专用非线性衰减表 (tau=16ms, level 31→0, ÷4). SD 衰减比 CYM 快.
+ * SD 是 sine(240Hz)+noise(25Hz) 混合, 衰减形态拟合 emu SD. */
+static const u8 code ym_sd_hold[32] = {
+    0, 88, 88, 52, 37, 28, 23, 20,
+   17, 15, 13, 12, 11, 10,  9,  9,
+    8,  8,  7,  7,  7,  6,  6,  6,
+    5,  5,  5,  5,  5,  4,  4,  4,
+};
+/* SD sine 专用快衰表 (tau=8ms, level 31→0, ÷4). sf配置: sine快衰 noise慢衰.
+ * sine(240Hz) FAST 快衰做打击瞬态, noise(25Hz) 用 ym_sd_hold SLOW 慢衰做尾巴. */
+static const u8 code ym_sd_sin_hold[32] = {
+    0, 44, 44, 26, 18, 14, 12, 10,
+    8,  7,  7,  6,  6,  5,  5,  4,
+    4,  4,  4,  3,  3,  3,  3,  3,
+    3,  3,  3,  2,  2,  2,  2,  2,
+};
+/* SD 双波形混合: sine(240Hz)+noise(25Hz), 用 data 区独立相位 (不占 YM_DRUM) */
+static u16 data ym_sd_sin_step;    /* SD sine step (TOM+2半音=240Hz) */
+static u16 data ym_sd_sin_pos;     /* SD sine 相位累加 */
+static u8 data ym_sd_sin_level;    /* SD sine 包络 level (FAST 快衰) */
+static u8 data ym_sd_sin_hold_cnt; /* SD sine hold 计数器 */
+static u8 data ym_sd_sin_sub;      /* SD sine round-robin ÷4 分频 */
 typedef struct {
     u8 active;
     u8 level;
@@ -506,7 +528,11 @@ void ym2413_init(void) {
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 9;  ym_drum[1].base_vol = 9; /* TOM (8→9 提音量) */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 4;  ym_drum[2].base_vol = 4; /* HH 334Hz (2→4 提音量) */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00FB;  ym_drum[3].base_step = 0x00FB;  ym_drum[3].env_step = 0;   ym_drum[3].vol = 4;  ym_drum[3].base_vol = 4; /* CYM 338Hz, env_step=0 (走 ym_cym_hold 非线性表) */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 28;  ym_drum[4].vol = 8;  ym_drum[4].base_vol = 8; /* SD */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 0;   ym_drum[4].vol = 8;  ym_drum[4].base_vol = 8; /* SD noise 25Hz, env_step=0 (走 ym_sd_hold 非线性表) */
+    /* SD sine 相位: TOM(214Hz)+2半音=240Hz, step=freq×64×256/22050 */
+    ym_sd_sin_step = 0x00B3;  /* 240Hz (214×2^(2/12)) */
+    ym_sd_sin_pos = 0;
+    ym_sd_sin_level = 0; ym_sd_sin_hold_cnt = 0; ym_sd_sin_sub = 0;
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -598,13 +624,20 @@ void ym2413_wr(u8 reg, u8 val) {
                  * OPLL vol 0=最大15=最小(反相), 换算: vol = base_vol × (15-reg_vol) / 15 */
                 u8 rv_hi = 15 - (val >> 4);    /* 反相高4位 */
                 u8 rv_lo = 15 - (val & 0x0F);  /* 反相低4位 */
-                if (ch == 6) { ym_drum[0].vol = (u8)((u16)ym_drum[0].base_vol * rv_hi / 15); }
-                else if (ch == 7) {
-                    ym_drum[4].vol = (u8)((u16)ym_drum[4].base_vol * rv_hi / 15);
-                    ym_drum[2].vol = (u8)((u16)ym_drum[2].base_vol * rv_lo / 15);
+                if (ch == 6) {
+                    /* 0x36: 低4位 = BD vol (对齐 emu2413 set_volume(opll,6,...) line 1421)
+                     * BD 在 rhythm mode 是标准 2-op, carrier vol = ch6 旋律 vol = 0x36 低4位
+                     * (旧版错用高4位, 导致 0x36=0xF1 时 BD vol=0, Area Clear 等曲子 BD 全丢) */
+                    ym_drum[0].vol = (u8)((u16)ym_drum[0].base_vol * rv_lo / 15);  /* BD 用低4位 */
+                } else if (ch == 7) {
+                    /* 0x37: 高4位=HH(drum[2]), 低4位=SD(drum[4]) — 对齐 emu2413.c:1409
+                     * (旧版反了: 高→SD 低→HH, 导致 PowerStrike 等 SD 在低4位的曲子鼓听不见) */
+                    ym_drum[2].vol = (u8)((u16)ym_drum[2].base_vol * rv_hi / 15);  /* HH */
+                    ym_drum[4].vol = (u8)((u16)ym_drum[4].base_vol * rv_lo / 15);  /* SD */
                 } else {
-                    ym_drum[1].vol = (u8)((u16)ym_drum[1].base_vol * rv_hi / 15);
-                    ym_drum[3].vol = (u8)((u16)ym_drum[3].base_vol * rv_lo / 15);
+                    /* 0x38: 高4位=TOM(drum[1]), 低4位=CYM(drum[3]) — 对齐 emu2413.c:1414 */
+                    ym_drum[1].vol = (u8)((u16)ym_drum[1].base_vol * rv_hi / 15);  /* TOM */
+                    ym_drum[3].vol = (u8)((u16)ym_drum[3].base_vol * rv_lo / 15);  /* CYM */
                 }
             } else {
                 u8 inst = (val >> 4) & 0x0F;
@@ -646,6 +679,8 @@ static void ym_drum_trigger(u8 idx) {
     if (d->level == 0) {
         d->level = (idx == 2 || idx == 3) ? 21 : 31;
         if (idx == 3) { d->hold_cnt = 0; d->sub_cnt = 0; }  /* CYM 非线性衰减重置 */
+        if (idx == 4) { d->hold_cnt = 0; d->sub_cnt = 0; ym_sd_sin_pos = 0;
+                        ym_sd_sin_level = 31; ym_sd_sin_hold_cnt = 0; ym_sd_sin_sub = 0; }  /* SD PM_swap sf 双包络重置 */
     }
     d->env_cnt = 0;
 }
@@ -672,8 +707,48 @@ static s16 ym_render_drum(u8 idx) {
                 else { d->active = 0; return 0; }
             }
         }
+    } else if (idx == 4) {
+        /* SD PM_swap: sine(240Hz,FAST快衰) PM调制 noise(25Hz,SLOW慢衰) 相位
+         * sf配置: sine快衰tau8做打击瞬态, noise慢衰tau20做尾巴
+         * PM: sine偏移noise查表索引 (无记忆,每采样独立)
+         * 输出 = noise[被PM调制] × noise_level (sine只是调制源,不直接输出)
+         * 定稿: tools/wav_sd_pmfm_swap_20_30/PM_n25.wav (扫频实证) */
+        /* noise 包络: SLOW 慢衰 (ym_sd_hold), d->level */
+        d->sub_cnt++;
+        if ((d->sub_cnt & 3) == 0) {
+            d->hold_cnt++;
+            if (d->hold_cnt >= ym_sd_hold[d->level]) {
+                d->hold_cnt = 0;
+                if (d->level > 0) d->level--;
+                else { d->active = 0; return 0; }
+            }
+        }
+        /* sine 包络: FAST 快衰 (ym_sd_sin_hold), ym_sd_sin_level */
+        ym_sd_sin_sub++;
+        if ((ym_sd_sin_sub & 3) == 0) {
+            ym_sd_sin_hold_cnt++;
+            if (ym_sd_sin_hold_cnt >= ym_sd_sin_hold[ym_sd_sin_level]) {
+                ym_sd_sin_hold_cnt = 0;
+                if (ym_sd_sin_level > 0) ym_sd_sin_level--;
+            }
+        }
+        /* noise 相位推进 */
+        d->pos += d->step;
+        /* sine 相位推进 */
+        ym_sd_sin_pos += ym_sd_sin_step;
+        {
+            s8 sin_val = ym_sin[(u8)(ym_sd_sin_pos >> 8) & 0x3F];
+            /* PM_swap: sine 偏移 noise 查表索引 */
+            u8 nidx = ((u8)(d->pos >> 8) + (u8)((sin_val * (ym_sd_sin_level + 1)) >> 8)) & 0x3F;
+            s8 noise_val = ym_noise[nidx];
+            /* 输出: noise (被 PM 调制) × noise_level, vol=1 */
+            out = ((s16)noise_val * (s16)(d->level + 1)) >> 7;
+            if (out > 127) out = 127;
+            if (out < -128) out = -128;
+            return out;
+        }
     } else {
-        /* HH/SD/BD/TOM: 线性衰减 (每采样 tick, env_step = 采样数/步) */
+        /* HH/BD/TOM: 线性衰减 (每采样 tick, env_step = 采样数/步) */
         if (d->env_step > 0) {
             if (d->env_cnt < d->env_step) d->env_cnt++;
             else {
