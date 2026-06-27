@@ -279,17 +279,16 @@ SD:  方波255Hz × LFSR(adv1) × linear_db对数幅度, vol=5, ~130ms (见下�
 | 维度 | PM_n5 (sine PM调制noise) | **linear_db (方波×LFSR, 当前)** |
 |---|---|---|
 | 听感 | **更接近真实SD/真实乐器** | 98%原版声音 (略逊PM_n5的真实感) |
-| 性能 | 双包络+sine查表+noise查表 (重) | **LFSR adv1 极省 (3指令), 不卡ISR** |
+| 性能 | 双查表+双包络 (开销低) | LFSR adv1 (3指令, 开销同样低) |
 | 原理 | sine偏移noise查表索引 (PM) | 方波×LFSR环形调制 (emu原理复刻) |
 | emu拟合 | 听感好但原理不同 | **原理一致 (pg bit8 × noise bit)** |
-| 选型理由 | — | **性能优先, 多通道FM+SD不卡** |
 
 **选型结论:**
 - PM_n5 听感更接近真实 SD 乐器声音 (sine 给的音高感更自然)
 - linear_db 方波×LFSR 是 emu SD 原理的精确复刻 (环形调制), 达到 **98% 原版声音**
-- LFSR 推进 1 次/采样 是**最省算力**的白噪方案 (3指令), 多通道 FM + SD 不卡 ISR
-- 选 linear_db 是因为**性能优先** — PM_n5 的双包络+双查表在多通道时会卡
-- 若未来 ISR 性能有富余 (PLL 超频等), 可回退 PM_n5 获得更真实听感
+- **两者性能开销相当** (PM_n5 双查表 vs linear_db LFSR, 都不卡 ISR)
+- **选 linear_db 纯粹是为了模仿 emu 原理** (方波×噪声环形调制 = calc_slot_snare 的本质)
+- 不是性能原因选 linear_db — PM_n5 性能不比它差
 
 **定稿过程 (大量扫频仿真, 见 tools/wav_sd_*):**
 1. 8调制×6频率 → add/PM 最实用
@@ -297,7 +296,7 @@ SD:  方波255Hz × LFSR(adv1) × linear_db对数幅度, vol=5, ~130ms (见下�
 3. dump emu SD 波形 → 发现是方波×噪声开关 (环形调制本质)
 4. linear_db 对数幅度 (匹配 emu 0.37dB/ms 线性dB)
 5. 方波 240-260 精扫 → 255Hz
-6. LFSR 0-16 精扫 → adv12 最佳 (但卡ISR) → adv1 (够用, 不卡)
+6. LFSR 0-16 精扫 → adv12 最佳 (adv1 够用, 性能相当选 adv1)
 7. SD 变频 (ch7 fnum, Prologue DIA51 用 80Hz 做 BD+SD)
 8. vol 软件包络响应 (Area2-4 用 vol 渐弱做包络)
 9. base_vol: 8→6→5 (音量平衡)
