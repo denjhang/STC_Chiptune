@@ -251,38 +251,56 @@ BD:  sin,    step=0x004A(100Hz),  vol=16, env_step=14, ~20ms
 TOM: sin,    step=0x009F(214Hz),  vol=9,  env_step=14, ~20ms   (8→9 提音量)
 HH:  noise,  step=0x00F8(334Hz),  vol=4,  env_step=46, ~65ms   (2→4 提音量)
 CYM: noise,  step=0x00FB(338Hz),  vol=4,  ym_cym_hold非线性, ~231ms  (334→338, 非线性表)
-SD:  方波255Hz × LFSR(12次/采样) × ym_sd_amp对数幅度, vol=5, ~130ms (linear_db)
+SD:  方波255Hz × LFSR(adv1) × linear_db对数幅度, vol=5, ~130ms (见下方)
 ```
 
-### SD 方案 (2026-06-27 定稿, linear_db 方波×LFSR×对数幅度)
+### SD 方案 (2026-06-27 定稿, linear_db 方波×LFSR环形调制)
 
-**机制: 方波(255Hz) × LFSR噪声开关(12次/采样) × linear_db对数幅度表**
-- 方波 255Hz (pg_out bit8, emu降4半音最佳, 240-260精扫确定)
-- LFSR 17-bit (OPLL反馈0x800200), 推进12次/采样 (真白噪无周期, 替代64点固定表)
-- 泄漏 1/30 (noise_bit=0时幅度=amp/30, 对应emu to_linear近零值)
-- linear_db ym_sd_amp[32] (level 31→0, 48dB线性dB衰减, 130ms)
-- emu SD 实测RMS: 0.37dB/ms匀速 (线性dB, 不是指数)
+**当前方案: 方波(255Hz) × LFSR噪声开关(adv1,极省) × linear_db对数幅度**
+- 方波 255Hz (pg_out bit8, ch7 fnum 变频)
+- LFSR 17-bit 推进 1 次/采样 (3指令, 不卡 ISR; adv12卡ISR已弃用)
+- 泄漏 1/30 (noise_bit=0 时 amp/30, emu to_linear 近零值)
+- linear_db ym_sd_amp[32] (level 31→0, 48dB 线性dB衰减, 130ms)
+- emu SD 实测 RMS: 0.37dB/ms 匀速 (线性dB, 不是指数)
+- base_vol=5, >>3 输出
 
-**合成原理 (emu calc_slot_snare 原理复刻):**
+**合成原理 (emu calc_slot_snare 环形调制复刻):**
 ```
 每采样:
   sq_bit = (sq_pos >> 16) & 1          // 方波 ±1 (pg_out bit8)
-  LFSR 推进12次, noise_bit = lfsr & 1  // 高频白噪 (emu update_noise 18次的等效)
+  LFSR 推进1次, noise_bit = lfsr & 1   // 白噪 (无周期无金属音)
   amp = ym_sd_amp[level]               // 对数幅度 (emu to_linear)
   mag = noise_bit ? amp : amp/30       // 噪声开关 + 泄漏
-  out = sq_bit ? -mag : +mag           // 方波 × 噪声
+  out = sq_bit ? -mag : +mag           // 方波 × 噪声 = 环形调制
 ```
 
-**定稿过程 (大量扫频仿真):**
-1. 8种调制(add/sub/mul/div/am/pm/fm/pwm) × 6频率 → 加法/PM最实用
-2. mod/car角色对调 + 包络方向(sf/nf) → PM_swap+sf+n5初步最佳
-3. dump emu SD原始波形 → 发现是方波×噪声开关, 不是sine+noise加法
-4. linear_db对数幅度表 (匹配emu 0.37dB/ms线性dB) → 替代指数表
-5. 方波240-260精扫 → 255Hz最佳
-6. LFSR 0-16精扫 → adv12最佳
-7. 修复方波step笔误 (0x5A20→0x05EB, 1940Hz→255Hz)
+**两种 SD 方案对比 (重要, 选型依据):**
 
-**仿真依据: tools/wav_sd_lfsr_8_16/SD_adv12.wav (最接近emu)**
+| 维度 | PM_n5 (sine PM调制noise) | **linear_db (方波×LFSR, 当前)** |
+|---|---|---|
+| 听感 | **更接近真实SD/真实乐器** | 98%原版声音 (略逊PM_n5的真实感) |
+| 性能 | 双包络+sine查表+noise查表 (重) | **LFSR adv1 极省 (3指令), 不卡ISR** |
+| 原理 | sine偏移noise查表索引 (PM) | 方波×LFSR环形调制 (emu原理复刻) |
+| emu拟合 | 听感好但原理不同 | **原理一致 (pg bit8 × noise bit)** |
+| 选型理由 | — | **性能优先, 多通道FM+SD不卡** |
+
+**选型结论:**
+- PM_n5 听感更接近真实 SD 乐器声音 (sine 给的音高感更自然)
+- linear_db 方波×LFSR 是 emu SD 原理的精确复刻 (环形调制), 达到 **98% 原版声音**
+- LFSR 推进 1 次/采样 是**最省算力**的白噪方案 (3指令), 多通道 FM + SD 不卡 ISR
+- 选 linear_db 是因为**性能优先** — PM_n5 的双包络+双查表在多通道时会卡
+- 若未来 ISR 性能有富余 (PLL 超频等), 可回退 PM_n5 获得更真实听感
+
+**定稿过程 (大量扫频仿真, 见 tools/wav_sd_*):**
+1. 8调制×6频率 → add/PM 最实用
+2. PM_swap+sf+n5 → 初步最佳 (sine调noise, sf双包络)
+3. dump emu SD 波形 → 发现是方波×噪声开关 (环形调制本质)
+4. linear_db 对数幅度 (匹配 emu 0.37dB/ms 线性dB)
+5. 方波 240-260 精扫 → 255Hz
+6. LFSR 0-16 精扫 → adv12 最佳 (但卡ISR) → adv1 (够用, 不卡)
+7. SD 变频 (ch7 fnum, Prologue DIA51 用 80Hz 做 BD+SD)
+8. vol 软件包络响应 (Area2-4 用 vol 渐弱做包络)
+9. base_vol: 8→6→5 (音量平衡)
 
 > 2026-06-26 vol 调整 (commit 862c70d): TOM/HH/CYM base_vol 提音量, 解决 HH/CYM 相比 SD/BD 偏小. 新比例 BD:TOM:HH:CYM:SD = 16:9:4:4:8. 只改 init 数值,
 > render/vol换算公式不动. 待实机听感确认 (CYM decay 长, vol=4 若糊再降).
