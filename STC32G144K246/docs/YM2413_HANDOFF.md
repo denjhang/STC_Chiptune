@@ -251,28 +251,38 @@ BD:  sin,    step=0x004A(100Hz),  vol=16, env_step=14, ~20ms
 TOM: sin,    step=0x009F(214Hz),  vol=9,  env_step=14, ~20ms   (8→9 提音量)
 HH:  noise,  step=0x00F8(334Hz),  vol=4,  env_step=46, ~65ms   (2→4 提音量)
 CYM: noise,  step=0x00FB(338Hz),  vol=4,  ym_cym_hold非线性, ~231ms  (334→338, 非线性表)
-SD:  PM_swap(sine调noise相位), vol=1, ym_sd_hold非线性(sf配置), 见下方
+SD:  方波255Hz × LFSR(12次/采样) × ym_sd_amp对数幅度, vol=5, ~130ms (linear_db)
 ```
 
-### SD 方案 (2026-06-26 定稿, 大量扫频仿真确定)
+### SD 方案 (2026-06-27 定稿, linear_db 方波×LFSR×对数幅度)
 
-**机制: PM_swap = sine 调制 noise 相位, sf 双独立包络**
-- sine 240Hz (TOM+2半音), FAST 快衰 tau=8ms (前段打击瞬态)
-- noise 25Hz, SLOW 慢衰 tau=20ms (后段尾巴主体)
-- PM: sine 偏移 noise 查表索引 (无记忆, 每采样独立)
-- 输出 = noise[被PM调制] (sine 只是调制源, 不直接输出)
+**机制: 方波(255Hz) × LFSR噪声开关(12次/采样) × linear_db对数幅度表**
+- 方波 255Hz (pg_out bit8, emu降4半音最佳, 240-260精扫确定)
+- LFSR 17-bit (OPLL反馈0x800200), 推进12次/采样 (真白噪无周期, 替代64点固定表)
+- 泄漏 1/30 (noise_bit=0时幅度=amp/30, 对应emu to_linear近零值)
+- linear_db ym_sd_amp[32] (level 31→0, 48dB线性dB衰减, 130ms)
+- emu SD 实测RMS: 0.37dB/ms匀速 (线性dB, 不是指数)
 
-**为什么是 PM_swap (扫频实证):**
-- 试过 8 种调制 (add/sub/mul/div/am/pm/fm/pwm) × 6 噪声频率 (25-150Hz)
-- 试过 mod/car 角色对调 (noise调sine vs sine调noise)
-- 试过包络方向 (nf_fast noise先衰 vs sf_fast sine先衰)
-- 最终: **PM_swap + sf配置 + 25Hz** 最接近 emu SD
-- emu SD 本质: pg_out bit8(方波) × noise_bit(开关) = 相位切换, noise 慢衰是尾巴
+**合成原理 (emu calc_slot_snare 原理复刻):**
+```
+每采样:
+  sq_bit = (sq_pos >> 16) & 1          // 方波 ±1 (pg_out bit8)
+  LFSR 推进12次, noise_bit = lfsr & 1  // 高频白噪 (emu update_noise 18次的等效)
+  amp = ym_sd_amp[level]               // 对数幅度 (emu to_linear)
+  mag = noise_bit ? amp : amp/30       // 噪声开关 + 泄漏
+  out = sq_bit ? -mag : +mag           // 方波 × 噪声
+```
 
-**仿真依据 (tools/wav_sd_pmfm_swap_20_30/PM_n25.wav):**
-- 20-30Hz 每 1Hz 扫频, PM_n25 最佳
-- PM vs 真 FM 对比: PM 纹理稳定更干净, FM 频率波动更脏 → PM 胜
-- 之前 bug 修正: ns/ss 计数器在 swap 版没自增, 导致包络不生效 (已修)
+**定稿过程 (大量扫频仿真):**
+1. 8种调制(add/sub/mul/div/am/pm/fm/pwm) × 6频率 → 加法/PM最实用
+2. mod/car角色对调 + 包络方向(sf/nf) → PM_swap+sf+n5初步最佳
+3. dump emu SD原始波形 → 发现是方波×噪声开关, 不是sine+noise加法
+4. linear_db对数幅度表 (匹配emu 0.37dB/ms线性dB) → 替代指数表
+5. 方波240-260精扫 → 255Hz最佳
+6. LFSR 0-16精扫 → adv12最佳
+7. 修复方波step笔误 (0x5A20→0x05EB, 1940Hz→255Hz)
+
+**仿真依据: tools/wav_sd_lfsr_8_16/SD_adv12.wav (最接近emu)**
 
 > 2026-06-26 vol 调整 (commit 862c70d): TOM/HH/CYM base_vol 提音量, 解决 HH/CYM 相比 SD/BD 偏小. 新比例 BD:TOM:HH:CYM:SD = 16:9:4:4:8. 只改 init 数值,
 > render/vol换算公式不动. 待实机听感确认 (CYM decay 长, vol=4 若糊再降).
