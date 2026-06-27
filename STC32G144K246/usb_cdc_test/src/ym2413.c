@@ -680,7 +680,12 @@ static void ym_drum_trigger(u8 idx) {
         d->level = (idx == 2 || idx == 3) ? 21 : 31;
         if (idx == 3) { d->hold_cnt = 0; d->sub_cnt = 0; }  /* CYM 非线性衰减重置 */
         if (idx == 4) { d->hold_cnt = 0; d->sub_cnt = 0; ym_sd_sin_pos = 0;
-                        ym_sd_sin_level = 31; ym_sd_sin_hold_cnt = 0; ym_sd_sin_sub = 0; }  /* SD PM_swap sf 双包络重置 */
+                        ym_sd_sin_level = 31; ym_sd_sin_hold_cnt = 0; ym_sd_sin_sub = 0; }  /* SD PM_swap 重置 */
+    } else if (idx == 4) {
+        /* SD 连击续命: sine 快衰每次 trigger 都重启 (打击瞬态),
+         * noise 慢衰只续命 (env_cnt 归零延长), 不重置 level (避免打断尾巴) */
+        ym_sd_sin_level = 31; ym_sd_sin_hold_cnt = 0; ym_sd_sin_sub = 0;
+        d->sub_cnt = 0;
     }
     d->env_cnt = 0;
 }
@@ -741,8 +746,9 @@ static s16 ym_render_drum(u8 idx) {
             /* PM_swap: sine 偏移 noise 查表索引 */
             u8 nidx = ((u8)(d->pos >> 8) + (u8)((sin_val * (ym_sd_sin_level + 1)) >> 8)) & 0x3F;
             s8 noise_val = ym_noise[nidx];
-            /* 输出: noise (被 PM 调制) × noise_level, vol=1 */
-            out = ((s16)noise_val * (s16)(d->level + 1)) >> 7;
+            /* 输出: noise (被 PM 调制) × noise_level × vol, >>6 对齐其他鼓
+             * vol 由 reg 0x37 低4位实时更新 (渐弱连击), 缺 vol 会导致 vol 变化无效 */
+            out = ((s16)noise_val * (s16)((d->level + 1) * d->vol)) >> 6;
             if (out > 127) out = 127;
             if (out < -128) out = -128;
             return out;
