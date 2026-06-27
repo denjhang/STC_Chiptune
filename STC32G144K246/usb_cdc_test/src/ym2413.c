@@ -209,18 +209,18 @@ static const u8 code ym_cym_hold[22] = {
 };
 /* SD 专用对数幅度表 (linear_db, level 31→0, 48dB 线性dB衰减, 130ms)
  * emu SD 实测 RMS: 0.37dB/ms 匀速下降 (线性dB = 对数域线性)
- * level 匀速下降, 幅度按对数查表 → RMS 线性dB衰减, 匹配 emu
- * SD 合成: 方波(255Hz) × LFSR噪声开关 × ym_sd_amp[level] */
+ * SD 合成: 方波(255Hz) × LFSR噪声开关(adv1, 极省算力) × ym_sd_amp[level] */
 static const u8 code ym_sd_amp[32] = {
     0,   1,  1,  1,  1,  1,  1,  2,
     2,   3,  3,  4,  4,  5,  6,  7,
     9,  10, 13, 15, 18, 21, 26, 31,
    36,  44, 52, 62, 74, 89,106,127,
 };
-/* SD 方波 + LFSR 状态 (替代 PM_swap 的 sine/noise 双波形) */
+/* SD 方波 + LFSR 状态 */
 static u32 data ym_sd_sq_pos;      /* SD 方波相位累加 (20-bit) */
+static u32 data ym_sd_sq_step;     /* SD 方波步进 (变频后) */
+static u16 data ym_sd_sq_base;     /* SD 方波基础步进 (255Hz, init) */
 static u32 data ym_sd_lfsr;        /* SD 17-bit LFSR 状态 (OPLL 反馈 0x800200) */
-static u8 data ym_sd_sub;          /* SD round-robin ÷4 分频 */
 typedef struct {
     u8 active;
     u8 level;
@@ -346,6 +346,8 @@ static void ym_update_drum_step(u8 ch) {
         /* HH(2) + SD(4) 共用 ch7 fnum */
         ym_drum[2].step = (u16)((u32)ym_drum[2].base_step * fnum_blk / YM_DRUM_DEF_HHSD);
         ym_drum[4].step = (u16)((u32)ym_drum[4].base_step * fnum_blk / YM_DRUM_DEF_HHSD);
+        /* SD 方波也变频 (方波频率 = ch7 音频频率, Prologue DIA51 用 ch7 fnum=80 做 BD+SD) */
+        ym_sd_sq_step = ((u32)ym_sd_sq_base * fnum_blk + YM_DRUM_DEF_HHSD/2) / YM_DRUM_DEF_HHSD;
     } else if (ch == 8) {
         /* TOM(1) + CYM(3) 共用 ch8 fnum */
         ym_drum[1].step = (u16)((u32)ym_drum[1].base_step * fnum_blk / YM_DRUM_DEF_TOM);
@@ -520,11 +522,12 @@ void ym2413_init(void) {
     ym_drum[1].wave = ym_sin;     ym_drum[1].step = 0x009F;  ym_drum[1].base_step = 0x009F;  ym_drum[1].env_step = 14;  ym_drum[1].vol = 9;  ym_drum[1].base_vol = 9; /* TOM (8→9 提音量) */
     ym_drum[2].wave = ym_noise;   ym_drum[2].step = 0x00F8;  ym_drum[2].base_step = 0x00F8;  ym_drum[2].env_step = 46;  ym_drum[2].vol = 4;  ym_drum[2].base_vol = 4; /* HH 334Hz (2→4 提音量) */
     ym_drum[3].wave = ym_noise;   ym_drum[3].step = 0x00FB;  ym_drum[3].base_step = 0x00FB;  ym_drum[3].env_step = 0;   ym_drum[3].vol = 4;  ym_drum[3].base_vol = 4; /* CYM 338Hz, env_step=0 (走 ym_cym_hold 非线性表) */
-    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 0;   ym_drum[4].vol = 5;  ym_drum[4].base_vol = 5; /* SD 方波255Hz+LFSR+linear_db, env_step=0, vol 8→5 */
+    ym_drum[4].wave = ym_noise;   ym_drum[4].step = 0x0012;  ym_drum[4].base_step = 0x0012;  ym_drum[4].env_step = 0;   ym_drum[4].vol = 5;  ym_drum[4].base_vol = 5; /* SD 方波255Hz+LFSR(adv1)+linear_db, base_vol=5 */
     /* SD 方波 + LFSR 状态初始化 */
     ym_sd_sq_pos = 0;
+    ym_sd_sq_base = 0x05EB;  /* 255Hz 基础步进 (255×131072/22050) */
+    ym_sd_sq_step = 0x05EB;  /* 默认 255Hz, rhythm 开启时按 ch7 fnum 变频 */
     ym_sd_lfsr = 0x1FFFF;
-    ym_sd_sub = 0;
     for (i = 0; i < 5; i++) { ym_drum[i].active = 0; ym_drum[i].level = 0; ym_drum[i].pos = 0; }
 }
 
@@ -667,11 +670,15 @@ static void ym_update_noise(void) {
 static void ym_drum_trigger(u8 idx) {
     YM_DRUM *d = &ym_drum[idx];
     d->active = 1;
-    /* 连续鼓声模仿: 还在响(level>0)时只续命(重置env_cnt延长), 不重置level */
-    if (d->level == 0) {
+    /* SD 每次都重新触发 (不续命, 快速连击每次独立短脉冲, Prologue DIA51) */
+    if (idx == 4) {
+        d->level = 31; d->hold_cnt = 0; d->sub_cnt = 0;
+        ym_sd_sq_pos = 0; ym_sd_lfsr = 0x1FFFF;
+    }
+    /* 其他鼓: 还在响(level>0)时只续命(重置env_cnt延长), 不重置level */
+    else if (d->level == 0) {
         d->level = (idx == 2 || idx == 3) ? 21 : 31;
         if (idx == 3) { d->hold_cnt = 0; d->sub_cnt = 0; }  /* CYM 非线性衰减重置 */
-        if (idx == 4) { d->hold_cnt = 0; d->sub_cnt = 0; ym_sd_sq_pos = 0; ym_sd_lfsr = 0x1FFFF; }  /* SD 方波+LFSR 重置 */
     }
     d->env_cnt = 0;
 }
@@ -703,35 +710,33 @@ static s16 ym_render_drum(u8 idx) {
          * emu SD 实证: pg_out bit8(方波) × noise_bit(LFSR) × to_linear(eg_out)
          * RMS 线性dB衰减 0.37dB/ms, 130ms总衰减 (level匀速下降+对数幅度表)
          * 定稿: 方波255Hz + LFSR推进12 + 泄漏1/30 + linear_db (扫频实证) */
-        /* 包络: level 匀速下降 (固定 step, ÷4 round-robin), 130ms/31级 */
+        /* 包络: level 匀速下降 (linear_db, 130ms 匹配 emu SD)
+         * vol 软件包络 (Area2-4 等) 通过输出公式响应, level 是基底 */
         d->sub_cnt++;
         if ((d->sub_cnt & 3) == 0) {
             d->hold_cnt++;
-            if (d->hold_cnt >= 23) {   /* 23×4=92采样/级, 31级=129ms */
+            if (d->hold_cnt >= 23) {   /* 23×4=92采样/级, 31级=129ms (匹配 emu) */
                 d->hold_cnt = 0;
                 if (d->level > 0) d->level--;
                 else { d->active = 0; return 0; }
             }
         }
-        /* 方波相位 (20-bit, 取 bit16 做方波 ±1) */
-        ym_sd_sq_pos = (ym_sd_sq_pos + 0x05EB) & 0xFFFFF;  /* 255Hz×2 step (0x5A20 是笔误, 实为 0x05EB) */
+        /* 方波相位 (20-bit, 取 bit16 做方波 ±1), step 随 ch7 fnum 变频 */
+        ym_sd_sq_pos = (ym_sd_sq_pos + ym_sd_sq_step) & 0xFFFFF;
         {
             u8 sq_bit = (ym_sd_sq_pos >> 16) & 1;
-            u8 i;
             u8 noise_bit;
             u8 amp;
             s16 mag;
-            /* LFSR 推进 12 次 (高频白噪, 无周期无金属音) */
-            for (i = 0; i < 12; i++) {
-                if (ym_sd_lfsr & 1) ym_sd_lfsr ^= 0x800200;
-                ym_sd_lfsr >>= 1;
-            }
+            /* LFSR 推进 1 次 (极省算力, 3指令: 避免12次推进卡 ISR) */
+            if (ym_sd_lfsr & 1) ym_sd_lfsr ^= 0x800200;
+            ym_sd_lfsr >>= 1;
             noise_bit = ym_sd_lfsr & 1;
             /* 对数幅度 (linear_db) */
             amp = ym_sd_amp[d->level];
             /* noise_bit=1: ±amp, noise_bit=0: ±amp/30 (泄漏, emu to_linear 近零值) */
             mag = (noise_bit) ? amp : (amp / 30);
-            /* vol 由 reg 0x37 低4位实时更新 */
+            /* vol 由 reg 0x37 低4位实时更新 (base_vol=8, 软件包络响应) */
             mag = (mag * d->vol) >> 3;
             out = sq_bit ? -mag : mag;
             if (out > 127) out = 127;
